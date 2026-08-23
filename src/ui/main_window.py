@@ -605,7 +605,8 @@ class MainWindow(QMainWindow):
         lv = QVBoxLayout(left); lv.setContentsMargins(6, 6, 6, 6); lv.setSpacing(6)
 
         # (1) 🎮 存档 Profiles 树
-        lv.addWidget(QLabel(_("ui.lbl_profiles")))
+        self.lbl_profiles_title = QLabel(_("ui.lbl_profiles"))
+        lv.addWidget(self.lbl_profiles_title)
         self.tree_profiles = QTreeWidget()
         self.tree_profiles.setHeaderHidden(True)
         self.tree_profiles.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -621,9 +622,9 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.btn_load_order)
 
         # (2) 📂 分类文件夹树（资源管理器风格文件夹视图）
-        gb_cat = QGroupBox(_("ui.gb_categories"))
-        gb_cat.setObjectName("gb_categories")
-        vb_cat = QVBoxLayout(gb_cat)
+        self.gb_categories = QGroupBox(_("ui.gb_categories"))
+        self.gb_categories.setObjectName("gb_categories")
+        vb_cat = QVBoxLayout(self.gb_categories)
         self.tree_categories = QTreeWidget()
         self.tree_categories.setHeaderHidden(True)
         self.tree_categories.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -648,12 +649,12 @@ class MainWindow(QMainWindow):
         self.tree_categories.setCurrentItem(self._cat_item_all)
         self._current_filter_cat: str | None = None
         vb_cat.addWidget(self.tree_categories)
-        lv.addWidget(gb_cat, 3)
+        lv.addWidget(self.gb_categories, 3)
 
         # (3) 💾 软链接 GroupBox
-        gb = QGroupBox(_("ui.gb_symlink"))
-        gb.setObjectName("gb_symlink")
-        vb = QVBoxLayout(gb)
+        self.gb_symlink = QGroupBox(_("ui.gb_symlink"))
+        self.gb_symlink.setObjectName("gb_symlink")
+        vb = QVBoxLayout(self.gb_symlink)
         self.lbl_link_status = QLabel(_("ui.link_checking"))
         self.lbl_link_status.setWordWrap(True)
         vb.addWidget(self.lbl_link_status)
@@ -669,7 +670,7 @@ class MainWindow(QMainWindow):
         self.btn_unlink.clicked.connect(self._on_unlink_restore)
         row.addWidget(self.btn_relocate); row.addWidget(self.btn_unlink)
         vb.addLayout(row)
-        lv.addWidget(gb)
+        lv.addWidget(self.gb_symlink)
         splitter.addWidget(left)
         splitter.setStretchFactor(0, 1)
 
@@ -822,6 +823,7 @@ class MainWindow(QMainWindow):
         btn_save.setMenu(m_save); tb.addWidget(btn_save)
         # 保留工具栏动作引用供 retranslate 遍历
         self._tb_toolbuttons = [btn_mods, btn_prio, btn_save]
+        self._tb_toolbars = [tb]  # 缓存工具栏引用，避免 findChildren 遍历
         # ---- 搜索框（右对齐）----
         tb.addSeparator()
         spacer = QWidget(); spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -840,6 +842,7 @@ class MainWindow(QMainWindow):
         try:
             mb = self.menuBar()
             lang_menu = mb.addMenu(_("menu.lang"))
+            self._lang_menus = [lang_menu]  # 缓存语言菜单引用
             from PySide6.QtGui import QActionGroup
             ag = QActionGroup(self)
             ag.setExclusive(True)
@@ -868,92 +871,122 @@ class MainWindow(QMainWindow):
         self._retranslate_all_ui()
 
     def _retranslate_all_ui(self):
-        """语言切换后刷新所有控件文本"""
-        # 标题
-        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
-        # 表格列头
-        self.table.setHorizontalHeaderLabels([
-            _("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"),
-            _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"
-        ])
-        # 按钮
+        """语言切换后刷新所有控件文本（优化版：禁用更新避免重绘卡顿）"""
+        from PySide6.QtWidgets import QApplication
+        # 禁用所有表格更新，避免重绘卡顿
+        tables = [self.table, self.table_all, self.table_active]
+        for t in tables:
+            try:
+                t.setUpdatesEnabled(False)
+                t.blockSignals(True)
+            except Exception:
+                pass
+        
         try:
-            self.btn_load_order.setText(_("ui.btn_load_order"))
-            self.btn_repair.setText(_("ui.btn_repair"))
-            self.btn_relocate.setText(_("ui.btn_relocate"))
-            self.btn_unlink.setText(_("ui.btn_unlink"))
-        except Exception:
-            pass
-        # 左栏：QLabel / QGroupBox 标题（优先用 objectName，fallback 到文本匹配）
-        try:
-            lbl_profiles = self.findChild(QLabel, "lbl_profiles_title")
-            if lbl_profiles:
-                lbl_profiles.setText(_("ui.lbl_profiles"))
-            else:
-                for lbl in self.findChildren(QLabel):
-                    t = lbl.text()
-                    if "<b>" in t and ("Profiles" in t or "存档" in t or "📁" in t):
-                        lbl.setText(_("ui.lbl_profiles")); break
-            gb_cats = self.findChild(QGroupBox, "gb_categories")
-            if gb_cats:
-                gb_cats.setTitle(_("ui.gb_categories"))
-            gb_sym = self.findChild(QGroupBox, "gb_symlink")
-            if gb_sym:
-                gb_sym.setTitle(_("ui.gb_symlink"))
-            if not (gb_cats and gb_sym):
-                for gb in self.findChildren(QGroupBox):
-                    t = gb.title()
-                    if not gb_cats and ("分类" in t or "Category" in t or "过滤" in t or "filter" in t or "点击" in t):
-                        gb.setTitle(_("ui.gb_categories"))
-                    elif not gb_sym and ("Mod 目录" in t or "Mod Dir" in t or "迁移" in t or "Migration" in t or "软链接" in t):
-                        gb.setTitle(_("ui.gb_symlink"))
-        except Exception:
-            pass
-        # 刷新详情面板默认文本 + 软链接状态
-        try:
-            self.preview.setText(_("ui.preview_empty"))
-            self.lbl_title.setText(_("ui.lbl_no_mod"))
-            self.lbl_meta.setText(_("ui.lbl_meta_dash"))
-            self.txt_desc.setPlaceholderText(_("ui.ph_desc"))
-            self._update_link_status()
-        except Exception:
-            pass
-        # 刷新分类树（含计数）
-        try:
-            from services.category_service import stats
-            st = stats()
-            total = sum(st.values())
-            self._cat_item_all.setText(0, _("ui.cat_all") + f"  ({total})")
-            self._cat_item_uncategorized.setText(0, _("ui.cat_uncategorized") + f"  ({st.get('', 0)})")
-            for ck, it in self._cat_items.items():
-                it.setText(0, _("ui.cat_prefix", label=ck) + f"  ({st.get(ck, 0)})")
-        except Exception:
-            pass
-        # 刷新工具栏动作文本（通过 i18n_key 属性查找，兼容所有语言）
-        try:
-            for tb in self.findChildren(QToolBar):
-                for act in tb.actions():
-                    key = act.property("i18n_key")
-                    if key:
-                        act.setText(_(key))
-            # 菜单栏语言项标题
-            for m in self.findChildren(QMenu):
-                title = m.title()
-                if ("语言" in title) or ("Language" in title) or ("Язык" in title) or ("🌐" in title):
-                    m.setTitle(_("menu.lang"))
-        except Exception:
-            pass
-        # 菜单栏中每个语言项的显示名
-        try:
-            for lang, act in getattr(self, "_lang_actions", {}).items():
-                act.setText(language_display_name(lang))
-        except Exception:
-            pass
-        # 状态栏
-        try:
-            self._refresh_status_after_change()
-        except Exception:
-            pass
+            QApplication.processEvents()
+            # 标题
+            self.setWindowTitle(f"{_('app.title')}  v{__version__}")
+            # 表格列头
+            for t in tables:
+                try:
+                    t.setHorizontalHeaderLabels([
+                        _("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"),
+                        _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"
+                    ])
+                except Exception:
+                    pass
+            # 按钮
+            try:
+                self.btn_load_order.setText(_("ui.btn_load_order"))
+                self.btn_repair.setText(_("ui.btn_repair"))
+                self.btn_relocate.setText(_("ui.btn_relocate"))
+                self.btn_unlink.setText(_("ui.btn_unlink"))
+            except Exception:
+                pass
+            # 左栏：QLabel / QGroupBox 标题（直接使用已缓存的控件引用）
+            try:
+                if hasattr(self, 'lbl_profiles_title') and self.lbl_profiles_title:
+                    self.lbl_profiles_title.setText(_("ui.lbl_profiles"))
+                if hasattr(self, 'gb_categories') and self.gb_categories:
+                    self.gb_categories.setTitle(_("ui.gb_categories"))
+                if hasattr(self, 'gb_symlink') and self.gb_symlink:
+                    self.gb_symlink.setTitle(_("ui.gb_symlink"))
+            except Exception:
+                pass
+            # 刷新详情面板默认文本 + 软链接状态
+            try:
+                self.preview.setText(_("ui.preview_empty"))
+                self.lbl_title.setText(_("ui.lbl_no_mod"))
+                self.lbl_meta.setText(_("ui.lbl_meta_dash"))
+                self.txt_desc.setPlaceholderText(_("ui.ph_desc"))
+                # 不调用 _update_link_status() - 软链接状态不会因语言切换改变
+                # 仅更新标签文字（不重新检测）
+                try:
+                    st = self.symlink.get_status() if hasattr(self, 'symlink') and self.symlink else {}
+                    kind = st.get("kind", "")
+                    link = st.get("link", "")
+                    target = st.get("target")
+                    msg_map = {
+                        "normal": _("sym.normal", link=link),
+                        "real_dir": _("sym.normal", link=link),
+                        "junction": _("sym.junction", link=link, target=target or ""),
+                        "symlink": _("sym.symlink", link=link, target=target or ""),
+                        "symlink_broken": _("sym.broken", link=link),
+                        "not_found": _("sym.not_found"),
+                        "missing": _("sym.not_found"),
+                    }
+                    msg = msg_map.get(kind, _("sym.status_unknown", kind=kind, st=st))
+                    self.lbl_link_status.setText(msg)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # 刷新分类树（含计数）
+            try:
+                from services.category_service import stats
+                st = stats()
+                total = sum(st.values())
+                self._cat_item_all.setText(0, _("ui.cat_all") + f"  ({total})")
+                self._cat_item_uncategorized.setText(0, _("ui.cat_uncategorized") + f"  ({st.get('', 0)})")
+                for ck, it in self._cat_items.items():
+                    it.setText(0, _("ui.cat_prefix", label=ck) + f"  ({st.get(ck, 0)})")
+            except Exception:
+                pass
+            # 刷新工具栏动作文本（直接遍历已知工具栏列表）
+            try:
+                for tb in getattr(self, '_tb_toolbars', []):
+                    if tb and tb.isVisible():
+                        for act in tb.actions():
+                            key = act.property("i18n_key")
+                            if key:
+                                act.setText(_(key))
+                # 菜单栏语言项标题 - 直接更新已知语言菜单
+                for m in getattr(self, '_lang_menus', []):
+                    if m:
+                        m.setTitle(_("menu.lang"))
+            except Exception:
+                pass
+            # 菜单栏中每个语言项的显示名
+            try:
+                for lang, act in getattr(self, "_lang_actions", {}).items():
+                    act.setText(language_display_name(lang))
+            except Exception:
+                pass
+            # 状态栏
+            try:
+                QApplication.processEvents()
+                self._refresh_status_after_change()
+            except Exception:
+                pass
+        finally:
+            # 恢复表格更新
+            for t in tables:
+                try:
+                    t.blockSignals(False)
+                    t.setUpdatesEnabled(True)
+                    t.viewport().update()
+                except Exception:
+                    pass
     # ---------- 启动：扫描模组 + 填 Profiles 列表 + 软链接状态 ----------
     
     def _async_check_update(self):
