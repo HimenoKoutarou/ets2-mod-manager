@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.class
@@ -47,3 +47,6 @@ _dbg*.py
 _dump_*.py
 _*.txt
 _*.py
+
+# User config / runtime preferences
+config/

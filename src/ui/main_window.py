@@ -54,6 +54,35 @@ from services.update_service import UpdateService
 
 # ---------------------------------------------------------------------------
 #  启动加载屏（SplashScreen）——扫描期间显示，禁止主窗口交互
+class _LangSwitchDialog(QDialog):
+    """语言切换期间的模态遮罩弹窗，阻止用户操作直到刷新完成。"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setModal(True)
+        self.setFixedSize(420, 220)
+        outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0)
+        card = QFrame(); card.setObjectName("langSwitchCard")
+        card.setStyleSheet("QFrame#langSwitchCard{background:#ffffff; border:1px solid #d0d7de; border-radius:12px;}")
+        cv = QVBoxLayout(card); cv.setContentsMargins(28,24,28,24); cv.setSpacing(14)
+        t = QLabel("🌐 " + _("ui.lang_switch_title"))
+        f = QFont(); f.setPointSize(14); f.setBold(True); t.setFont(f)
+        cv.addWidget(t)
+        m = QLabel(_("ui.lang_switch_msg")); m.setWordWrap(True); m.setStyleSheet("color:#444")
+        cv.addWidget(m)
+        bar = QProgressBar(); bar.setRange(0,0); bar.setTextVisible(False); bar.setFixedHeight(6)
+        bar.setStyleSheet("QProgressBar{background:#eef2f7;border:none;border-radius:3px;}QProgressBar::chunk{background:#2da44e;border-radius:3px;}")
+        cv.addWidget(bar)
+        tip = QLabel(_("ui.lang_switch_tip")); tip.setStyleSheet("color:#666; font-size:12px;")
+        cv.addWidget(tip)
+        outer.addWidget(card)
+    def close_it(self):
+        try:
+            self.accept()
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 class SplashScreen(QWidget):
     """专业启动加载屏：显示详细扫描进度和当前任务。"""
@@ -857,35 +886,38 @@ class MainWindow(QMainWindow):
             pass
 
     def _do_switch_language(self, lang: str):
-        """切换语言：极简实现，使用 QTimer 延迟刷新避免阻塞菜单事件处理。"""
+        """切换语言：弹出模态遮罩 → 切换 → 分三批刷新 → 关闭遮罩。"""
         if lang not in ("zh_CN", "en_US", "ru_RU"):
             return
-        # 1. 更新内部语言变量（不通过 signal，直接修改）
-        import services.i18n_service as _i18n
-        with _i18n._LOCK:
-            if _i18n._CURRENT_LANG == lang:
-                return
-            _i18n._CURRENT_LANG = lang
-            _i18n._load_dict(lang)
-        # 2. 先更新菜单勾选状态（blockSignals 防止触发新事件）
+        # 使用官方API切换语言（内部已处理锁和缓存 + 持久化）
+        changed = set_language(lang, emit=False)
+        if not changed:
+            return
+        # 更新菜单勾选状态
         for l, act in getattr(self, "_lang_actions", {}).items():
             act.blockSignals(True)
             act.setChecked(l == lang)
             act.blockSignals(False)
-        # 3. 立即更新窗口标题（这步必须同步）
-        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
-        # 4. 用 QTimer 延迟刷新其余UI（在菜单事件处理完成后的下一次事件循环中执行）
+        # 弹出模态遮罩（非阻塞事件循环的 show + processEvents 方式）
+        dlg = _LangSwitchDialog(self)
+        if self.isVisible():
+            fg = self.frameGeometry()
+            cp = fg.center()
+            dlg.move(cp.x() - dlg.width() // 2, cp.y() - dlg.height() // 2)
+        dlg.show()
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        # 分四批刷新，最后一批关闭遮罩
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(50, self._do_language_refresh)
-    
+        QTimer.singleShot(0, self._retranslate_phase1)
+        QTimer.singleShot(30, self._retranslate_phase2)
+        QTimer.singleShot(100, self._retranslate_phase3)
+        QTimer.singleShot(260, dlg.close_it)
+
     def _do_language_refresh(self):
-        """延迟刷新UI（非关键部分放到这里执行）。"""
-        try:
-            self._retranslate_all_ui()
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-    
+        """兼容保留：刷新工作已在 _do_switch_language 中分批调度。"""
+        pass
+
     def _on_language_changed(self, lang: str):
         """保留兼容接口：由 i18n 系统外部触发的语言变化。"""
         if getattr(self, '_lang_switching', False):
@@ -895,6 +927,170 @@ class MainWindow(QMainWindow):
             self._do_switch_language(lang)
         finally:
             self._lang_switching = False
+
+    def _retranslate_phase1(self):
+        """第1批刷新：窗口标题 + 工具栏（QAction/QToolButton/递归子QMenu）+ 语言菜单。"""
+        try:
+            # 1. 窗口标题
+            self.setWindowTitle(f"{_('app.title')}  v{__version__}")
+        except Exception:
+            pass
+        try:
+            def _retranslate_menu(m):
+                """递归翻译一个菜单的 title、它的 actions 以及子菜单。"""
+                try:
+                    if m is None:
+                        return
+                    key = m.property("i18n_key")
+                    if key:
+                        m.setTitle(_(key))
+                    for act in m.actions():
+                        if act is None:
+                            continue
+                        k = act.property("i18n_key")
+                        if k:
+                            act.setText(_(k))
+                        sub = act.menu()
+                        if sub is not None:
+                            _retranslate_menu(sub)
+                except Exception:
+                    pass
+            for tb in getattr(self, "_tb_toolbars", []):
+                if tb is None:
+                    continue
+                # 顶层 actions + 各自关联的子菜单
+                for act in tb.actions():
+                    if act is None:
+                        continue
+                    k = act.property("i18n_key")
+                    if k:
+                        act.setText(_(k))
+                    sub = act.menu()
+                    if sub is not None:
+                        _retranslate_menu(sub)
+                # _tb_toolbuttons：3 个 QToolButton（模组操作 / 优先级 / 保存）
+                for btn in getattr(self, "_tb_toolbuttons", []):
+                    try:
+                        if btn is None:
+                            continue
+                        k = btn.property("i18n_key")
+                        if k:
+                            btn.setText(_(k))
+                        bm = btn.menu()
+                        if bm is not None:
+                            _retranslate_menu(bm)
+                    except Exception:
+                        pass
+                # 兜底：toolbar 上的所有 widget
+                try:
+                    for i in range(tb.count()):
+                        w = tb.widgetForAction(tb.actions()[i]) if i < len(tb.actions()) else None
+                        if w is None:
+                            continue
+                        if hasattr(w, "property") and hasattr(w, "setText"):
+                            k = w.property("i18n_key")
+                            if k:
+                                try:
+                                    w.setText(_(k))
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            # 3. 语言菜单：title + 语言项显示名
+            for m in getattr(self, "_lang_menus", []):
+                if m:
+                    m.setTitle(_("menu.lang"))
+            for lang, act in getattr(self, "_lang_actions", {}).items():
+                act.setText(language_display_name(lang))
+        except Exception:
+            pass
+
+    def _retranslate_phase2(self):
+        """第2批刷新：左栏标签 + 搜索框 + Tab页签 + 详情面板 + 软链接面板。"""
+        try:
+            # 左栏标签
+            if hasattr(self, 'lbl_profiles_title') and self.lbl_profiles_title is not None:
+                self.lbl_profiles_title.setText(_("ui.lbl_profiles"))
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'gb_categories') and self.gb_categories is not None:
+                self.gb_categories.setTitle(_("ui.gb_categories"))
+        except Exception:
+            pass
+        try:
+            # 搜索框 placeholder
+            if hasattr(self, 'search_input') and self.search_input is not None:
+                self.search_input.setPlaceholderText(_("ui.search_ph"))
+        except Exception:
+            pass
+        try:
+            # Tab页签
+            if hasattr(self, 'tabs') and self.tabs is not None:
+                tab_labels = [_("ui.tab_active"), _("ui.tab_all")]
+                for i, txt in enumerate(tab_labels):
+                    if i < self.tabs.count():
+                        self.tabs.setTabText(i, txt)
+        except Exception:
+            pass
+        try:
+            # 详情面板
+            if hasattr(self, 'gb_detail') and self.gb_detail is not None:
+                self.gb_detail.setTitle(_("ui.gb_detail"))
+            lbl_map = [
+                ('lbl_det_title', _("ui.det_title")),
+                ('lbl_det_author', _("ui.det_author")),
+                ('lbl_det_version', _("ui.det_version")),
+                ('lbl_det_size', _("ui.det_size")),
+                ('lbl_det_source', _("ui.det_source")),
+                ('lbl_det_game', _("ui.det_game")),
+                ('lbl_det_desc', _("ui.det_desc")),
+            ]
+            for attr_name, txt in lbl_map:
+                if hasattr(self, attr_name):
+                    w = getattr(self, attr_name)
+                    if w is not None and hasattr(w, 'setText'):
+                        w.setText(txt)
+        except Exception:
+            pass
+        try:
+            # 软链接面板
+            if hasattr(self, 'gb_symlink') and self.gb_symlink is not None:
+                self.gb_symlink.setTitle(_("ui.gb_symlink"))
+            if hasattr(self, 'lbl_sl_status') and self.lbl_sl_status is not None:
+                self.lbl_sl_status.setText(_("ui.sl_status"))
+            if hasattr(self, 'btn_sl_fix') and self.btn_sl_fix is not None:
+                self.btn_sl_fix.setText(_("ui.btn_sl_fix"))
+        except Exception:
+            pass
+
+    def _retranslate_phase3(self):
+        """第3批刷新：表格列头 + 状态栏 + 其他杂项。"""
+        try:
+            # 状态栏
+            self._refresh_status_after_change()
+        except Exception:
+            pass
+        try:
+            # 表格列头
+            tables = [getattr(self, 'table', None), getattr(self, 'table_all', None), getattr(self, 'table_active', None)]
+            labels = [
+                _("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"),
+                _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"
+            ]
+            for t in tables:
+                try:
+                    if t is not None:
+                        t.blockSignals(True)
+                        t.setHorizontalHeaderLabels(labels)
+                        t.blockSignals(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _retranslate_all_ui(self):
         """语言切换后刷新UI文本（极简版：不操作表格，只更新非表格控件）"""
