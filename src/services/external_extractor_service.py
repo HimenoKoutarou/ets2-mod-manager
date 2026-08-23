@@ -1,5 +1,12 @@
 """
 外部解包工具服务
+
+使用以下社区开源工具解密 ETS2 加密模组包：
+  - extract.exe  (aka extractor.exe) — CracksVault Ultimate SCS Unpacker Kit v1.1.2
+    https://github.com/CracksVault/Ultimate-SCS-Unpacker-Kit
+  - sxc64.exe    — Truck Tools / sxc
+    https://github.com/sibwrangler/truck-tools
+
 用 extractor.exe / sxc64.exe 解 SCS# (HashFS) / AEM! / 加密 ZIP 格式的 mod 包，
 提取 manifest.sii（及按需提取 icon/description）。
 
@@ -11,6 +18,9 @@
 性能策略（单文件提取，避免全量解包大包耗时）：
   - extract_manifest_text: 只提取 manifest.sii，磁盘缓存 30 天 TTL
   - extract_file_bytes: 只提取目标文件，进程内缓存（同进程内不重复提取同文件）
+
+Credit: 感谢 CracksVault 和 Truck Tools/sxc 项目的作者，
+以及 Euro Truck Simulator 2 社区所有逆向工程贡献者。
 """
 from __future__ import annotations
 

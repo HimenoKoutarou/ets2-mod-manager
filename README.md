@@ -71,8 +71,22 @@ src/
 - **Stage 3**：UI 层（主窗口 / 拖拽列表 / 详情面板 / 批量工具栏）
 - **Stage 4**：集成测试 + PyInstaller 打包
 
+
+## 🙏 Credits / 致谢
+
+本项目集成了以下社区开源工具，用于解密和提取 ETS2 加密模组包：
+
+| 工具 | 作者 / 来源 | 用途 |
+|---|---|---|
+| **extractor.exe** | CracksVault — [Ultimate SCS Unpacker Kit v1.1.2](https://github.com/CracksVault/Ultimate-SCS-Unpacker-Kit) | 解析 SCS# (HashFS) 格式模组包 |
+| **sxc64.exe** | [Truck Tools](https://github.com/sibwrangler/truck-tools) / sxc | 解析 AEM! / 加密 ZIP 格式模组包 |
+| **SII_Decrypt.exe** | 社区工具（kosker / ...） | 解密 ETS2 的 profile.sii / controls.sii 等加密存档文件 |
+
+特别感谢以上工具的作者和 Euro Truck Simulator 2 社区的逆向工程贡献者们，
+让我们能够自由管理自己的模组收藏。
 ## ⚠️ 注意事项
 
 1. **profile.sii 默认是加密格式**，读写需要社区工具 `SII_Decrypt.exe`（放在 `assets/bin/` 下即可自动调用）。如果不想解密，也可以只用本程序做「预设方案管理」，不写入真实存档。
 2. **软链接功能**：优先使用 **Junction（目录联接）** 实现，不需要开启 Windows 开发者模式或管理员权限；如果 Junction 创建失败会自动回退到 Symlink。
 3. **写入存档前务必备份**：本程序已内置自动备份，但仍建议你首次使用时手动复制一份 `profile.sii` 到安全位置。
+
