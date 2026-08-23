@@ -548,6 +548,7 @@ class MainWindow(QMainWindow):
         self.current_profile: Optional[ProfileInfo] = None
         self.profiles: List[ProfileInfo] = []
         self._current_filter_cat: str | None = None
+        self._profile_fill_pending: bool = False
         self._all_mods_by_id: dict[str, object] = {}
         self._profile_tree_items: dict[str, QTreeWidgetItem] = {}
         self._cat_items: dict[str, QTreeWidgetItem] = {}
@@ -1176,6 +1177,7 @@ class MainWindow(QMainWindow):
             self._refresh_category_counts()
         except Exception:
             pass
+        self._profile_fill_pending = False
         if self.current_profile:
             self._fill_table_for_profile(self.current_profile)
         # 立即保存会话 + 快速扫描快照（下次启动直接恢复不用扫）
@@ -1311,6 +1313,7 @@ class MainWindow(QMainWindow):
             self._refresh_category_counts()
         except Exception:
             pass
+        self._profile_fill_pending = False
         if self.current_profile:
             self._fill_table_for_profile(self.current_profile)
         # 算新 mod：和上次会话对比（逻辑与真实扫描时一致）
@@ -1574,9 +1577,11 @@ class MainWindow(QMainWindow):
 
     def _fill_table_impl(self, prof: ProfileInfo):
         # 快速扫描未完成时（all_mods 为空 / priority_svc 未就绪），跳过填表格
-        # 扫描完成后 _on_quick_scan_result 会自动再次调用 _fill_table_for_profile
+        # 设置 _profile_fill_pending 标志，数据就绪后自动填充
         if not self.all_mods or not self.all_mods_by_pkg or self.priority_svc is None:
+            self._profile_fill_pending = True
             return
+        self._profile_fill_pending = False
         try:
             active = self.profile_svc.get_active_mods(prof)
         except Exception as e:
