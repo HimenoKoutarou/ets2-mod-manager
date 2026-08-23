@@ -960,8 +960,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QThread
         
         class UpdateCheckThread(QThread):
-            def __init__(self, update_svc):
-                super().__init__()
+            def __init__(self, update_svc, parent=None):
+                super().__init__(parent)
                 self._update_svc = update_svc
             
             def run(self):
