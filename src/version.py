@@ -1,0 +1,5 @@
+﻿__version__ = '1.0.0'
+__app_name__ = 'ETS2 Mod Manager'
+__author__ = 'Himeno Sena'
+__repo_url__ = 'https://github.com/HimenoKoutarou/ets2-mod-manager'
+__release_api__ = 'https://api.github.com/repos/HimenoKoutarou/ets2-mod-manager/releases'

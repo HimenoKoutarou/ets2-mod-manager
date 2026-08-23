@@ -78,9 +78,9 @@ src/
 
 | 工具 | 作者 / 来源 | 用途 |
 |---|---|---|
-| **extractor.exe** | CracksVault — [Ultimate SCS Unpacker Kit v1.1.2](https://github.com/CracksVault/Ultimate-SCS-Unpacker-Kit) | 解析 SCS# (HashFS) 格式模组包 |
-| **sxc64.exe** | [Truck Tools](https://github.com/sibwrangler/truck-tools) / sxc | 解析 AEM! / 加密 ZIP 格式模组包 |
-| **SII_Decrypt.exe** | 社区工具（kosker / ...） | 解密 ETS2 的 profile.sii / controls.sii 等加密存档文件 |
+| **Extractor** (extractor.exe) | sk-zk — [github.com/sk-zk/Extractor](https://github.com/sk-zk/Extractor) | 解析 SCS# (HashFS) 格式模组包。CracksVault (CrVault) 将其打包分发在 Ultimate SCS Unpacker Kit 中 |
+| **SXC Extractor** (sxc64.exe) | madman271 — [SCS Forum 发布帖](https://forum.scssoft.com/viewtopic.php?t=276948) | 解析 AEM! / 加密 ZIP 格式模组包。贡献者：Coal_Bucket_Outlaw, deTbiT, knox_xss, luukf8, salessao2, xXCARL1992Xx |
+| **SII_Decrypt** (SII_Decrypt.exe) | TheLazyTomcat — [SII_Decrypt](https://github.com/TheLazyTomcat/SII_Decrypt) | 解密 ETS2 的 profile.sii / controls.sii 等加密存档文件 |
 
 特别感谢以上工具的作者和 Euro Truck Simulator 2 社区的逆向工程贡献者们，
 让我们能够自由管理自己的模组收藏。

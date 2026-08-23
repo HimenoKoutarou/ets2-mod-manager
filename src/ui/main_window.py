@@ -47,6 +47,7 @@ from services.backup_service import BackupService
 from services.profile_service import ProfileService, ProfileInfo
 from services.priority_service import PriorityService
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
+from version import __version__
 
 
 
@@ -523,7 +524,7 @@ class ModTable(QTableWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(_("app.title"))
+        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
         self.resize(1280, 780)
         # 设置窗口图标
         icon_path = Path(__file__).resolve().parent.parent.parent / "assets" / "app_icon.png"
@@ -857,7 +858,7 @@ class MainWindow(QMainWindow):
     def _retranslate_all_ui(self):
         """语言切换后刷新所有控件文本"""
         # 标题
-        self.setWindowTitle(_("app.title"))
+        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
         # 表格列头
         self.table.setHorizontalHeaderLabels([
             _("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"),

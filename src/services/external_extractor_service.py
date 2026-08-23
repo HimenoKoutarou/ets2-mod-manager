@@ -2,10 +2,11 @@
 外部解包工具服务
 
 使用以下社区开源工具解密 ETS2 加密模组包：
-  - extract.exe  (aka extractor.exe) — CracksVault Ultimate SCS Unpacker Kit v1.1.2
-    https://github.com/CracksVault/Ultimate-SCS-Unpacker-Kit
-  - sxc64.exe    — Truck Tools / sxc
-    https://github.com/sibwrangler/truck-tools
+  - Extractor (extractor.exe) — sk-zk
+    https://github.com/sk-zk/Extractor
+    (打包分发于 CracksVault Ultimate SCS Unpacker Kit v1.1.2)
+  - SXC Extractor (sxc64.exe) — madman271
+    https://forum.scssoft.com/viewtopic.php?t=276948
 
 用 extractor.exe / sxc64.exe 解 SCS# (HashFS) / AEM! / 加密 ZIP 格式的 mod 包，
 提取 manifest.sii（及按需提取 icon/description）。
