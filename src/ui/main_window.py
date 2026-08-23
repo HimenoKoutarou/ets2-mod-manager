@@ -588,11 +588,12 @@ class MainWindow(QMainWindow):
         # 启动后扫描
         QTimer.singleShot(50, self._bootstrap)
 
-        # 语言切换通知 → 刷新 UI
+        # 语言切换通知 → 刷新 UI（已在 _do_switch_language 中处理，保留用于外部触发）
         try:
             I18nNotifier.instance().languageChanged.connect(self._on_language_changed)
         except Exception:
             pass
+        self._lang_switching = False  # 防止重入标志
 
     # ---------- UI 构建 ----------
     def _build_ui(self):
@@ -838,155 +839,118 @@ class MainWindow(QMainWindow):
 
 
     def _build_menubar(self):
-        """顶部菜单栏：语言切换"""
+        """顶部菜单栏：语言切换（简化版，避免 QActionGroup 信号循环）"""
         try:
             mb = self.menuBar()
             lang_menu = mb.addMenu(_("menu.lang"))
-            self._lang_menus = [lang_menu]  # 缓存语言菜单引用
-            from PySide6.QtGui import QActionGroup
-            ag = QActionGroup(self)
-            ag.setExclusive(True)
+            self._lang_menus = [lang_menu]
             self._lang_actions = {}
             for lang in available_languages():
                 act = lang_menu.addAction(language_display_name(lang))
                 act.setCheckable(True)
                 if lang == current_language():
                     act.setChecked(True)
+                # 直接连接，不经过 QActionGroup
                 act.triggered.connect(lambda _c=False, l=lang: self._do_switch_language(l))
-                ag.addAction(act)
                 self._lang_actions[lang] = act
         except Exception:
             pass
 
     def _do_switch_language(self, lang: str):
-        if set_language(lang, emit=True):
-            # _on_language_changed 由信号触发，会调用 _retranslate_all_ui
-            # 这里只需更新勾选状态，不重复调用 retranslate
-            for l, act in getattr(self, "_lang_actions", {}).items():
-                act.setChecked(l == lang)
-
-    def _on_language_changed(self, lang: str):
+        """切换语言：极简实现，使用 QTimer 延迟刷新避免阻塞菜单事件处理。"""
+        if lang not in ("zh_CN", "en_US", "ru_RU"):
+            return
+        # 1. 更新内部语言变量（不通过 signal，直接修改）
+        import services.i18n_service as _i18n
+        with _i18n._LOCK:
+            if _i18n._CURRENT_LANG == lang:
+                return
+            _i18n._CURRENT_LANG = lang
+            _i18n._load_dict(lang)
+        # 2. 先更新菜单勾选状态（blockSignals 防止触发新事件）
         for l, act in getattr(self, "_lang_actions", {}).items():
+            act.blockSignals(True)
             act.setChecked(l == lang)
-        self._retranslate_all_ui()
+            act.blockSignals(False)
+        # 3. 立即更新窗口标题（这步必须同步）
+        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
+        # 4. 用 QTimer 延迟刷新其余UI（在菜单事件处理完成后的下一次事件循环中执行）
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(50, self._do_language_refresh)
+    
+    def _do_language_refresh(self):
+        """延迟刷新UI（非关键部分放到这里执行）。"""
+        try:
+            self._retranslate_all_ui()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+    
+    def _on_language_changed(self, lang: str):
+        """保留兼容接口：由 i18n 系统外部触发的语言变化。"""
+        if getattr(self, '_lang_switching', False):
+            return
+        self._lang_switching = True
+        try:
+            self._do_switch_language(lang)
+        finally:
+            self._lang_switching = False
 
     def _retranslate_all_ui(self):
-        """语言切换后刷新所有控件文本（优化版：禁用更新避免重绘卡顿）"""
-        from PySide6.QtWidgets import QApplication
-        # 禁用所有表格更新，避免重绘卡顿
+        """语言切换后刷新UI文本（极简版：不操作表格，只更新非表格控件）"""
+        # 1. 标题
+        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
+        
+        # 2. 工具栏按钮文本
+        try:
+            for tb in getattr(self, '_tb_toolbars', []):
+                if tb:
+                    for act in tb.actions():
+                        key = act.property("i18n_key")
+                        if key:
+                            act.setText(_(key))
+        except Exception:
+            pass
+        
+        # 3. 语言菜单文本
+        try:
+            for m in getattr(self, '_lang_menus', []):
+                if m:
+                    m.setTitle(_("menu.lang"))
+            for lang, act in getattr(self, "_lang_actions", {}).items():
+                act.setText(language_display_name(lang))
+        except Exception:
+            pass
+        
+        # 4. 状态栏
+        try:
+            self._refresh_status_after_change()
+        except Exception:
+            pass
+        
+        # 5. 延迟500ms后再更新表格列头（使用单次定时器，避免阻塞）
+        from PySide6.QtCore import QTimer
+        if not hasattr(self, '_lang_header_timer') or self._lang_header_timer is None:
+            self._lang_header_timer = QTimer(self)
+            self._lang_header_timer.setSingleShot(True)
+            self._lang_header_timer.timeout.connect(self._do_header_retranslate)
+        self._lang_header_timer.start(500)
+    
+    def _do_header_retranslate(self):
+        """单独更新表格列头（延迟执行，避免与语言切换事件冲突）。"""
         tables = [self.table, self.table_all, self.table_active]
+        labels = [
+            _("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"),
+            _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"
+        ]
         for t in tables:
             try:
-                t.setUpdatesEnabled(False)
-                t.blockSignals(True)
-            except Exception:
-                pass
-        
-        try:
-            QApplication.processEvents()
-            # 标题
-            self.setWindowTitle(f"{_('app.title')}  v{__version__}")
-            # 表格列头
-            for t in tables:
-                try:
-                    t.setHorizontalHeaderLabels([
-                        _("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"),
-                        _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"
-                    ])
-                except Exception:
-                    pass
-            # 按钮
-            try:
-                self.btn_load_order.setText(_("ui.btn_load_order"))
-                self.btn_repair.setText(_("ui.btn_repair"))
-                self.btn_relocate.setText(_("ui.btn_relocate"))
-                self.btn_unlink.setText(_("ui.btn_unlink"))
-            except Exception:
-                pass
-            # 左栏：QLabel / QGroupBox 标题（直接使用已缓存的控件引用）
-            try:
-                if hasattr(self, 'lbl_profiles_title') and self.lbl_profiles_title:
-                    self.lbl_profiles_title.setText(_("ui.lbl_profiles"))
-                if hasattr(self, 'gb_categories') and self.gb_categories:
-                    self.gb_categories.setTitle(_("ui.gb_categories"))
-                if hasattr(self, 'gb_symlink') and self.gb_symlink:
-                    self.gb_symlink.setTitle(_("ui.gb_symlink"))
-            except Exception:
-                pass
-            # 刷新详情面板默认文本 + 软链接状态
-            try:
-                self.preview.setText(_("ui.preview_empty"))
-                self.lbl_title.setText(_("ui.lbl_no_mod"))
-                self.lbl_meta.setText(_("ui.lbl_meta_dash"))
-                self.txt_desc.setPlaceholderText(_("ui.ph_desc"))
-                # 不调用 _update_link_status() - 软链接状态不会因语言切换改变
-                # 仅更新标签文字（不重新检测）
-                try:
-                    st = self.symlink.get_status() if hasattr(self, 'symlink') and self.symlink else {}
-                    kind = st.get("kind", "")
-                    link = st.get("link", "")
-                    target = st.get("target")
-                    msg_map = {
-                        "normal": _("sym.normal", link=link),
-                        "real_dir": _("sym.normal", link=link),
-                        "junction": _("sym.junction", link=link, target=target or ""),
-                        "symlink": _("sym.symlink", link=link, target=target or ""),
-                        "symlink_broken": _("sym.broken", link=link),
-                        "not_found": _("sym.not_found"),
-                        "missing": _("sym.not_found"),
-                    }
-                    msg = msg_map.get(kind, _("sym.status_unknown", kind=kind, st=st))
-                    self.lbl_link_status.setText(msg)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            # 刷新分类树（含计数）
-            try:
-                from services.category_service import stats
-                st = stats()
-                total = sum(st.values())
-                self._cat_item_all.setText(0, _("ui.cat_all") + f"  ({total})")
-                self._cat_item_uncategorized.setText(0, _("ui.cat_uncategorized") + f"  ({st.get('', 0)})")
-                for ck, it in self._cat_items.items():
-                    it.setText(0, _("ui.cat_prefix", label=ck) + f"  ({st.get(ck, 0)})")
-            except Exception:
-                pass
-            # 刷新工具栏动作文本（直接遍历已知工具栏列表）
-            try:
-                for tb in getattr(self, '_tb_toolbars', []):
-                    if tb and tb.isVisible():
-                        for act in tb.actions():
-                            key = act.property("i18n_key")
-                            if key:
-                                act.setText(_(key))
-                # 菜单栏语言项标题 - 直接更新已知语言菜单
-                for m in getattr(self, '_lang_menus', []):
-                    if m:
-                        m.setTitle(_("menu.lang"))
-            except Exception:
-                pass
-            # 菜单栏中每个语言项的显示名
-            try:
-                for lang, act in getattr(self, "_lang_actions", {}).items():
-                    act.setText(language_display_name(lang))
-            except Exception:
-                pass
-            # 状态栏
-            try:
-                QApplication.processEvents()
-                self._refresh_status_after_change()
-            except Exception:
-                pass
-        finally:
-            # 恢复表格更新
-            for t in tables:
-                try:
+                if t is not None:
+                    t.blockSignals(True)
+                    t.setHorizontalHeaderLabels(labels)
                     t.blockSignals(False)
-                    t.setUpdatesEnabled(True)
-                    t.viewport().update()
-                except Exception:
-                    pass
+            except Exception:
+                pass
     # ---------- 启动：扫描模组 + 填 Profiles 列表 + 软链接状态 ----------
     
     def _async_check_update(self):
