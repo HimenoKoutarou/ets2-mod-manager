@@ -229,5 +229,11 @@
   "ui.sb_cat_no_profile": "Please select a profile first",
   "splash.phase_init": "Initializing...",
   "splash.footer": "ETS2 Mod Manager v1.0 · By Himeno Sena",
-  "splash.first_scan_warn": "First-time parsing of encrypted mod packages takes longer (10-30s). Please wait patiently. Do not close the program or interact with the main window during this period."
+  "splash.first_scan_warn": "First-time parsing of encrypted mod packages takes longer (10-30s). Please wait patiently. Do not close the program or interact with the main window during this period.",
+  "update.title": "Update",
+  "update.available": "New version {version} found!\nDownload and install now?",
+  "update.up_to_date": "You are using the latest version",
+  "update.error": "Update error: {msg}",
+  "update.download_done": "Download complete, installing...",
+  "update.install_done": "New version installed at:\n{dir}\n\nPlease restart the application to complete the update."
 }

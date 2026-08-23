@@ -28,6 +28,7 @@ _DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 def _parse_version(v: str) -> tuple:
     """将版本字符串解析为可比较的元组（如 '1.2.3' -> (1, 2, 3)）。"""
+    v = v.lstrip("v")
     parts: list[int] = []
     for seg in v.split("."):
         num = ""

@@ -229,5 +229,11 @@
   "ui.sb_cat_no_profile": "请先在左栏选择一个存档再进行操作",
   "splash.phase_init": "初始化中...",
   "splash.footer": "ETS2 Mod Manager v1.0 · By Himeno Sena",
-  "splash.first_scan_warn": "首次解析加密模组包需要较长时间（10-30秒），请耐心等待，期间请勿关闭程序或操作主界面。"
+  "splash.first_scan_warn": "首次解析加密模组包需要较长时间（10-30秒），请耐心等待，期间请勿关闭程序或操作主界面。",
+  "update.title": "程序更新",
+  "update.available": "发现新版本 {version}！\n是否现在下载并安装？",
+  "update.up_to_date": "当前已是最新版本",
+  "update.error": "更新错误：{msg}",
+  "update.download_done": "下载完成，正在安装...",
+  "update.install_done": "新版本已安装到：\n{dir}\n\n请重启程序以完成更新。"
 }

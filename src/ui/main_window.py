@@ -48,6 +48,7 @@ from services.profile_service import ProfileService, ProfileInfo
 from services.priority_service import PriorityService
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
 from version import __version__
+from services.update_service import UpdateService
 
 
 
@@ -562,6 +563,16 @@ class MainWindow(QMainWindow):
         self._search_keyword: str = ""
         self._current_mod_tab: str = "all"   # "all" | "active"
 
+        # 自动更新服务
+        self.update_svc = UpdateService(proxy_url="http://127.0.0.1:7897")
+        self.update_svc.update_available.connect(self._on_update_available)
+        self.update_svc.no_update_needed.connect(self._on_no_update_needed)
+        self.update_svc.error_occurred.connect(self._on_update_error)
+        self.update_svc.status_changed.connect(self._on_update_status_changed)
+        self.update_svc.progress.connect(self._on_update_progress)
+        self.update_svc.download_finished.connect(self._on_download_finished)
+        self.update_svc.install_finished.connect(self._on_install_finished)
+
         self._ui_refresh_timer = QTimer(self)
         self._ui_refresh_timer.setInterval(80)
         self._ui_refresh_timer.timeout.connect(self._on_ui_refresh_timer)
@@ -943,6 +954,71 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
     # ---------- 启动：扫描模组 + 填 Profiles 列表 + 软链接状态 ----------
+    
+    def _async_check_update(self):
+        """异步检查更新（在后台线程中运行）。"""
+        from PySide6.QtCore import QThread
+        
+        class UpdateCheckThread(QThread):
+            def __init__(self, update_svc):
+                super().__init__()
+                self._update_svc = update_svc
+            
+            def run(self):
+                try:
+                    self._update_svc.check_for_update()
+                except Exception:
+                    pass
+        
+        self._update_thread = UpdateCheckThread(self.update_svc, self)
+        self._update_thread.start()
+    
+    def _on_update_available(self, latest_version: str, download_url: str):
+        """发现新版本时的处理。"""
+        from PySide6.QtWidgets import QMessageBox
+        
+        reply = QMessageBox.question(
+            self,
+            _('update.title'),
+            _('update.available', version=latest_version),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        if reply == QMessageBox.Yes:
+            self.update_svc.download_and_install()
+    
+    def _on_no_update_needed(self):
+        """已是最新版本。"""
+        self.statusBar().showMessage(_('update.up_to_date'))
+    
+    def _on_update_error(self, error_msg: str):
+        """更新错误处理。"""
+        self.statusBar().showMessage(_('update.error', msg=error_msg))
+    
+    def _on_update_status_changed(self, status: str):
+        """更新状态变化。"""
+        self.statusBar().showMessage(status)
+    
+    def _on_update_progress(self, current: int, total: int, desc: str):
+        """更新进度。"""
+        if total > 0:
+            self.statusBar().showMessage(f"{desc} ({current}/{total})")
+        else:
+            self.statusBar().showMessage(desc)
+    
+    def _on_download_finished(self, zip_path: str):
+        """下载完成。"""
+        self.statusBar().showMessage(_('update.download_done'))
+    
+    def _on_install_finished(self, install_dir: str):
+        """安装完成。"""
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self,
+            _('update.title'),
+            _('update.install_done', dir=install_dir)
+        )
+
     def _finalize_bootstrap(self):
         """统一收尾：停止UI刷新计时器、关闭Splash、恢复主窗口。"""
         self._stop_ui_refresh_timer()
@@ -954,6 +1030,8 @@ class MainWindow(QMainWindow):
         self.setEnabled(False)
         self._start_ui_refresh_timer()
         self._update_link_status()
+        # 异步检查更新（不阻塞UI）
+        QTimer.singleShot(1000, self._async_check_update)
         try:
             restored = self._scan_all_mods()
             if not restored:
