@@ -1,0 +1,49 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Project cache
+assets/cache/
+
+# External tools
+assets/tools/
+
+# Logs
+*.log
+logs/
+
+# Backup files
+*.bak
+*.tmp
+
+# Temp / debug scripts
+_patch_*.py
+_test_*.py
+_dbg*.py
+_dump_*.py
+_*.txt
+_*.py
