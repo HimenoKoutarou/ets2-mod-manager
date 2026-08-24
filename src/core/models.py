@@ -125,7 +125,7 @@ class Mod:
 
     @property
     def display_title(self) -> str:
-        """多层兜底：display_name → Steam Workshop API（按ID） → 子包名 → 归档名 → Workshop #ID"""
+        """多层兜底：display_name → Steam Workshop API（按ID） → 子包名 → 归档名 → 未命名模组"""
         title = self.manifest.display_name.strip()
         if title and not title.isdigit():
             return title
@@ -183,9 +183,13 @@ class Mod:
                 nice = " ".join(w[:1].upper() + w[1:] if w else w for w in nice.split())
                 if 2 <= len(nice) <= 80:
                     return nice
-        # 兜底 3：如果 mod_id 是纯数字（Workshop ID），格式化为友好显示
+        # 兜底 3：如果 mod_id 是纯数字（Workshop ID），不显示 ID，改用 i18n 未命名模组
         if self.mod_id and self.mod_id.isdigit():
-            return f"Workshop #{self.mod_id}"
+            try:
+                from services.i18n_service import _ as _tr
+                return _tr("mod.unnamed")
+            except Exception:
+                return "未命名模组"
         return self.mod_id
 
     @property

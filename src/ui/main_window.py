@@ -461,8 +461,7 @@ class ModTable(QTableWidget):
     def _mk(text: str, bold=False, color=None, align=Qt.AlignLeft | Qt.AlignVCenter) -> QTableWidgetItem:
         it = QTableWidgetItem(text)
         it.setTextAlignment(align)
-        if bold:
-            f = it.font(); f.setBold(True); it.setFont(f)
+        # 表格统一使用正常字重，不再加粗（bold 参数保留只为兼容旧调用）
         if color is not None:
             it.setForeground(QBrush(QColor(color)))
         return it
@@ -487,7 +486,7 @@ class ModTable(QTableWidget):
         self.setItem(r, COL_ENABLED, chk_item)
         # name + 分类颜色
         name = (mod.display_title if mod else None) or work_entry["package_name"]
-        name_item = self._mk(name, bold=en, color="#000000" if en else "#8a8a8a")
+        name_item = self._mk(name, color="#000000" if en else "#8a8a8a")
         self.setItem(r, COL_NAME, name_item)
         # source
         src_tip = ""
@@ -518,7 +517,7 @@ class ModTable(QTableWidget):
         old_name = self.item(row, COL_NAME)
         if old_name is not None:
             old_name.setText(name)
-            f = old_name.font(); f.setBold(en); old_name.setFont(f)
+            # 不再加粗，仅用颜色区分启用/未启用
             old_name.setForeground(QBrush(QColor("#000000" if en else "#8a8a8a")))
         # version
         vtxt = mod.display_version or "—"

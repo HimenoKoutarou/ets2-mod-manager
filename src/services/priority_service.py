@@ -5,10 +5,11 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence
 from core.models import Mod
 
 
-# 模组优先级：ETS2 的 active_mods[] 顺序是"先出现的 = 先加载 = 优先级低（被后加载覆盖）"
-# 所以"优先级越高（越先被覆盖）"需要排到越靠上（数组 index 越小）。
-# 为了避免对游戏行为做错误假设，我们把语义和 SCS 一致：
-#   ORDER = load order = active_mods[0] → active_mods[N-1]，越后加载优先级越高。
+# 模组优先级：ETS2 的 active_mods[] 顺序 = 游戏内 Mod Manager 列表顺序（从上到下）。
+#   active_mods[0] = 列表第一个 = 最高优先级（覆盖下面的同名文件）；
+#   active_mods[N-1] = 列表最后一个 = 最低优先级（被上面覆盖）。
+# 我们把语义和 SCS 一致：
+#   ORDER = active_mods 中的下标，0 = 最高优先级，越大优先级越低。
 
 PRESET_CATEGORY_MAP = {
     # 预设名：tuple(该预设需要命中的关键词 / 分类)
@@ -79,7 +80,7 @@ class PriorityService:
         产出 [{
             "package_name": str,
             "enabled": bool,          # 是否在 active_mods 中
-            "order": int,             # 加载顺序序号（0=最先），不在列表中 = -1
+            "order": int,             # 优先级序号（0=最高优先级 / 列表第一个），不在列表中 = -1
             "mod": Optional[Mod],
         }, ...]。
         排列规则：先 active_mods 原顺序，然后是"未启用的已知模组"（按 package_name 排）。
