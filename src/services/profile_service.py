@@ -76,13 +76,17 @@ def _derive_scs_key(text_key: str) -> List[int]:
 
 _PROFILE_DEFAULT_KEY = "ScsCryptionIsForSissies!!!!!"
 
-# SCS 文件头 2 种常见签名
-_HEAD_4S = b"Sii\x00"   # Sii NUL
-_HEAD_2H = b"#S"
+# SCS 文件头 3 种常见签名
+_HEAD_4S = b"Sii\x00"   # Sii NUL (旧版)
+_HEAD_2H = b"#S"        # Sii# / AEM! (社区)
+_HEAD_SCSC = b"ScsC"    # 新版 1.50+ ScsCryption (需外部 SII_Decrypt.exe)
+
 
 
 def _looks_encrypted(data: bytes) -> bool:
     if data.startswith(_HEAD_4S):
+        return True
+    if data.startswith(_HEAD_SCSC):
         return True
     if data.startswith(_HEAD_2H) and len(data) > 3 and data[2:3] != b"\n" and data[2:3] != b"i":
         return True
@@ -96,6 +100,9 @@ def _looks_encrypted(data: bytes) -> bool:
 def decrypt_profile_bytes(data: bytes, key_text: str = _PROFILE_DEFAULT_KEY) -> bytes:
     """尝试解密 profile.sii 的原始字节；若判断为明文直接原封返回。"""
     if not _looks_encrypted(data):
+        return data
+    # 新版 ScsC 头：内置 XXTEA 解不开，直接返回原样让上层强制走 SII_Decrypt.exe
+    if data.startswith(_HEAD_SCSC):
         return data
     k = _derive_scs_key(key_text)
     # 多种头处理：
@@ -212,6 +219,42 @@ def _escape_quote(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _unescape_profile_str(s: str) -> str:
+    if not s:
+        return s
+    import re as _re
+    def _repl_literal(m):
+        try:
+            hex_bytes = bytes([int(x, 16) for x in _re.findall(r'\\x([0-9a-fA-F]{2})', m.group(0))])
+            return hex_bytes.decode('utf-8', errors='replace')
+        except Exception:
+            return m.group(0)
+    pattern = _re.compile(r'(?:\\x[0-9a-fA-F]{2}){2,}')
+    s = pattern.sub(_repl_literal, s)
+
+    result = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if ord(s[i]) >= 128:
+            j = i
+            while j < n and ord(s[j]) >= 128:
+                j += 1
+            seq_len = j - i
+            if seq_len >= 2:
+                try:
+                    raw_bytes = s[i:j].encode('latin-1')
+                    decoded = raw_bytes.decode('utf-8', errors='replace')
+                    result.append(decoded)
+                except Exception:
+                    result.append(s[i:j])
+            else:
+                result.append(s[i:j])
+            i = j
+        else:
+            result.append(s[i])
+            i += 1
+    return ''.join(result)
 # 从 SiiUnit 读取 active_mods 模组列表（过滤 length 纯数字头）
 def _extract_active_mods(u):
     """
@@ -242,10 +285,11 @@ class ProfileInfo:
     is_encrypted: bool = False
     display_name: str = ""             # profile_name
     save_name: str = ""                # 存档显示名
+    company_name: str = ""             # 公司/角色中文名
     mod_count: int = 0
 
     def __str__(self) -> str:
-        label = self.display_name or self.save_name or self.profile_id
+        label = self.company_name or self.display_name or self.save_name or self.profile_id
         return f"{label} [{self.location}] mods={self.mod_count}"
 
 
@@ -261,8 +305,12 @@ class ProfileService:
         self.sii_decrypt_exe = sii_decrypt_exe or self._auto_sii_decrypt()
 
     def _auto_sii_decrypt(self) -> Optional[Path]:
-        cand = Path(__file__).resolve().parents[2] / "assets" / "bin" / "SII_Decrypt.exe"
-        return cand if cand.exists() else None
+        bin_dir = Path(__file__).resolve().parents[2] / "assets" / "bin"
+        for name in ("SII_Decrypt.exe", "sii_core.exe"):
+            cand = bin_dir / name
+            if cand.exists():
+                return cand
+        return None
 
     # ---------- 列出所有 profile ----------
     def list_profiles(self) -> List[ProfileInfo]:
@@ -303,8 +351,9 @@ class ProfileService:
             if not units:
                 return
             u = units[0]
-            info.display_name = u.get("profile_name", "") or ""
-            info.save_name = u.get("save_name", "") or ""
+            info.display_name = _unescape_profile_str(u.get("profile_name", "") or "")
+            info.save_name = _unescape_profile_str(u.get("save_name", "") or "")
+            info.company_name = _unescape_profile_str(u.get("company_name", "") or "")
             info.mod_count = len(_extract_active_mods(u))
         except Exception:
             return
@@ -387,17 +436,20 @@ def _run_sii_decrypt(exe: Path, in_path: Path) -> Optional[bytes]:
     with tempfile.TemporaryDirectory() as td:
         tmpin = Path(td) / in_path.name
         shutil.copy2(in_path, tmpin)
-        p = subprocess.run([str(exe), str(tmpin)],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                           timeout=30, cwd=td)
-        # SII_Decrypt 通常在同目录输出 .dec 或直接覆盖
+        tmpout = tmpin.parent / (tmpin.stem + ".dec")
+        subprocess.run([str(exe), str(tmpin), str(tmpout)],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       timeout=30, cwd=td, shell=False)
+        if tmpout.exists():
+            data = tmpout.read_bytes()
+            if b"SiiNunit" in data:
+                return data
         for cand in tmpin.parent.glob("*"):
             if cand.name == tmpin.name:
                 continue
             data = cand.read_bytes()
             if b"SiiNunit" in data:
                 return data
-        # 或直接读输入（可能被覆盖成明文）
         d2 = tmpin.read_bytes()
         if b"SiiNunit" in d2:
             return d2

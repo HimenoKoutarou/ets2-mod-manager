@@ -1,4 +1,4 @@
-"""
+﻿"""
 ETS2 Mod Manager — 主窗口（PySide6）
 布局：
   +-------------------+--------------------------------------------------+
@@ -1669,11 +1669,8 @@ class MainWindow(QMainWindow):
             self.tree_profiles.addTopLevelItem(it)
             self._profile_tree_items[getattr(p, "profile_id", str(id(p)))] = it
             if first_any is None: first_any = it
-            # 取 active_mods 数量判断
-            try:
-                n_active = len(getattr(p, "active_mods", []) or [])
-            except Exception:
-                n_active = 0
+            # 取 mod_count（来自 _enrich 解析结果）判断
+            n_active = getattr(p, "mod_count", 0) or 0
             if first_with_mods is None and n_active > 0:
                 first_with_mods = it
         if first_with_mods is not None:
@@ -1711,10 +1708,13 @@ class MainWindow(QMainWindow):
         prof = items[0].data(0, Qt.UserRole)
         if prof is None: return
         self.current_profile = prof
-        try:
-            n_active = len(getattr(prof, "active_mods", []) or [])
-        except Exception:
-            n_active = 0
+        # 优先用 prof.mod_count；若为 0 再实时查一次（兼容解密延迟场景）
+        n_active = getattr(prof, "mod_count", 0) or 0
+        if n_active == 0:
+            try:
+                n_active = len(self.profile_svc.get_active_mods(prof) or [])
+            except Exception:
+                n_active = 0
         self.statusBar().showMessage(
             _("ui.sb_current_profile", prof=str(prof), n=n_active), 5000
         )

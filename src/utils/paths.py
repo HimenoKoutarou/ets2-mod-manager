@@ -86,18 +86,54 @@ def _find_steam_cloud() -> Optional[Path]:
             pr = uid_dir / ETS2_APPID / "remote" / "profiles"
             if pr.exists():
                 return pr
+            # 兼容：检查 remote 下其他子目录结构（如 remote/profile 单数，或 profile folder 直接放在 remote 下）
+            remote_dir = uid_dir / ETS2_APPID / "remote"
+            if remote_dir.exists() and remote_dir.is_dir():
+                try:
+                    for sub in remote_dir.iterdir():
+                        if not sub.is_dir():
+                            continue
+                        # 检查该子目录下是否有直接包含 profile.sii 的文件夹（形如 <profile_hash>/profile.sii）
+                        found = False
+                        for profile_hash_dir in sub.iterdir():
+                            if profile_hash_dir.is_dir() and (profile_hash_dir / "profile.sii").exists():
+                                found = True
+                                break
+                        if found:
+                            return remote_dir
+                except OSError:
+                    continue
     return None
 
 
 def detect_paths() -> ETS2Paths:
     """自动探测所有路径"""
     doc = _find_documents_dir() or Path.home() / "Documents" / "Euro Truck Simulator 2"
+
+    steam_profiles_dir: Optional[Path] = None
+    sp_primary = doc / "steam_profiles"
+    if sp_primary.exists():
+        steam_profiles_dir = sp_primary
+    else:
+        candidates = sorted(
+            [p for p in doc.glob("steam_profiles*") if p.is_dir() and p.name != "steam_profiles"],
+            key=lambda p: p.name,
+            reverse=True,
+        )
+        for c in candidates:
+            try:
+                if c.exists() and c.is_dir():
+                    steam_profiles_dir = c
+                    break
+            except OSError:
+                continue
+
     return ETS2Paths(
         documents_dir=doc,
         mod_dir=doc / "mod",
         mods_info_path=doc / "mods_info.sii",
         profiles_dir=doc / "profiles",
-        steam_profiles_dir=doc / "steam_profiles" if (doc / "steam_profiles").exists() else None,
+        steam_profiles_dir=steam_profiles_dir,
         workshop_content_dir=_find_steam_workshop(),
         steam_cloud_dir=_find_steam_cloud(),
     )

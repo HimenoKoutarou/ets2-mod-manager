@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
@@ -96,13 +96,58 @@ class _SiiLexer:
                 while j < n:
                     ch = t[j]
                     if ch == "\\":
-                        if j + 1 < n:
-                            buf.append(t[j+1]); j += 2; continue
+                        if j + 1 >= n:
+                            buf.append("\\"); j += 1; break
+                        next_ch = t[j+1]
+                        if next_ch == "x" and j + 3 < n:
+                            hx = t[j+2:j+4]
+                            try:
+                                byte_val = int(hx, 16)
+                                buf.append(bytes([byte_val]).decode("latin-1"))
+                                j += 4; continue
+                            except ValueError:
+                                pass
+                        if next_ch == "n":
+                            buf.append("\n"); j += 2; continue
+                        if next_ch == "r":
+                            buf.append("\r"); j += 2; continue
+                        if next_ch == "t":
+                            buf.append("\t"); j += 2; continue
+                        if next_ch == "\\":
+                            buf.append("\\"); j += 2; continue
+                        if next_ch == '"':
+                            buf.append('"'); j += 2; continue
+                        buf.append(next_ch); j += 2; continue
                     if ch == '"':
                         break
                     buf.append(ch)
                     j += 1
-                self._tokens.append((self.T_STR, "".join(buf)))
+                raw = "".join(buf)
+                if any(ord(ch) >= 128 for ch in raw):
+                    out_chars = []
+                    k = 0
+                    raw_n = len(raw)
+                    while k < raw_n:
+                        if ord(raw[k]) >= 128:
+                            m = k
+                            while m < raw_n and ord(raw[m]) >= 128:
+                                m += 1
+                            if m - k >= 2:
+                                try:
+                                    b = raw[k:m].encode('latin-1')
+                                    out_chars.append(b.decode('utf-8', errors='replace'))
+                                except Exception:
+                                    out_chars.append(raw[k:m])
+                            else:
+                                out_chars.append(raw[k:m])
+                            k = m
+                        else:
+                            out_chars.append(raw[k])
+                            k += 1
+                    final_str = "".join(out_chars)
+                else:
+                    final_str = raw
+                self._tokens.append((self.T_STR, final_str))
                 i = j + 1
                 continue
             if c == ":": self._tokens.append((self.T_COLON, ":")); i += 1; continue
