@@ -50,3 +50,6 @@ _*.py
 
 # User config / runtime preferences
 config/
+
+# UFL 内置翻译库（大文件，不进仓库）
+assets/bin/himeno_sena.ufl.scs

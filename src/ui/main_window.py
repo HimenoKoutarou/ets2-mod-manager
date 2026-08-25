@@ -1,4 +1,4 @@
-﻿"""
+"""
 ETS2 Mod Manager — 主窗口（PySide6）
 布局：
   +-------------------+--------------------------------------------------+
@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import sys
 import os
+import json
 from pathlib import Path
 from typing import List, Optional, Dict
 
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView, QProgressBar, QCheckBox, QComboBox, QGroupBox,
     QSizePolicy, QTreeWidget, QTreeWidgetItem, QDialogButtonBox, QDialog, QTextBrowser, QTextEdit,
     QMenu, QScrollArea, QGridLayout, QLineEdit, QSpinBox, QTabWidget, QToolButton,
+    QInputDialog,
 )
 
 # --- 核心 / 服务层 import ---
@@ -49,6 +51,8 @@ from services.priority_service import PriorityService
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
 from version import __version__
 from services.update_service import UpdateService
+from ui.l10n_dialog import L10nDialog
+from services.l10n_service import L10nService
 
 
 
@@ -488,20 +492,33 @@ class ModTable(QTableWidget):
         name = (mod.display_title if mod else None) or work_entry["package_name"]
         name_item = self._mk(name, color="#000000" if en else "#8a8a8a")
         self.setItem(r, COL_NAME, name_item)
-        # source
+        # source（友好中文标签）
+        src_map = {
+            "scs": "本地SCS",
+            "zip": "本地ZIP",
+            "directory": "本地目录",
+            "workshop": "创意工坊",
+        }
         src_tip = ""
         if mod:
             src_tip = f"{mod.package_type} · {mod.package_path}"
-        src_text = (mod.package_type if mod else "—") or "—"
+        if mod:
+            raw_type = mod.package_type or ""
+            src_text = src_map.get(raw_type, raw_type or "—")
+        else:
+            src_text = "—"
         self.setItem(r, COL_SOURCE, self._mk(src_text))
         if src_tip:
             self.item(r, COL_SOURCE).setToolTip(src_tip)
-        # size
+        # size（sz==0 显示 0 MB，不要 —）
         sz = mod.file_size if mod else 0
-        size_txt = f"{sz/1024/1024:.1f} MB" if sz else "—"
+        if sz >= 1024:
+            size_txt = f"{sz/1024/1024:.1f} MB"
+        else:
+            size_txt = "0 MB" if sz == 0 else "< 0.1 MB"
         self.setItem(r, COL_SIZE, self._mk(size_txt, align=Qt.AlignRight | Qt.AlignVCenter))
-        # version
-        vtxt = (mod.display_version if mod else None) or "—"
+        # version（适配版本，不再是package_version）
+        vtxt = mod.display_compatible_version if mod else "—"
         self.setItem(r, COL_VERSION, self._mk(vtxt))
         # order
         order = work_entry.get("order", -1)
@@ -519,17 +536,20 @@ class ModTable(QTableWidget):
             old_name.setText(name)
             # 不再加粗，仅用颜色区分启用/未启用
             old_name.setForeground(QBrush(QColor("#000000" if en else "#8a8a8a")))
-        # version
-        vtxt = mod.display_version or "—"
-        vitem = self.item(row, COL_VERSION)
-        if vitem is not None:
-            vitem.setText(vtxt)
-        # source tooltip
+        # source
+        src_map = {
+            "scs": "本地SCS", "zip": "本地ZIP",
+            "directory": "本地目录", "workshop": "创意工坊",
+        }
         src_tip = f"{mod.package_type} · {mod.package_path}"
         sitem = self.item(row, COL_SOURCE)
         if sitem is not None:
-            sitem.setText(mod.package_type or "—")
+            sitem.setText(src_map.get(mod.package_type or "", mod.package_type or "—"))
             sitem.setToolTip(src_tip)
+        # version
+        vitem = self.item(row, COL_VERSION)
+        if vitem is not None:
+            vitem.setText(mod.display_compatible_version or "—")
 
     def find_row_by_pkg(self, package_name: str) -> Optional[int]:
         """按 package_name 查找行号（COL_PKG 隐藏列）"""
@@ -609,6 +629,11 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._build_toolbar()
+        # 汉化服务
+        self._l10n_service = L10nService(Path("config"))
+        ufl_path = Path("assets/bin/himeno_sena.ufl.scs")
+        if ufl_path.exists():
+            self._l10n_service.set_ufl_mod(ufl_path)
         self._build_menubar()
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage(_("ui.sb_ets2_doc_dir", dir=str(self.paths.documents_dir)))
@@ -840,6 +865,12 @@ class MainWindow(QMainWindow):
         btn_prio.setMenu(m_prio); tb.addWidget(btn_prio)
         m_prio.aboutToShow.connect(lambda: self._rebuild_prio_menu_categories())
         tb.addSeparator()
+        # ---- 汉化按钮 ----
+        act_l10n = QAction(_("ui.tb_l10n"), self)
+        act_l10n.setProperty("i18n_key", "ui.tb_l10n")
+        act_l10n.triggered.connect(self._open_l10n_dialog)
+        tb.addAction(act_l10n)
+        tb.addSeparator()
         # ---- (4) 下拉按钮：保存 ▼（加粗，保留高优先级按钮样式）----
         btn_save = QToolButton(); btn_save.setText(_("ui.tb_drop_save")); btn_save.setProperty("i18n_key", "ui.tb_drop_save")
         btn_save.setPopupMode(QToolButton.MenuButtonPopup); btn_save.setCursor(Qt.PointingHandCursor)
@@ -865,6 +896,41 @@ class MainWindow(QMainWindow):
         self.search_input.returnPressed.connect(lambda: self._on_search_changed(self.search_input.text()))
         tb.addWidget(self.search_input)
 
+
+    def _open_l10n_dialog(self):
+        """打开汉化管理对话框"""
+        if not self.current_profile:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, _("ui.l10n_title"), _("ui.l10n_no_profile"))
+            return
+
+        # 获取已启用mod列表（按优先级排序）
+        try:
+            active_mods = self.profile_svc.get_active_mods(self.current_profile)
+        except Exception:
+            active_mods = []
+
+        if not active_mods:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, _("ui.l10n_title"), _("ui.l10n_no_mods"))
+            return
+
+        # 构建 (mod_path, display_name) 列表
+        mod_list = []
+        for mod_path in active_mods:
+            # 从 all_mods_by_pkg 查找mod信息
+            mod_info = None
+            pkg_name = Path(mod_path).stem
+            if pkg_name in self.all_mods_by_pkg:
+                mod = self.all_mods_by_pkg[pkg_name]
+                mod_info = (str(getattr(mod, 'package_path', mod_path)), getattr(mod, 'display_title', pkg_name))
+            else:
+                mod_info = (str(Path(self.paths.mod_dir) / mod_path) if not Path(mod_path).is_absolute() else mod_path, pkg_name)
+            mod_list.append(mod_info)
+
+        dialog = L10nDialog(self._l10n_service, self)
+        dialog.start_extract(mod_list, self.paths.mod_dir)
+        dialog.exec()
 
     def _build_menubar(self):
         """顶部菜单栏：语言切换（简化版，避免 QActionGroup 信号循环）"""
@@ -1742,6 +1808,10 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         a_lo = menu.addAction(_("menu.load_order"))
         a_bk = menu.addAction(_("menu.backup_profile"))
+        menu.addSeparator()
+        a_cp = menu.addAction(_("menu.copy_profile"))
+        a_del = menu.addAction(_("menu.delete_profile"))
+        a_del.setForeground(QBrush(QColor("#ef4444")))
         act = menu.exec(self.tree_profiles.mapToGlobal(pos))
         if act == a_lo:
             # 先把当前存档切到此 profile（以便加载顺序对话框使用）
@@ -1753,6 +1823,51 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, _("dlg.backup_ok_title"), _("dlg.backup_ok2", prof=str(prof)))
             except Exception as e:
                 QMessageBox.warning(self, _("dlg.backup_fail_title"), str(e))
+        elif act == a_cp:
+            prof_name = prof.company_name or prof.display_name or prof.profile_id
+            default_name = f"{prof_name} 的副本"
+            new_name, ok = QInputDialog.getText(self, _("dlg.copy_profile_title"),
+                                                _("dlg.copy_profile_name_prompt"), text=default_name)
+            if not ok or not new_name.strip():
+                return
+            new_name = new_name.strip()
+            default_company = new_name
+            new_company, ok2 = QInputDialog.getText(self, _("dlg.copy_profile_title"),
+                                                     _("dlg.copy_profile_company_prompt"), text=default_company)
+            if not ok2:
+                return
+            new_company = new_company.strip()
+            try:
+                new_prof = self.profile_svc.copy_profile(prof, new_name, new_company)
+                QMessageBox.information(self, _("dlg.copy_profile_title"),
+                                        _("dlg.copy_profile_ok", prof=str(new_prof)))
+                self._load_profiles()
+            except Exception as e:
+                QMessageBox.warning(self, _("dlg.copy_profile_title"), str(e))
+        elif act == a_del:
+            prof_name = prof.company_name or prof.display_name or prof.profile_id
+            n = getattr(prof, "mod_count", 0)
+            ans1 = QMessageBox.question(self, _("dlg.delete_profile_title"),
+                                        _("dlg.delete_profile_warn1", prof=prof_name, n=n),
+                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans1 != QMessageBox.Yes:
+                return
+            ans2 = QMessageBox.warning(self, _("dlg.delete_profile_title"),
+                                       _("dlg.delete_profile_warn2"),
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans2 != QMessageBox.Yes:
+                return
+            try:
+                self.profile_svc.delete_profile(prof, backup_first=True)
+                QMessageBox.information(self, _("dlg.delete_profile_title"),
+                                        _("dlg.delete_profile_ok"))
+                if self.current_profile is not None and getattr(self.current_profile, "profile_id", None) == prof.profile_id:
+                    self.current_profile = None
+                    for t in (self.table_all, self.table_active):
+                        t.setRowCount(0)
+                self._load_profiles()
+            except Exception as e:
+                QMessageBox.warning(self, _("dlg.delete_profile_title"), str(e))
 
     def _on_profile_selected(self):
         # 兼容空壳（原先连接到 profiles_list 的信号不再触发）
@@ -2279,12 +2394,92 @@ class MainWindow(QMainWindow):
         if self.current_profile: self._fill_table_for_profile(self.current_profile)
         QMessageBox.information(self, _("dlg.preset_title"), _("dlg.preset_msg"))
 
+    def _load_behavior_prefs(self) -> dict:
+        """从 config/behavior.json 加载用户行为偏好，不存在则返回默认 {backup_before_profile_save: 'prompt'}"""
+        default = {"backup_before_profile_save": "prompt"}
+        try:
+            cfg_dir = Path("config")
+            cfg_file = cfg_dir / "behavior.json"
+            if not cfg_file.exists():
+                return default
+            with cfg_file.open("r", encoding="utf-8-sig") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                pref = str(raw.get("backup_before_profile_save", "prompt"))
+                if pref in ("always", "prompt", "never"):
+                    return {"backup_before_profile_save": pref}
+            return default
+        except Exception:
+            return default
+
+    def _save_behavior_prefs(self, prefs: dict):
+        """保存偏好到 config/behavior.json"""
+        try:
+            cfg_dir = Path("config")
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+            cfg_file = cfg_dir / "behavior.json"
+            with cfg_file.open("w", encoding="utf-8") as f:
+                json.dump(prefs, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _ensure_backup_before_save(self) -> bool:
+        """
+        存档写入前的备份检查/询问入口。
+        返回 True = 可以继续执行写入（不管用户选择备份还是跳过，只要不是Cancel）
+        """
+        prefs = self._load_behavior_prefs()
+        pref = prefs.get("backup_before_profile_save", "prompt")
+
+        if pref == "always":
+            if self.current_profile and getattr(self.current_profile, "profile_sii", None):
+                self.backup_svc.backup(self.current_profile.profile_sii, tag="auto-pre-save")
+            return True
+
+        if pref == "never":
+            return True
+
+        # pref == "prompt"
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle(_("dlg.backup_prompt_title"))
+        dlg.setText(_("dlg.backup_prompt_msg"))
+        dlg.setIcon(QMessageBox.Warning)
+
+        cb_always = QCheckBox(_("dlg.backup_prompt_always"))
+        dlg.setCheckBox(cb_always)
+
+        btn_backup = dlg.addButton(_("dlg.backup_btn_backup_then_write"), QMessageBox.AcceptRole)
+        btn_skip = dlg.addButton(_("dlg.backup_btn_skip_just_write"), QMessageBox.DestructiveRole)
+        btn_cancel = dlg.addButton(QMessageBox.Cancel)
+
+        dlg.exec()
+        clicked = dlg.clickedButton()
+
+        if clicked == btn_cancel:
+            return False
+
+        if clicked == btn_backup:
+            if cb_always.isChecked():
+                self._save_behavior_prefs({"backup_before_profile_save": "always"})
+            if self.current_profile and getattr(self.current_profile, "profile_sii", None):
+                path = self.backup_svc.backup(self.current_profile.profile_sii, tag="user-pre-save")
+                if path is not None:
+                    self.statusBar().showMessage(_("dlg.backup_ok_then_write_msg"), 3000)
+            return True
+
+        if clicked == btn_skip:
+            return True
+
+        return False
+
     # ---------- 保存 profile ----------
     def _save_profile(self):
         if not self.current_profile:
             QMessageBox.warning(self, _("dlg.no_profile_title"), _("dlg.no_profile_save"))
             return
         self._sync_worklist_from_table()
+        if not self._ensure_backup_before_save():
+            return
         new_active = PriorityService.worklist_to_active(self.current_worklist)
         ret = QMessageBox.question(
             self, _("dlg.save_confirm_title"),

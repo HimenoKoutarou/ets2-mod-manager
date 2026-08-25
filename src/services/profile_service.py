@@ -1,10 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import datetime as _dt
 import os
 import re
 import shutil
 import subprocess
 import struct
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -255,6 +257,26 @@ def _unescape_profile_str(s: str) -> str:
             result.append(s[i])
             i += 1
     return ''.join(result)
+
+def _escape_profile_str_for_sii(s: str) -> str:
+    """将普通字符串编码为 SII 中可保存的格式（对非 ASCII 使用 \\xNN 编码）。"""
+    if not s:
+        return ""
+    out = []
+    for ch in s:
+        code = ord(ch)
+        if code < 128 and ch not in ('"', '\\'):
+            out.append(ch)
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == '\\':
+            out.append('\\\\')
+        else:
+            utf8_bytes = ch.encode('utf-8')
+            for b in utf8_bytes:
+                out.append(f"\\x{b:02X}")
+    return ''.join(out)
+
 # 从 SiiUnit 读取 active_mods 模组列表（过滤 length 纯数字头）
 def _extract_active_mods(u):
     """
@@ -421,6 +443,179 @@ class ProfileService:
             raise RuntimeError("写回后校验失败：active_mods 与预期不一致，可能被游戏重新加密或加密算法不匹配")
         return prof.profile_sii
 
+    # ---------- 复制存档 ----------
+    def copy_profile(self, prof: ProfileInfo, new_display_name: str = "", new_company_name: str = "") -> ProfileInfo:
+        """复制存档到同一位置（local/steam/cloud）。"""
+        # 1. 根据 prof.location 定位目标父目录
+        if prof.location == "local":
+            parent = self.paths.profiles_dir
+        elif prof.location == "steam":
+            parent = self.paths.steam_profiles_dir
+        elif prof.location == "cloud":
+            parent = self.paths.steam_cloud_dir
+        else:
+            raise ValueError(f"未知 location: {prof.location}")
+
+        if parent is None or not parent.exists():
+            raise RuntimeError(f"目标父目录不存在: {parent}")
+
+        # 2. 生成新的 profile_id：原id后加 "_copy1"，若已存在则 "_copy2"……直到不冲突
+        original_id = prof.profile_id
+        base_id = original_id[:32] if len(original_id) > 32 else original_id
+        counter = 1
+        while True:
+            suffix = f"_copy{counter}"
+            avail = 32 - len(suffix)
+            if avail < 1:
+                avail = 1
+            new_id = base_id[:avail] + suffix
+            if not (parent / new_id).exists():
+                break
+            counter += 1
+
+        # 复制之前先备份原 profile 文件夹（tag="pre-copy"）
+        try:
+            if prof.folder.exists():
+                ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                backups_dir = prof.folder.parent / ".profile_backups"
+                backups_dir.mkdir(parents=True, exist_ok=True)
+                zip_path = backups_dir / f"{prof.profile_id}_{ts}_pre-copy.zip"
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in prof.folder.rglob("*"):
+                        if f.is_file():
+                            try:
+                                zf.write(f, str(f.relative_to(prof.folder.parent)))
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        # 3. 整个 prof.folder 目录用 shutil.copytree 复制到父目录下的新id文件夹
+        new_folder = parent / new_id
+        if new_folder.exists():
+            shutil.rmtree(new_folder)
+        shutil.copytree(prof.folder, new_folder)
+
+        # 4. 读取新目录下的 profile.sii 文本（解密后），在 unit 中更新
+        new_sii_in_new_folder = new_folder / "profile.sii"
+        new_sii_target = new_sii_in_new_folder
+
+        # 如果是 steam 指针目录，真实 profile.sii 在 cloud 位置
+        if not new_sii_in_new_folder.exists():
+            if prof.location == "steam" and self.paths.steam_cloud_dir is not None:
+                orig_cloud_dir = prof.profile_sii.parent
+                try:
+                    same_id = orig_cloud_dir.name == prof.profile_id
+                except Exception:
+                    same_id = str(orig_cloud_dir).endswith(str(prof.profile_id))
+                if same_id:
+                    new_cloud_dir = self.paths.steam_cloud_dir / new_id
+                    if new_cloud_dir.exists():
+                        shutil.rmtree(new_cloud_dir)
+                    shutil.copytree(orig_cloud_dir, new_cloud_dir)
+                    new_sii_target = new_cloud_dir / "profile.sii"
+                else:
+                    candidate = self.paths.steam_cloud_dir / new_id / "profile.sii"
+                    if candidate.exists():
+                        new_sii_target = candidate
+
+        if not new_sii_target.exists():
+            raise RuntimeError(f"复制后找不到 profile.sii: {new_sii_target}")
+
+        original_bytes = new_sii_target.read_bytes()
+        was_encrypted = _looks_encrypted(original_bytes)
+        plain = self._get_plain_text(new_sii_target)
+
+        # 文本级替换 profile_name 和 company_name
+        new_profile_name = new_display_name if new_display_name else ((prof.display_name or prof.profile_id) + " 副本")
+        new_company_name_val = new_company_name if new_company_name else ((prof.company_name or new_profile_name) + " 副本")
+
+        escaped_pn = _escape_profile_str_for_sii(new_profile_name)
+        escaped_cn = _escape_profile_str_for_sii(new_company_name_val)
+
+        import re as _re_local
+
+        def _replace_kv(text, key, new_val):
+            pat = _re_local.compile(
+                r'^(?P<indent>\s*)' + _re_local.escape(key) + r'\s*:\s*"(?P<val>.*)"\s*$',
+                _re_local.MULTILINE
+            )
+            def repl(m):
+                return f'{m.group("indent")}{key}: "{new_val}"'
+            return pat.sub(repl, text)
+
+        new_text = _replace_kv(plain, "profile_name", escaped_pn)
+        new_text = _replace_kv(new_text, "company_name", escaped_cn)
+
+        # 保存时注意原文件加密状态
+        out_bytes = new_text.encode("utf-8-sig")
+        if was_encrypted:
+            try:
+                out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
+            except Exception:
+                out_bytes = new_text.encode("utf-8-sig")
+        new_sii_target.write_bytes(out_bytes)
+
+        # 5. 返回新的 ProfileInfo（自动调用 _enrich 补齐）
+        new_info = ProfileInfo(
+            profile_id=new_id,
+            location=prof.location,
+            folder=new_folder,
+            profile_sii=new_sii_target,
+        )
+        self._enrich(new_info)
+        return new_info
+
+    # ---------- 删除存档 ----------
+    def delete_profile(self, prof: ProfileInfo, backup_first: bool = True) -> None:
+        """删除存档（含备份）"""
+        # 1. 若 backup_first=True：先把整个 prof.folder 目录打 zip 备份到 BackupService 的备份目录
+        if backup_first:
+            try:
+                ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                backups_dir = prof.folder.parent / ".profile_backups"
+                backups_dir.mkdir(parents=True, exist_ok=True)
+                zip_name = f"{prof.profile_id}_{ts}_deleted.zip"
+                zip_path = backups_dir / zip_name
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    if prof.folder.exists():
+                        for f in prof.folder.rglob("*"):
+                            if f.is_file():
+                                try:
+                                    zf.write(f, str(f.relative_to(prof.folder.parent)))
+                                except Exception:
+                                    pass
+                    # 同时把真实 profile.sii 所在目录也打包进 zip（如果在其他位置）
+                    sii_parent = prof.profile_sii.parent
+                    if sii_parent != prof.folder and sii_parent.exists():
+                        for f in sii_parent.rglob("*"):
+                            if f.is_file():
+                                try:
+                                    arc = f"_cloud_sii_{sii_parent.name}/" + str(f.relative_to(sii_parent))
+                                    zf.write(f, arc)
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
+        # 2. shutil.rmtree(prof.folder) 删除目录
+        if prof.folder.exists():
+            shutil.rmtree(prof.folder)
+
+        # 3. 如果 prof.profile_sii 不在 prof.folder 下，也删除 profile_sii 所在的那个目录（仅当该目录的父级是 steam_cloud_dir 时）
+        sii_parent = prof.profile_sii.parent
+        try:
+            sii_in_folder = prof.folder in prof.profile_sii.parents
+        except Exception:
+            sii_in_folder = str(prof.folder) in str(prof.profile_sii)
+        if not sii_in_folder and sii_parent.exists():
+            if self.paths.steam_cloud_dir is not None:
+                try:
+                    is_cloud_child = sii_parent.parent == self.paths.steam_cloud_dir
+                except Exception:
+                    is_cloud_child = str(sii_parent.parent) == str(self.paths.steam_cloud_dir)
+                if is_cloud_child:
+                    shutil.rmtree(sii_parent)
 
 def _decode_text(b: bytes) -> str:
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):

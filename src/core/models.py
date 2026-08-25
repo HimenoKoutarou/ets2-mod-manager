@@ -5,6 +5,16 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 
 
+
+def _is_workshop_id_like(text: str) -> bool:
+    """判断字符串是否看起来像 Workshop ID（纯数字或数字+_workshop/_copyN这类常见后缀）"""
+    if not text:
+        return False
+    import re as _re_ws
+    cleaned = _re_ws.sub(r"_[A-Za-z]+\d*$", "", text)
+    return cleaned.isdigit()
+
+
 # 官方支持的 18 种分类
 VALID_CATEGORIES = {
     "truck", "trailer", "interior", "tuning_parts", "ai_traffic",
@@ -127,13 +137,13 @@ class Mod:
     def display_title(self) -> str:
         """多层兜底：display_name → Steam Workshop API（按ID） → 子包名 → 归档名 → 未命名模组"""
         title = self.manifest.display_name.strip()
-        if title and not title.isdigit():
+        if title and not _is_workshop_id_like(title):
             return title
         # 兜底 0：package_name（manifest 的 unit_name；游戏在 mods_info.sii 缓存的就是它，本地、快、可靠）
         # 过滤垃圾值：SCS 的 unit_name 常以 "." 或 "_nameless" 开头（引用名，非可读包名）
         _PKG_BLOCK = {"manifest", "package_name", "mod_package", "mods_info", "nameless"}
         pkg = (self.manifest.package_name or "").strip()
-        if (pkg and not pkg.isdigit()
+        if (pkg and not _is_workshop_id_like(pkg)
                 and not pkg.startswith(".") and not pkg.startswith("_")
                 and pkg.lower() not in _PKG_BLOCK and len(pkg) >= 2):
             return pkg
@@ -177,14 +187,14 @@ class Mod:
                         return nice
         # 3b) 用自身归档包名（本地 mod：.scs/.zip 文件名）
         stem_self = pp.stem if not pp.is_dir() else pp.name
-        if stem_self and not stem_self.isdigit():
+        if stem_self and not _is_workshop_id_like(stem_self):
             nice = stem_self.replace("_", " ").replace("-", " ").strip()
             if nice:
                 nice = " ".join(w[:1].upper() + w[1:] if w else w for w in nice.split())
                 if 2 <= len(nice) <= 80:
                     return nice
         # 兜底 3：如果 mod_id 是纯数字（Workshop ID），不显示 ID，改用 i18n 未命名模组
-        if self.mod_id and self.mod_id.isdigit():
+        if self.mod_id and _is_workshop_id_like(self.mod_id):
             try:
                 from services.i18n_service import _ as _tr
                 return _tr("mod.unnamed")
@@ -201,6 +211,18 @@ class Mod:
             return _tr("detail.ver_notag")
         except Exception:
             return _tr("detail.ver_notag")
+
+    @property
+    def display_compatible_version(self) -> str:
+        """游戏适配版本（compatible_versions），空则返回 —"""
+        vs = self.manifest.compatible_versions
+        if vs:
+            seen = []
+            for v in vs:
+                if v and v not in seen:
+                    seen.append(v)
+            return ", ".join(seen[:7])
+        return "—"
 
     @property
     def size_mb(self) -> float:
