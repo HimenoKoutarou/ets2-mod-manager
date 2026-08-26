@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import re
@@ -305,6 +305,11 @@ def _build_mod_from_package(package_path: Path, package_type: str,
         if best_candidate:
             mod.manifest.display_name = best_candidate
 
+    # 如果最终 manifest.package_name 为空 / 点开头的垃圾（如 .package_name .manifest ""），fallback 到包路径的 mod_id
+    if (not mod.manifest.package_name
+            or mod.manifest.package_name.startswith(".")
+            or mod.manifest.package_name.lower() in {"manifest", "package_name", "mods_info", "nameless", "mod_package"}):
+        mod.manifest.package_name = mod.mod_id
     return mod
 
 
@@ -353,11 +358,25 @@ class ModScanner:
                 for item in self.workshop_dir.iterdir():
                     if not item.is_dir():
                         continue
+                    ws_id = item.name
                     # Workshop 包名形如 "1234567890" 纯数字
                     try:
-                        mod = _build_mod_from_package(item, "workshop", mi_index)
+                        if skip_manifest_parse:
+                            # 快速路径：不解析子包 manifest.sii（不解包），直接 minimal，后面会 fallback 到 ws_id 做索引
+                            mod = _build_mod_minimal(item, "workshop", mi_index)
+                        else:
+                            mod = _build_mod_from_package(item, "workshop", mi_index)
                     except Exception:
                         continue
+                    if mod is not None:
+                        # 只在 manifest.package_name 是垃圾值时才用 ws_id 兜底（保留内部真实 unit_name 匹配 profile）
+                        _PKG_BLACKLIST = {"", "manifest", "package_name", "mods_info", "nameless", "mod_package"}
+                        if (not mod.manifest.package_name
+                                or mod.manifest.package_name.startswith(".")
+                                or mod.manifest.package_name.strip().lower() in _PKG_BLACKLIST):
+                            mod.manifest.package_name = ws_id
+                        # 强制 mod_id = ws_id 纯数字目录名（保持 workshop 识别 ID；双索引机制可正常查询）
+                        mod.mod_id = ws_id
                     if mod.mod_id not in mods_index:
                         mods_index[mod.mod_id] = mod
                     else:
@@ -371,20 +390,21 @@ class ModScanner:
         mods_list = list(mods_index.values())
         # Steam Workshop API 查询移至 main_window 后台线程执行（避免阻塞 UI）
         # 分类兜底：从 category_service 回填每个 mod 的分类（空串 = 未分类）
-        try:
-            from services import category_service as _cs
-            name_hints = {m.mod_id: m.display_title for m in mods_list}
-            for m in mods_list:
-                cat = _cs.get_category(m.mod_id)
-                if cat:
-                    m._category_tag = cat
-            # 更新 known_mods.json（用于分类持久化）
-            _cs.touch_and_detect_new(
-                [m.mod_id for m in mods_list], name_hints=name_hints
-            )
-            _cs.save()
-        except Exception:
-            pass
+        if not skip_manifest_parse:
+            try:
+                from services import category_service as _cs
+                name_hints = {m.mod_id: m.display_title for m in mods_list}
+                for m in mods_list:
+                    cat = _cs.get_category(m.mod_id)
+                    if cat:
+                        m._category_tag = cat
+                # 更新 known_mods.json（用于分类持久化）
+                _cs.touch_and_detect_new(
+                    [m.mod_id for m in mods_list], name_hints=name_hints
+                )
+                _cs.save()
+            except Exception:
+                pass
         # 新模组检测：与上次会话对比（而非 known_mods.json 累积对比）
         try:
             from services.session_service import get_new_mod_ids_vs_last_session
@@ -425,7 +445,7 @@ def _build_mod_minimal(package_path: Path, ptype: str, mi_index: Dict[str, int])
             mtime = package_path.stat().st_mtime
     except OSError:
         pass
-    return Mod(
+    mod = Mod(
         mod_id=mod_id,
         package_path=str(package_path),
         package_type=ptype,
@@ -433,3 +453,5 @@ def _build_mod_minimal(package_path: Path, ptype: str, mi_index: Dict[str, int])
         last_modified=mtime,
         mods_info_timestamp=mi_index.get(mod_id, 0),
     )
+    mod.manifest.package_name = mod_id
+    return mod

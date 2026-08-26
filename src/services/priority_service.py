@@ -69,10 +69,24 @@ class PriorityService:
     """
 
     def __init__(self, known_mods: Iterable[Mod]):
-        # by package_name 做快速查找
         self.by_name: Dict[str, Mod] = {}
+        import re as _re_pn
         for m in known_mods:
-            self.by_name[m.mod_id] = m
+            # manifest.package_name（unit_name 主索引）与 mod_id（文件名索引）同级 setdefault
+            # 先 manifest.package_name 左段
+            pkg_name = getattr(getattr(m, "manifest", None), "package_name", None) or ""
+            if pkg_name:
+                left = pkg_name.split("|",1)[0].strip()
+                if left:
+                    self.by_name.setdefault(left, m)
+                self.by_name.setdefault(pkg_name.strip(), m)
+            # 再 mod_id（同级权重）
+            if m.mod_id:
+                self.by_name.setdefault(m.mod_id, m)
+            # 再 workshop_id 剥后缀纯数字
+            stripped = _re_pn.sub(r"_(workshop|copy\d*|local)$", "", m.mod_id)
+            if stripped and stripped != m.mod_id and stripped.isdigit():
+                self.by_name.setdefault(stripped, m)
 
     # ---- 当前 active_mods → 工作模型（附带 enabled 状态） ----
     def build_worklist(self, active_mods: List[str], all_package_names: List[str]) -> List[dict]:
@@ -87,21 +101,31 @@ class PriorityService:
         """
         result: List[dict] = []
         active_set = set(active_mods)
+        import re as _re_bw
         for i, pn in enumerate(active_mods):
+            pn_left = pn.split("|", 1)[0].strip()
+            # 4 层 fallback：原 pn → |左段 → |左段剥后缀 → 纯数字反向查（by_name 里已经建了 digit_keys）
+            m = self.by_name.get(pn) or self.by_name.get(pn_left)
+            if m is None:
+                s_left = _re_bw.sub(r"_(workshop|copy\d*|local)$", "", pn_left)
+                if s_left and s_left != pn_left:
+                    m = self.by_name.get(s_left)
             result.append({
                 "package_name": pn,
                 "enabled": True,
                 "order": i,
-                "mod": self.by_name.get(pn),
+                "mod": m,
             })
         # 未启用的（不重复）
         known_pns = [p for p in all_package_names if p not in active_set]
         for pn in sorted(known_pns):
+            pn_lookup = pn.split("|", 1)[0].strip()
+            m = self.by_name.get(pn) or self.by_name.get(pn_lookup)
             result.append({
                 "package_name": pn,
                 "enabled": False,
                 "order": -1,
-                "mod": self.by_name.get(pn),
+                "mod": m,
             })
         return result
 
