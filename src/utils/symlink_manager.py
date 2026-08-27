@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
@@ -355,22 +356,38 @@ class SymlinkManager:
                         except OSError as _del_e:
                             _src_delete_err = _del_e
                         if not _src_delete_ok:
-                            # Rollback the just-created dest link. Swallow own exceptions; primary failure is _src_delete_err.
+                            # Transactional rollback of the just-created dest link.
+                            # R14.hardening: rollback of newly-created dest is itself best-effort but
+                            # MUST be observable — we record rollback_ok/rollback_err and expose
+                            # the failure explicitly in the raised error (outer caller will turn
+                            # it into a SymlinkResult(False, ...) return string).
+                            _rollback_ok = True
+                            _rollback_err: "OSError | None" = None
                             try:
                                 if dest.is_symlink():
                                     dest.unlink()
                                 elif _is_junction(dest):
                                     try: os.rmdir(str(dest))
-                                    except OSError:
+                                    except OSError as _rb_rmdir_e:
                                         try: dest.unlink(missing_ok=True)
-                                        except OSError: pass
-                            except OSError:
-                                pass
+                                        except OSError as _rb_unlink_e:
+                                            _rollback_ok = False
+                                            _rollback_err = OSError(f"rmdir={_rb_rmdir_e}; unlink={_rb_unlink_e}")
+                            except OSError as _rb_top_e:
+                                _rollback_ok = False
+                                _rollback_err = _rb_top_e
                             # Important: do NOT append dest to moved_items (not actually moved from source).
                             # Also do NOT continue — raise so outer except block can rollback all earlier moved_items.
+                            if _rollback_ok:
+                                _rb_note = f"已回滚刚在 {dest} 创建的等价 link"
+                            else:
+                                _rb_note = (
+                                    f"⚠️ 新 link 回滚失败（{_rollback_err}），{dest} 仍可能存在，"
+                                    f"请手动检查后再重试"
+                                )
                             raise OSError(
                                 f"迁移 symlink/junction 时删除源 link {item} 失败（{_src_delete_err}），"
-                                f"已回滚刚在 {dest} 创建的等价 link，之前已搬移的项目将被统一回滚。"
+                                f"{_rb_note}，之前已搬移的项目将被统一回滚。"
                             )
                         moved_items.append(dest)
                         continue
@@ -404,7 +421,7 @@ class SymlinkManager:
         if orig.exists() or orig.is_symlink():
             # 优先重命名为 .bak_时间戳，保留退路
             import time
-            backup_path = orig.parent / f"{orig.name}.bak_{int(time.time())}"
+            backup_path = orig.parent / f"{orig.name}.bak_{int(time.time())}_{uuid.uuid4().hex[:12]}"
             try:
                 if orig.is_symlink():
                     # os.rename 对 symlink 直接改名就行

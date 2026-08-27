@@ -1828,6 +1828,128 @@ def test_r14_final_move_link_transactional_invariant():
 # -----------------------------------------------------------------------------
 
 
+
+# =============================================================================
+# R14.final.P2-harden: move_and_link WORST CASE — src delete FAIL + dest rollback FAIL
+# Covers the explicit gap in user 9.3/10 review (section 2 + test section at bottom):
+# We ensure failure is observable:
+#   RBF-1  orig/link_a     STILL EXISTS    (source delete never committed — invariant)
+#   RBF-2  target/link_a   STILL EXISTS    (rollback itself failed — proof we're in double-fail lane)
+#   RBF-3  result.success == False
+#   RBF-4  message EXPLICITLY says rollback failed (not "已回滚"), contains "回滚失败" + dest path token
+#   RBF-5  external manifest.sii UNTOUCHED   (non-targeting check)
+#   RBF-6  earlier moved_items (A_file.scs) RETURNED BACK via outer rollback
+# =============================================================================
+def test_r14_final_move_link_rollback_fail_observable():
+    """Double-failure injection: after src delete fail, dest rollback also raises.
+    Verifies that failure message no longer falsely claims "已回滚" — it must now say
+    '回滚失败 / 仍可能存在 / 请手动检查'."""
+    hr("R14.final.P2 harden: src-del FAIL + dest-rollback FAIL → double-failure observable")
+    import tempfile, shutil as _sh, os as _os, sys as _sys
+    from pathlib import Path as _PP
+
+    if str(_PROJECT_ROOT / "src") not in _sys.path:
+        _sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from utils import symlink_manager as _sm
+    SymlinkManager = _sm.SymlinkManager
+
+    tmp = Path(tempfile.mkdtemp(prefix="r14_final_move_rbfail_"))
+    try:
+        orig = tmp / "orig_mod"
+        target = tmp / "target_mods"
+        external = tmp / "external_storage"
+        orig.mkdir(); target.mkdir(); external.mkdir()
+
+        (orig / "A_file.scs").write_bytes(b"A_contents_rb_456")
+        (orig / "link_a").write_bytes(b"IGNORED")
+        (external / "the_mod").mkdir(parents=True, exist_ok=True)
+        ext_manifest = (external / "the_mod") / "manifest.sii"
+        ext_manifest.write_bytes(b"MANIFEST_rbf_1")
+        external_target_path = external / "the_mod"
+
+        _created_dest_links : "set[str]" = set()
+        _src_del_fired = {"v": False}
+        _dest_rollback_del_fired = {"v": False}
+
+        _bak_cis = _sm._contains_internal_symlinks
+        _bak_ppisym = _PP.is_symlink
+        _bak_osrdlnk = _os.readlink
+        _bak_ossym = _os.symlink
+        _bak_ppunlink = _PP.unlink
+        _bak_isjct = _sm._is_junction
+        try:
+            _sm._contains_internal_symlinks = lambda root: []
+            def p_is_symlink(self2):
+                s = str(self2)
+                if s in _created_dest_links: return True
+                if s.endswith("link_a") and orig in self2.parents: return True
+                return _bak_ppisym(self2)
+            _PP.is_symlink = p_is_symlink
+            def p_rdlnk(path, *a, **kw):
+                pp = Path(path)
+                if pp.name == "link_a" and orig in pp.parents: return str(external_target_path)
+                return _bak_osrdlnk(path, *a, **kw)
+            _os.readlink = p_rdlnk
+            def p_sym(tgt, dst, *a, **kw):
+                dp = Path(dst)
+                dp.write_bytes(b"VIRTUAL_LINK_v2")
+                _created_dest_links.add(str(dp))
+            _os.symlink = p_sym
+            _sm._is_junction = lambda p: False
+            def p_unlink(self2, *a, **kw):
+                s = str(self2)
+                # 1) source orig/link_a delete fail (first failure)
+                if s.endswith("link_a") and orig in self2.parents:
+                    _src_del_fired["v"] = True
+                    raise PermissionError("RBF-sim: orig/link_a locked by AV during delete-source step")
+                # 2) dest TARGET link delete fail → simulates rollback of virtual dest also FAILING
+                if s in _created_dest_links and s.endswith("link_a") and target in Path(s).parents:
+                    _dest_rollback_del_fired["v"] = True
+                    raise PermissionError("RBF-sim: dest/link_a locked by filesystem monitor during rollback-unlink")
+                # 3) normal virtual dest cleanup (not in fire-case): remove marker + clear record
+                if s in _created_dest_links:
+                    try: _os.unlink(s)
+                    except OSError: pass
+                    _created_dest_links.discard(s)
+                    return None
+                # 4) default: real unlink (for A_file etc.)
+                return _bak_ppunlink(self2, *a, **kw)
+            _PP.unlink = p_unlink
+
+            sm = SymlinkManager(orig)
+            res = sm.move_and_link(target, move_files=True)
+
+            check("RBF-PRE-1: source orig/link_a delete was ATTEMPTED", _src_del_fired["v"])
+            check("RBF-PRE-2: dest rollback (target/link_a unlink) was ATTEMPTED", _dest_rollback_del_fired["v"])
+            check("RBF-1: orig/link_a STILL EXISTS after double-fail", (orig / "link_a").exists())
+            check("RBF-2: target/link_a STILL EXISTS (dest rollback truly failed)",
+                  (target / "link_a").exists(),
+                  f"target children={sorted(p.name for p in target.iterdir())}")
+            check("RBF-3: result.success == False on double-fail",
+                  not res.success,
+                  f"method={res.method!r} msg={str(res.message)[:250]!r}")
+            msg = str(res.message or "")
+            check("RBF-4: message EXPLICITLY notes rollback failed (not 已回滚) and suggests manual check",
+                  "回滚失败" in msg and ("仍可能存在" in msg or "请手动检查" in msg) and str(target / "link_a") in msg,
+                  f"actual message tail: {msg[-300:]!r}")
+            check("RBF-5: external manifest UNTOUCHED",
+                  ext_manifest.exists() and ext_manifest.read_bytes() == b"MANIFEST_rbf_1")
+            check("RBF-6: earlier A_file returned to orig via outer rollback",
+                  (orig / "A_file.scs").exists() and (orig / "A_file.scs").read_bytes() == b"A_contents_rb_456")
+        finally:
+            _sm._contains_internal_symlinks = _bak_cis
+            _PP.is_symlink = _bak_ppisym
+            _os.readlink = _bak_osrdlnk
+            _os.symlink = _bak_ossym
+            _PP.unlink = _bak_ppunlink
+            _sm._is_junction = _bak_isjct
+    finally:
+        _sh.rmtree(str(tmp), ignore_errors=True)
+
+# -----------------------------------------------------------------------------
+# End of R14.final double-failure (rollback-fail) observability test
+# -----------------------------------------------------------------------------
+
 # ---------------- 主入口 ----------------
 def main():
     print("ETS2 Mod Manager - R14 验证测试")
@@ -1852,6 +1974,7 @@ def main():
     test_r14_3_p1_6_validate_tighten()
     test_r14_3_p1_conflict_false_positive_on_common_mod_dirs()
     test_r14_final_move_link_transactional_invariant()
+    test_r14_final_move_link_rollback_fail_observable()
 
     hr("R14 测试总结")
     total = PASS_CNT[0] + FAIL_CNT[0]
