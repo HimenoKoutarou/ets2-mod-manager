@@ -267,9 +267,13 @@ class UpdateService(QObject):
         self.status_changed.emit("正在安装新版本...")
         self.progress.emit(0, 100, "准备安装")
 
-        # R14.3: 事务式安装 — staging → backup → commit → rollback on failure
+        # R14.1: 事务式安装 — staging → backup → commit → rollback on failure
+        #   P11:  backup 目录加 timestamp，避免上次失败残留卡死下次更新
+        #   P1-3: 事务核心路径拿掉 ignore_errors=True（失败必须知道）
+        #   P1-4: 区分 ROLLBACK_SUCCESS / ROLLBACK_FAILED，不再误报"已恢复"
+        import time as _time
         install_path = Path(install_dir)
-        backup_dir = install_path.parent / f".{install_path.name}_backup_r14"
+        backup_dir = install_path.parent / f".{install_path.name}_backup_{int(_time.time())}"
 
         try:
             # 1. 验证解压内容有效（至少包含 src/ 或 run.py）
@@ -286,41 +290,69 @@ class UpdateService(QObject):
             if not has_valid_content:
                 raise RuntimeError("解压内容不包含有效程序文件，拒绝安装")
 
-            # 2. 备份当前版本
+            # 2. 备份当前版本（R14.1: backup 目录带 timestamp，不再清理旧 backup）
             self.progress.emit(30, 100, "备份当前版本")
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir, ignore_errors=True)
             if install_path.exists():
                 try:
-                    # 尝试 rename（最快，同卷原子操作）
+                    # 优先 rename（同卷原子操作）
                     os.rename(str(install_path), str(backup_dir))
                 except OSError:
-                    # fallback: copytree
+                    # 跨卷 fallback: copytree → rmtree（R14.1 P1-3: 不吞错误）
                     shutil.copytree(str(install_path), str(backup_dir))
-                    shutil.rmtree(str(install_path), ignore_errors=True)
+                    shutil.rmtree(str(install_path))  # 失败抛出，不静默
 
             # 3. 复制新版本到 install_dir
             self.progress.emit(50, 100, "安装新版本")
             try:
                 self._copy_extracted_to(extract_dir, install_path)
             except Exception as copy_err:
-                # R14.3: 安装失败 → 从 backup 回滚
+                # R14.1 P1-4: 安装失败 → 从 backup 回滚，区分 rollback 状态
                 self.status_changed.emit("安装失败，正在回滚...")
+                # 3a. 清理 partial install（R14.1 P1-3: 不吞错误）
                 if install_path.exists():
-                    shutil.rmtree(str(install_path), ignore_errors=True)
+                    try:
+                        shutil.rmtree(str(install_path))
+                    except OSError as clean_err:
+                        # partial 清理失败 — backup 还在，明确告知用户
+                        raise RuntimeError(
+                            f"安装失败且无法清理 partial install: {copy_err}。"
+                            f"备份保留在 {backup_dir}，请手动恢复。"
+                        ) from clean_err
+                # 3b. 从 backup 回滚
                 if backup_dir.exists():
+                    rollback_ok = False
+                    rollback_suffix = ""
                     try:
                         os.rename(str(backup_dir), str(install_path))
+                        rollback_ok = True
                     except OSError:
-                        shutil.copytree(str(backup_dir), str(install_path))
-                raise RuntimeError(
-                    f"安装失败，已从备份恢复: {copy_err}"
-                ) from copy_err
+                        # 跨卷 fallback
+                        try:
+                            shutil.copytree(str(backup_dir), str(install_path))
+                            rollback_ok = True
+                            rollback_suffix = "（跨卷复制）"
+                        except OSError as rb_err:
+                            rollback_suffix = (
+                                f"且自动恢复失败（{rb_err}），备份保留在 "
+                                f"{backup_dir}，请手动恢复。"
+                            )
+                    if rollback_ok:
+                        raise RuntimeError(
+                            f"安装失败，已从备份恢复{rollback_suffix}: {copy_err}"
+                        ) from copy_err
+                    else:
+                        raise RuntimeError(
+                            f"安装失败{rollback_suffix}"
+                        ) from copy_err
+                else:
+                    raise RuntimeError(
+                        f"安装失败且无备份可恢复: {copy_err}"
+                    ) from copy_err
 
-            # 4. 安装成功 → 删除备份
+            # 4. 安装成功 → 删除备份（外围清理，可用 _safe_remove 静默）
             self.progress.emit(90, 100, "清理临时文件")
             if backup_dir.exists():
-                shutil.rmtree(backup_dir, ignore_errors=True)
+                self._safe_remove(backup_dir)
 
         except Exception as e:
             self.error_occurred.emit(f"安装失败: {e}")

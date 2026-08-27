@@ -379,6 +379,11 @@ class SymlinkManager:
         """
         撤销：删除 Junction/Symlink，把真实目录搬回去。
         dest_dir 为搬移的目标目录（默认从当前链接目标自动识别）。
+
+        R14.1 事务语义：
+          - 冲突（同名但内容不同/类型不同）→ 立即中止，link 与 target 均不改动
+          - 复制失败 → 清理 partial original，重建 link → target，回到操作前状态
+          - 绝不删除 target 中未成功复制的文件（修 P0-1 数据丢失）
         """
         status = self.get_status()
         kind = status.get("kind")
@@ -389,6 +394,30 @@ class SymlinkManager:
         if target is None or not target.exists():
             return SymlinkResult(False, _T("sym.msg_unlink_no_target"),
                                  self.original, target)
+
+        # R14.1 P0-1: 预扫描冲突 — 同名但内容不同/类型不同 → 立即中止，不删任何东西
+        # 避免后续 cleanup 阶段误删 target 中的新文件
+        conflicts: list[str] = []
+        if self.original.exists() and self.original.is_dir():
+            for item in target.iterdir():
+                dest = self.original / item.name
+                if dest.exists():
+                    if dest.is_file() and item.is_file():
+                        if not _files_identical(item, dest):
+                            conflicts.append(item.name)
+                    else:
+                        # 类型不同（文件 vs 目录）或一方不存在
+                        conflicts.append(item.name)
+        if conflicts:
+            shown = ", ".join(conflicts[:10]) + ("..." if len(conflicts) > 10 else "")
+            return SymlinkResult(
+                False,
+                (_T("sym.msg_unlink_conflict", names=shown, count=len(conflicts)) or
+                 f"发现 {len(conflicts)} 个同名冲突文件（内容/类型不同）：{shown}。"
+                 f"已中止撤销，link 与 target 均未改动，请手动决定保留哪个版本后重试。"),
+                self.original, target
+            )
+
         # 1. 删除 link
         try:
             if self.original.is_symlink():
@@ -398,38 +427,74 @@ class SymlinkManager:
                 os.rmdir(str(self.original))
         except OSError as e:
             return SymlinkResult(False, _T("sym.msg_unlink_delete_fail", e=str(e)) or f"删除链接失败：{e}", self.original, target)
-        # 2. 搬回真实目录 — R13: 正确处理文件和子目录
+
+        # 2. 搬回真实目录 — R14.1: 事务式复制，失败时回滚重建 link
         try:
             self.original.mkdir(parents=True)
-            # 先复制（target 保持不动），成功后再清理 target
             for item in list(target.iterdir()):
                 dest = self.original / item.name
                 if dest.exists():
-                    # R13.1: 用 SHA256 比较（不是 size-only）
+                    # R14.1: 冲突已在预扫描阶段拦截；相同内容跳过
                     if dest.is_file() and item.is_file() and _files_identical(item, dest):
                         continue
-                    # 内容不同或类型不同 → 跳过不覆盖（保留两边）
                     continue
                 if item.is_dir():
                     shutil.copytree(str(item), str(dest))
                 else:
                     shutil.copy2(str(item), str(dest))
-            # 全部复制成功后清理 target
-            for item in list(target.iterdir()):
-                try:
-                    if item.is_dir():
-                        shutil.rmtree(item, ignore_errors=True)
-                    else:
-                        item.unlink()
-                except OSError:
-                    pass
         except OSError as e:
+            # R14.1 P0-2: 复制失败 → 清理 partial original，重建 link → target，回到操作前状态
+            rollback_err = self._rollback_relink(target)
             return SymlinkResult(
                 False,
-                (_T("sym.msg_unlink_moveback_fail", e=str(e), target=str(target)) or f"搬回时出错：{e}。当前真实目录在 {target}，你可以手动复制回去。"),
+                (_T("sym.msg_unlink_moveback_fail", e=str(e), target=str(target)) or
+                 f"搬回时出错：{e}。{rollback_err} 当前真实目录完整保留在 {target}。"),
                 self.original, target
             )
+
+        # 3. 全部复制成功后清理 target（此时 original 已完整，target 可安全清理）
+        for item in list(target.iterdir()):
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink()
+            except OSError:
+                pass
         return SymlinkResult(True, _T("sym.msg_unlink_ok"), self.original, target, method="replaced")
+
+    def _rollback_relink(self, target: Path) -> str:
+        """R14.1 P0-2: 复制失败后清理 partial original 并重建 link → target。
+        返回人类可读的回滚结果描述。"""
+        try:
+            if self.original.exists():
+                shutil.rmtree(str(self.original), ignore_errors=True)
+        except OSError:
+            pass
+        try:
+            self.original.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        ok = False
+        try:
+            ok = _create_junction(target, self.original)
+        except Exception:
+            ok = False
+        if not ok:
+            # 兜底：os.symlink
+            try:
+                if self.original.exists() and self.original.is_dir():
+                    try:
+                        self.original.rmdir()
+                    except OSError:
+                        pass
+                os.symlink(str(target), str(self.original), target_is_directory=True)
+                ok = True
+            except OSError:
+                pass
+        if ok:
+            return "已自动重建链接，target 未受损。"
+        return f"警告：无法重建链接，target 完整保留在 {target}，请手动恢复。"
 
 
     # ---------- 修复：失效软链接重定向到新 target（不搬文件） ----------
