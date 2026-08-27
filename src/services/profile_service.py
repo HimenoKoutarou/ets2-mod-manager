@@ -557,8 +557,18 @@ class ProfileService:
         # 3. 整个 prof.folder 目录用 shutil.copytree 复制到父目录下的新id文件夹
         new_folder = parent / new_id
         if new_folder.exists():
-            shutil.rmtree(new_folder)
-        shutil.copytree(prof.folder, new_folder)
+            raise RuntimeError(f"目标目录已存在: {new_folder}，请重试")
+        # P1 事务式复制：先 copytree 到 staging，成功后再 rename
+        staging = parent / f".{new_id}_staging"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        try:
+            shutil.copytree(prof.folder, staging)
+            os.replace(staging, new_folder)
+        except Exception:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise
 
         # 4. 读取新目录下的 profile.sii 文本（解密后），在 unit 中更新
         new_sii_in_new_folder = new_folder / "profile.sii"
@@ -588,7 +598,7 @@ class ProfileService:
 
         original_bytes = new_sii_target.read_bytes()
         was_encrypted = _looks_encrypted(original_bytes)
-        plain = self._get_plain_text(new_sii_target)
+        plain = self._get_plain_text_strict(new_sii_target)
 
         # 文本级替换 profile_name 和 company_name
         new_profile_name = new_display_name if new_display_name else ((prof.display_name or prof.profile_id) + " 副本")
@@ -616,9 +626,25 @@ class ProfileService:
         if was_encrypted:
             try:
                 out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
-            except Exception:
-                out_bytes = new_text.encode("utf-8-sig")
-        new_sii_target.write_bytes(out_bytes)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Profile 加密失败，拒绝写入明文以保护存档: {e}"
+                ) from e
+        # P0 原子写入
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".profile_sii_", dir=str(new_sii_target.parent)
+        )
+        try:
+            with os.fdopen(tmp_fd, "wb") as f:
+                f.write(out_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(new_sii_target))
+        except Exception:
+            if os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
+            raise
 
         # 5. 返回新的 ProfileInfo（自动调用 _enrich 补齐）
         new_info = ProfileInfo(
@@ -659,8 +685,10 @@ class ProfileService:
                                     zf.write(f, arc)
                                 except Exception:
                                     pass
-            except Exception:
-                pass
+            except Exception as e:
+                raise RuntimeError(
+                    f"删除前备份失败，拒绝删除存档: {e}"
+                ) from e
 
         # 2. shutil.rmtree(prof.folder) 删除目录
         if prof.folder.exists():
@@ -710,8 +738,8 @@ def _run_sii_decrypt(exe: Path, in_path: Path) -> Optional[bytes]:
             return None
         if not data:
             return None
-            if b"SiiNunit" in data:
-                return data
+        if b"SiiNunit" in data:
+            return data
         for cand in tmpin.parent.glob("*"):
             if cand.name == tmpin.name:
                 continue

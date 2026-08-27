@@ -352,19 +352,18 @@ def extract_files_batch(archive_path, inner_names) -> dict:
             partials.append(p)
         multi = ",".join(partials)
 
-        tmp = Path(os.environ.get("TEMP", str(Path.home()))) / f"ets2mm_b_{key}"
-        if tmp.exists():
-            shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True, exist_ok=True)
+        # R11.1: mkdtemp replaces fixed dir (race condition fix)
+        tmp = Path(tempfile.mkdtemp(prefix="ets2mm_b_"))
 
         ok = False
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [str(_EXTRACTOR), str(path), "--deep", f"--partial={multi}",
                  "-d", str(tmp), "-s"],
                 capture_output=True, timeout=_TIMEOUT_SECONDS,
             )
-            ok = True
+            # R11.1: check returncode
+            ok = result.returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             ok = False
 

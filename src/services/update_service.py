@@ -230,8 +230,8 @@ class UpdateService(QObject):
         self.status_changed.emit(f"正在下载版本 {self._latest_version}...")
 
         try:
-            temp_dir = Path(tempfile.gettempdir()) / "ets2_mod_manager_update"
-            temp_dir.mkdir(parents=True, exist_ok=True)
+            # R11.1: mkdtemp replaces fixed dir (avoid concurrent update race)
+            temp_dir = Path(tempfile.mkdtemp(prefix="ets2mm_update_"))
             zip_path = temp_dir / f"ets2_mod_manager_{self._latest_version}.zip"
         except Exception as e:
             self.error_occurred.emit(f"创建临时目录失败: {e}")
