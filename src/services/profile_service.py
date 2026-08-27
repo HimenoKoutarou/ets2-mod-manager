@@ -635,8 +635,21 @@ class ProfileService:
             try:
                 out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
             except Exception as e:
+                # R13: 加密失败 → 回滚整个 copy（local + cloud）
+                if new_folder.exists():
+                    shutil.rmtree(new_folder, ignore_errors=True)
+                try:
+                    new_cloud_dir
+                except NameError:
+                    pass
+                else:
+                    try:
+                        if new_cloud_dir.exists():
+                            shutil.rmtree(new_cloud_dir, ignore_errors=True)
+                    except Exception:
+                        pass
                 raise RuntimeError(
-                    f"Profile 加密失败，拒绝写入明文以保护存档: {e}"
+                    f"Profile 加密失败，拒绝写入明文以保护存档，已回滚: {e}"
                 ) from e
         # P0 原子写入
         tmp_fd, tmp_path = tempfile.mkstemp(

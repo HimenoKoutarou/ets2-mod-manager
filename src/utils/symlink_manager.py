@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
 import shutil
 import sys
@@ -45,6 +46,18 @@ def _is_junction(path: Path) -> bool:
     try:
         return SymlinkManager._read_junction_target(path) is not None
     except Exception:
+        return False
+
+
+def _files_identical(a: Path, b: Path) -> bool:
+    """R13: SHA256 compare two files (size-only is NOT safe)."""
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        ha = hashlib.sha256(a.read_bytes()).hexdigest()
+        hb = hashlib.sha256(b.read_bytes()).hexdigest()
+        return ha == hb
+    except OSError:
         return False
 
 
@@ -238,9 +251,9 @@ class SymlinkManager:
                     dest = target / item.name
                     # 如果目标已存在同名：hash 相同则跳过，不同则 _dup
                     if dest.exists():
-                        # R12: 同名文件比较 size，相同则跳过（避免不必要的 _dup）
+                        # R13: 同名文件用 SHA256 比较（size 相同不代表内容相同）
                         try:
-                            if item.stat().st_size == dest.stat().st_size:
+                            if _files_identical(item, dest):
                                 item.unlink()
                                 continue
                         except OSError:
@@ -277,13 +290,22 @@ class SymlinkManager:
                     # 真实目录 —— 如果搬移后为空（或有剩余），直接重命名也 OK
                     os.rename(orig, backup_path)
             except OSError as e:
-                # 某些情况下 Junction 重命名受限，尝试直接 unlink/rmtree
+                # R13: 绝对不 rmtree 有数据的目录 — 只有空目录才允许 fallback 删除
                 try:
                     if orig.is_symlink():
                         orig.unlink()
+                        backup_path = None
+                    elif not any(orig.iterdir()):
+                        # 空目录可以安全删除
+                        orig.rmdir()
+                        backup_path = None
                     else:
-                        shutil.rmtree(orig, ignore_errors=True)
-                    backup_path = None
+                        # 目录非空 — 拒绝删除，返回错误让用户手动处理
+                        return SymlinkResult(
+                            False,
+                            f"无法重命名原目录 {orig}（{e}），且目录非空，已停止操作避免数据丢失。请手动重命名后重试。",
+                            orig, target
+                        )
                 except OSError as e2:
                     return SymlinkResult(
                         False,
@@ -357,20 +379,25 @@ class SymlinkManager:
                 os.rmdir(str(self.original))
         except OSError as e:
             return SymlinkResult(False, _T("sym.msg_unlink_delete_fail", e=str(e)) or f"删除链接失败：{e}", self.original, target)
-        # 2. 搬回真实目录 — R12: 用 copytree 代替逐个 move（失败时 target 仍有完整数据）
+        # 2. 搬回真实目录 — R13: 正确处理文件和子目录
         try:
             self.original.mkdir(parents=True)
             # 先复制（target 保持不动），成功后再清理 target
             for item in list(target.iterdir()):
                 dest = self.original / item.name
                 if dest.exists():
-                    if item.stat().st_size == dest.stat().st_size:
-                        continue
-                shutil.copy2(str(item), str(dest))
-            # 全部复制成功后删除 target 中的源文件
+                    continue  # 已存在则跳过
+                if item.is_dir():
+                    shutil.copytree(str(item), str(dest))
+                else:
+                    shutil.copy2(str(item), str(dest))
+            # 全部复制成功后清理 target
             for item in list(target.iterdir()):
                 try:
-                    item.unlink()
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink()
                 except OSError:
                     pass
         except OSError as e:
@@ -445,6 +472,15 @@ class SymlinkManager:
             return SymlinkResult(True, _T("sym.msg_repair_jct_ok", target=str(target)) or f"已修复软链接：原位置重建目录联接 → {target}。重启 ETS2 即生效。",
                                  orig, target, method="junction")
         # 兜底：os.symlink
+        # R13: Junction 失败后 link_path 是空目录，os.symlink 要求目标不存在
+        try:
+            if link_path.exists() and link_path.is_dir():
+                try:
+                    link_path.rmdir()
+                except OSError:
+                    shutil.rmtree(link_path, ignore_errors=True)
+        except Exception:
+            pass
         try:
             os.symlink(str(target), str(orig), target_is_directory=True)
             return SymlinkResult(True, _T("sym.msg_repair_sym_ok", target=str(target)) or f"已修复软链接：原位置重建 Symlink → {target}。重启 ETS2 即生效。",
