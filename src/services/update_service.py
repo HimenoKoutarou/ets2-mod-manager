@@ -333,9 +333,34 @@ class UpdateService(QObject):
                             rollback_ok = True
                             rollback_suffix = "（跨卷复制）"
                         except OSError as rb_err:
+                            # P2 yellow: copytree partial failure — install_dir may be half-restored.
+                            # Clean up / quarantine partial install; NEVER touch backup_dir (complete).
+                            partial_cleaned_note = ""
+                            try:
+                                # Quarantine rename first (safer than rmtree on partial restore):
+                                import time as _t, uuid as _u
+                                qr = install_path.parent / (
+                                    f".{install_path.name}.rollback_partial_"
+                                    f"{int(_t.time())}_{_u.uuid4().hex[:12]}"
+                                )
+                                if install_path.exists():
+                                    try:
+                                        os.rename(str(install_path), str(qr))
+                                        partial_cleaned_note = f" partial install 已隔离到 {qr}，"
+                                    except OSError:
+                                        # rename fail → try rmtree clear
+                                        try:
+                                            shutil.rmtree(str(install_path))
+                                            partial_cleaned_note = " partial install 已清理，"
+                                        except OSError as clr_e:
+                                            partial_cleaned_note = (
+                                                f" 注意：partial install 清理也失败（{clr_e}），"
+                                            )
+                            except Exception:
+                                partial_cleaned_note = ""
                             rollback_suffix = (
-                                f"且自动恢复失败（{rb_err}），备份保留在 "
-                                f"{backup_dir}，请手动恢复。"
+                                f"且自动恢复失败（{rb_err}），{partial_cleaned_note}"
+                                f"完整备份保留在 {backup_dir}，请手动恢复（把 backup 内容复制回 install_path 即可）。"
                             )
                     if rollback_ok:
                         raise RuntimeError(
