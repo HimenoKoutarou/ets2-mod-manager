@@ -6,6 +6,19 @@ import os
 import shutil
 import sys
 import subprocess
+
+# ---------------- subprocess: never allocate console window (GUI build) ---------------
+import sys as _sys
+if _sys.platform == "win32":
+    _CREATE_NO_WINDOW = 0x08000000
+    _sp_si = subprocess.STARTUPINFO()
+    _sp_si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _SP_HIDE = _CREATE_NO_WINDOW
+    _SP_STARTUPINFO = _sp_si
+else:
+    _SP_HIDE = 0
+    _SP_STARTUPINFO = None
+# -----------------------------------------------------------------------------------
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -249,7 +262,8 @@ class SymlinkManager:
             result = subprocess.run(
                 ["cmd", "/c", "dir", "/aL", str(p.parent)],
                 capture_output=True, text=True, timeout=5,
-                encoding="mbcs", errors="replace"
+                encoding="mbcs", errors="replace",
+                creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
             )
             # 找 "<JUNCTION>" 或 "<SYMLINKD>" 行
             name = p.name
@@ -758,7 +772,8 @@ class SymlinkManager:
             if not removed and (orig.exists() or orig.is_symlink()):
                 r = subprocess.run(["cmd", "/c", "rmdir", str(orig)],
                                    capture_output=True, timeout=5,
-                                   encoding="mbcs", errors="replace")
+                                   encoding="mbcs", errors="replace",
+                                   creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO)
                 removed = r.returncode == 0
         except OSError as e:
             return SymlinkResult(False, _T("sym.msg_repair_del_fail", e=str(e)) or f"删除旧链接失败：{e}", orig, target)

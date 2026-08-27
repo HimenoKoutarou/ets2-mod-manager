@@ -30,6 +30,19 @@ import json
 import os
 import shutil
 import subprocess
+
+# ---------------- subprocess: never allocate console window (GUI build) ---------------
+import sys as _sys
+if _sys.platform == "win32":
+    _CREATE_NO_WINDOW = 0x08000000
+    _sp_si = subprocess.STARTUPINFO()
+    _sp_si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _SP_HIDE = _CREATE_NO_WINDOW
+    _SP_STARTUPINFO = _sp_si
+else:
+    _SP_HIDE = 0
+    _SP_STARTUPINFO = None
+# -----------------------------------------------------------------------------------
 import threading
 import tempfile
 import time
@@ -181,6 +194,7 @@ def _run_extractor(scs_path: Path, dest: Path, partial: str = "/manifest.sii") -
             [str(_EXTRACTOR), str(scs_path), "--deep", f"--partial={partial}",
              "-d", str(dest), "-s"],
             capture_output=True, timeout=_TIMEOUT_SECONDS,
+            creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
@@ -195,6 +209,7 @@ def _run_sxc(archive_path: Path, dest: Path, filename: str = "manifest.sii") -> 
         result = subprocess.run(
             [str(_SXC), str(archive_path), "-o", str(dest), "-f", filename, "-q"],
             capture_output=True, timeout=_TIMEOUT_SECONDS,
+            creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
@@ -361,6 +376,7 @@ def extract_files_batch(archive_path, inner_names) -> dict:
                 [str(_EXTRACTOR), str(path), "--deep", f"--partial={multi}",
                  "-d", str(tmp), "-s"],
                 capture_output=True, timeout=_TIMEOUT_SECONDS,
+                creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
             )
             # R11.1: check returncode
             ok = result.returncode == 0

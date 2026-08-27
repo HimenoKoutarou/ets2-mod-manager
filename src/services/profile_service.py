@@ -5,6 +5,19 @@ import os
 import re
 import shutil
 import subprocess
+
+# ---------------- subprocess: never allocate console window (GUI build) ---------------
+import sys as _sys
+if _sys.platform == "win32":
+    _CREATE_NO_WINDOW = 0x08000000
+    _sp_si = subprocess.STARTUPINFO()
+    _sp_si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _SP_HIDE = _CREATE_NO_WINDOW
+    _SP_STARTUPINFO = _sp_si
+else:
+    _SP_HIDE = 0
+    _SP_STARTUPINFO = None
+# -----------------------------------------------------------------------------------
 import struct
 import zipfile
 from dataclasses import dataclass, field
@@ -769,7 +782,8 @@ def _run_sii_decrypt(exe: Path, in_path: Path) -> Optional[bytes]:
         tmpout = tmpin.parent / (tmpin.stem + ".dec")
         result = subprocess.run([str(exe), str(tmpin), str(tmpout)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=30, cwd=td, shell=False)
+                                timeout=30, cwd=td, shell=False,
+                                creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO)
         # 必须同时满足：returncode=0、输出文件存在、文件非空
         if result.returncode != 0:
             return None
