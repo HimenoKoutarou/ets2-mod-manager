@@ -65,6 +65,47 @@ def _files_identical(a: Path, b: Path) -> bool:
 _CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
 
 
+def _contains_internal_symlinks(root: Path) -> list[str]:
+    found = []
+    if not root.exists() or not root.is_dir():
+        return found
+    try:
+        for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+            dp = Path(dirpath)
+            for names, is_dir in ((dirnames, True), (filenames, False)):
+                for n in list(names):
+                    p = dp / n
+                    try:
+                        if p.is_symlink() or _is_junction(p):
+                            try:
+                                rel = str(p.relative_to(root))
+                            except ValueError:
+                                rel = str(p)
+                            found.append(rel)
+                    except OSError:
+                        continue
+    except OSError:
+        return found
+    return found
+
+
+def _safe_copy_item(item: Path, dest: Path, *, allow_dir: bool = True) -> None:
+    if item.is_symlink() or _is_junction(item):
+        tgt_target = os.readlink(str(item)) if item.is_symlink() else SymlinkManager._read_junction_target(item)
+        if not tgt_target:
+            raise OSError("cannot read link target for " + str(item))
+        if allow_dir:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(tgt_target, str(dest), target_is_directory=item.is_dir() or _is_junction(item))
+        return
+    if item.is_file():
+        shutil.copy2(str(item), str(dest))
+    elif item.is_dir() and allow_dir:
+        shutil.copytree(str(item), str(dest), symlinks=True)
+    else:
+        raise OSError("unsupported item type: " + str(item))
+
+
 def _sha256_file(path: Path) -> str:
     """R14.5: 分块计算文件 SHA256，支持大文件。"""
     h = hashlib.sha256()
@@ -460,23 +501,51 @@ class SymlinkManager:
         except OSError as e:
             return SymlinkResult(False, _T("sym.msg_unlink_delete_fail", e=str(e)) or f"删除链接失败：{e}", self.original, target)
 
-        # 2. 搬回真实目录 — R14.1: 事务式复制，失败时回滚重建 link
+        # 2. 搬回真实目录 — R14.3: 预检内部 symlink + created_restore_dir invariant + 事务式复制
+        created_restore_dir = False
         try:
+            # R14.3 P1-3: 预检 target 内嵌套 symlink/junction，拒绝避免 follow-symlink 复制外部目录
+            internal_links = _contains_internal_symlinks(target)
+            if internal_links:
+                shown = ", ".join(internal_links[:10]) + ("..." if len(internal_links) > 10 else "")
+                try:
+                    if self.original.exists() and not any(self.original.iterdir()):
+                        self.original.rmdir()
+                except OSError:
+                    pass
+                try:
+                    if _create_junction(target, self.original):
+                        extra = "（已恢复原 Junction）"
+                    else:
+                        try:
+                            if self.original.exists() and self.original.is_dir():
+                                try: self.original.rmdir()
+                                except OSError: pass
+                            os.symlink(str(target), str(self.original), target_is_directory=True)
+                            extra = "（已恢复原 Symlink）"
+                        except OSError:
+                            extra = "（原 link 未能恢复，target 仍完整）"
+                except Exception:
+                    extra = ""
+                return SymlinkResult(
+                    False,
+                    (f"检测到 target 目录内嵌套 {len(internal_links)} 个 symlink/junction：{shown}。"
+                     f"为避免跟随外部目录复制导致的非预期数据搬移，已拒绝本次撤销操作。"
+                     f"{extra} 请手动移除以重建链接。"),
+                    self.original, target, method="rejected_internal_symlink"
+                )
             self.original.mkdir(parents=True)
+            created_restore_dir = True  # R14.3 P1-2: invariant，标记为本次事务创建
             for item in list(target.iterdir()):
                 dest = self.original / item.name
                 if dest.exists():
-                    # R14.1: 冲突已在预扫描阶段拦截；相同内容跳过
                     if dest.is_file() and item.is_file() and _files_identical(item, dest):
                         continue
                     continue
-                if item.is_dir():
-                    shutil.copytree(str(item), str(dest))
-                else:
-                    shutil.copy2(str(item), str(dest))
+                _safe_copy_item(item, dest, allow_dir=True)
         except OSError as e:
-            # R14.1 P0-2: 复制失败 → 清理 partial original，重建 link → target，回到操作前状态
-            rollback_err = self._rollback_relink(target)
+            # R14.3 P1-2: 传入 created_restore_dir=True，确保 partial original 被 rmtree/隔离
+            rollback_err = self._rollback_relink(target, created_restore_dir=created_restore_dir)
             return SymlinkResult(
                 False,
                 (_T("sym.msg_unlink_moveback_fail", e=str(e), target=str(target)) or
@@ -484,17 +553,25 @@ class SymlinkManager:
                 self.original, target
             )
 
-        # 3. 全部复制成功后清理 target（此时 original 已完整，target 可安全清理）
+        # 3. R14.3 P1-1: cleanup 失败一律 success=False，列出残留名，不使用 ignore_errors=True
+        cleanup_errors: list[str] = []
         for item in list(target.iterdir()):
             try:
                 if item.is_dir():
-                    shutil.rmtree(item, ignore_errors=True)
+                    shutil.rmtree(str(item))
                 else:
                     item.unlink()
-            except OSError:
-                pass
+            except OSError as e:
+                cleanup_errors.append(f"{item.name} ({e.__class__.__name__}: {e})")
+        if cleanup_errors:
+            shown = ", ".join(cleanup_errors[:10]) + ("..." if len(cleanup_errors) > 10 else "")
+            return SymlinkResult(
+                False,
+                (f"撤销搬回完成，但 target 目录有 {len(cleanup_errors)} 个残留项无法删除："
+                 f"{shown}。数据已完整恢复到 {self.original}，target 残留请手动清理。"),
+                self.original, target, method="replaced_partial_cleanup"
+            )
         return SymlinkResult(True, _T("sym.msg_unlink_ok"), self.original, target, method="replaced")
-
     def _rollback_relink(self, target: Path, *, created_restore_dir: bool = False) -> str:
         """R14.3 P1-2: 复制失败后清理 partial original 并重建 link → target。
         created_restore_dir=True 表示 original 是本事务 mkdir 创建的空目录之后
@@ -508,7 +585,8 @@ class SymlinkManager:
                     except OSError:
                         try:
                             import time as _t
-                            quarantine = self.original.parent / f"{self.original.name}.partial_{int(_t.time() * 1000)}"
+                            import uuid as _u
+                            quarantine = self.original.parent / f"{self.original.name}.partial_{int(_t.time() * 1000)}_{_u.uuid4().hex[:12]}"
                             if not quarantine.exists():
                                 os.rename(str(self.original), str(quarantine))
                         except OSError:
