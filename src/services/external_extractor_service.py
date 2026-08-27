@@ -177,12 +177,12 @@ def _run_extractor(scs_path: Path, dest: Path, partial: str = "/manifest.sii") -
     if not _EXTRACTOR.exists():
         return False
     try:
-        subprocess.run(
+        result = subprocess.run(
             [str(_EXTRACTOR), str(scs_path), "--deep", f"--partial={partial}",
              "-d", str(dest), "-s"],
             capture_output=True, timeout=_TIMEOUT_SECONDS,
         )
-        return True
+        return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False
 
@@ -192,11 +192,11 @@ def _run_sxc(archive_path: Path, dest: Path, filename: str = "manifest.sii") -> 
     if not _SXC.exists():
         return False
     try:
-        subprocess.run(
+        result = subprocess.run(
             [str(_SXC), str(archive_path), "-o", str(dest), "-f", filename, "-q"],
             capture_output=True, timeout=_TIMEOUT_SECONDS,
         )
-        return True
+        return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False
 
@@ -232,7 +232,8 @@ def extract_manifest_text(archive_path) -> Optional[str]:
     tmp = Path(tempfile.mkdtemp(prefix="ets2mm_mf_"))
 
     text: Optional[str] = None
-    if _extract_single_file(path, "manifest.sii", tmp):
+    extract_ok = _extract_single_file(path, "manifest.sii", tmp)
+    if extract_ok:
         for p in tmp.rglob("manifest.sii"):
             try:
                 text = p.read_text(encoding="utf-8-sig", errors="replace")
@@ -241,8 +242,10 @@ def extract_manifest_text(archive_path) -> Optional[str]:
             break
 
     magic = _detect_magic(path)
-    cache[key] = {"manifest_text": text or "", "ts": time.time(), "magic": magic}
-    _save_cache()
+    # R11: extractor failed = do NOT cache (avoid 30-day negative cache on temp failure)
+    if extract_ok:
+        cache[key] = {"manifest_text": text or "", "ts": time.time(), "magic": magic}
+        _save_cache()
     shutil.rmtree(tmp, ignore_errors=True)
     return text
 

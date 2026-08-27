@@ -34,6 +34,20 @@ def _is_admin() -> bool:
         return False
 
 
+def _is_junction(path: Path) -> bool:
+    """Path.is_junction() compat (Python 3.12+ native, 3.11 fallback)."""
+    method = getattr(path, "is_junction", None)
+    if method is not None:
+        try:
+            return method()
+        except OSError:
+            return False
+    try:
+        return SymlinkManager._read_junction_target(path) is not None
+    except Exception:
+        return False
+
+
 def _create_junction(target: Path, link: Path) -> bool:
     """
     使用 Win32 API 创建目录联接 (Junction Point / Reparse Point)
@@ -139,7 +153,7 @@ class SymlinkManager:
     # ---------- 查询状态 ----------
     def get_status(self) -> dict:
         p = self.original
-        if not p.exists() and not p.is_symlink() and not p.is_junction():
+        if not p.exists() and not p.is_symlink() and not _is_junction(p):
             return {"exists": False, "kind": "missing", "target": None, "link": str(p)}
         # 是符号链接 / Junction？
         if p.is_symlink():

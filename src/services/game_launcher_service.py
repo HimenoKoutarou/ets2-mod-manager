@@ -127,16 +127,17 @@ class GameLaunchHandle:
         log_txt = self.docs_dir / "game.log.txt"
 
         crashed = False
-        # 判断 1：crash.txt mtime 变新
+        # R11: crash.txt mtime = high confidence crash signal
         if crash_txt.exists():
             mtime_after = crash_txt.stat().st_mtime
             if mtime_after > self._crash_mtime_before:
                 crashed = True
 
-        # 判断 2：进程退出码非 0
+        # R11: exit code non-zero alone is NOT crash (user may have force-killed)
+        # Only crash.txt update confirms a real crash
         rc = self.process.returncode
-        if rc is not None and rc != 0:
-            crashed = True
+        if rc is not None and rc != 0 and not crashed:
+            pass  # uncertain, do not mark as crashed
 
         return (
             crashed,

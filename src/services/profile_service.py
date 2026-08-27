@@ -403,15 +403,14 @@ class ProfileService:
 
     # ---------- 读写文件辅助 ----------
     def _get_plain_text(self, sii_path: Path) -> str:
+        """读取用：宽松 fallback。"""
         data = Path(sii_path).read_bytes()
-        # 优先用内置解密（纯 Python，无需外部 exe）
         try:
             dec = decrypt_profile_bytes(data)
             if b"SiiNunit" in dec or b"profile :" in dec:
                 return _decode_text(dec)
         except Exception:
             pass
-        # 失败则尝试外部 SII_Decrypt.exe
         if self.sii_decrypt_exe and self.sii_decrypt_exe.exists():
             try:
                 out = _run_sii_decrypt(self.sii_decrypt_exe, sii_path)
@@ -419,8 +418,29 @@ class ProfileService:
                     return _decode_text(out)
             except Exception:
                 pass
-        # 最后：按明文返回（也许已经是明文）
         return _decode_text(data)
+
+    def _get_plain_text_strict(self, sii_path: Path) -> str:
+        """写入用：严格模式 — 解密必须成功，否则 raise。"""
+        data = Path(sii_path).read_bytes()
+        if b"SiiNunit" in data or b"profile :" in data:
+            return _decode_text(data)
+        try:
+            dec = decrypt_profile_bytes(data)
+            if b"SiiNunit" in dec or b"profile :" in dec:
+                return _decode_text(dec)
+        except Exception:
+            pass
+        if self.sii_decrypt_exe and self.sii_decrypt_exe.exists():
+            try:
+                out = _run_sii_decrypt(self.sii_decrypt_exe, sii_path)
+                if out is not None and (b"SiiNunit" in out or b"profile :" in out):
+                    return _decode_text(out)
+            except Exception:
+                pass
+        raise RuntimeError(
+            f"Profile 解密失败，拒绝写入：无法解密 {sii_path}"
+        )
 
     def _read_units(self, sii_path: Path) -> List[SiiUnit]:
         text = self._get_plain_text(sii_path)
@@ -450,7 +470,7 @@ class ProfileService:
         original_bytes = prof.profile_sii.read_bytes()
         was_encrypted = _looks_encrypted(original_bytes)
         # 解密文本
-        plain = self._get_plain_text(prof.profile_sii)
+        plain = self._get_plain_text_strict(prof.profile_sii)
         new_text = rewrite_active_mods_in_text(plain, list(new_mods))
         # 写前备份
         self.backup.backup(prof.profile_sii, tag="pre-write")
