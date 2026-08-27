@@ -18,6 +18,24 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+# R14.final: shared module-level PROJECT_ROOT (replaces hardcoded F:\ETS2ModManager references)
+try:
+    _PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
+except NameError:  # pragma: no cover — unusual interpreters
+    import os as _os_fallback
+    _here = Path(_os_fallback.getcwd())
+    _PROJECT_ROOT = _here if (_here / "src").exists() else _here.parent
+
+
+# R14.final: shared module-level PROJECT_ROOT (replaces hardcoded F:\ETS2ModManager references in injection tests)
+try:
+    _PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
+except NameError:  # pragma: no cover
+    import os as _os_fallback
+    _here = Path(_os_fallback.getcwd())
+    _PROJECT_ROOT = _here if (_here / "src").exists() else _here.parent
+
+
 from utils.symlink_manager import (
     SymlinkManager,
     _files_identical,
@@ -912,7 +930,7 @@ def test_r14_2_e2e_triple_failure_vs_production():
     hr("R14.2 E2E: UpdateService.download_and_install() 三重故障（真实调用生产函数）")
     tmp = Path(tempfile.mkdtemp(prefix="r14_2_e2e_"))
     try:
-        sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+        sys.path.insert(0, str((_PROJECT_ROOT / "src")))
         from services.update_service import UpdateService
         import zipfile as _zf
 
@@ -1086,8 +1104,8 @@ def test_r14_3_p1_3_internal_symlink_reject():
     hr("R14.3 P1-3: 内部 symlink 预检拒绝")
     import sys as _sys
     import tempfile, os
-    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
-        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    if str(_PROJECT_ROOT / "src") not in _sys.path:
+        _sys.path.insert(0, str(_PROJECT_ROOT / "src"))
     from utils.symlink_manager import SymlinkManager
 
     tmp = Path(tempfile.mkdtemp(prefix="r14_3_sym3_"))
@@ -1172,8 +1190,8 @@ def test_r14_3_p1_1_cleanup_partial_failure():
     """P1-1 (hotfix direct injection): 不依赖 Junction 创建权限，直接证明 cleanup_errors 与 replaced_partial_cleanup 语义。"""
     hr("R14.3 P1-1 hotfix: cleanup partial → success=False, replaced_partial_cleanup")
     import sys as _sys, tempfile, os as _os
-    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
-        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    if str((_PROJECT_ROOT / "src")) not in _sys.path:
+        _sys.path.insert(0, str((_PROJECT_ROOT / "src")))
     from utils.symlink_manager import SymlinkManager
 
     # ------------------------------------------------------------
@@ -1301,8 +1319,8 @@ def test_r14_3_p1_4_repair_full_rollback():
     """P1-4: repair_broken_link Junction + Symlink 都失败 → 原 broken link 恢复。"""
     hr("R14.3 P1-4: repair 双重失败 → 恢复原 broken link")
     import sys as _sys, tempfile, os as _os
-    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
-        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    if str((_PROJECT_ROOT / "src")) not in _sys.path:
+        _sys.path.insert(0, str((_PROJECT_ROOT / "src")))
     from utils.symlink_manager import SymlinkManager
 
     tmp = Path(tempfile.mkdtemp(prefix="r14_3_rb_"))
@@ -1398,8 +1416,8 @@ def test_r14_3_p1_5_backup_uuid_shape():
     """P1-5: backup_dir 命名含 timestamp + 12 hex，毫秒级并发不碰撞。"""
     hr("R14.3 P1-5: backup_dir UUID 后缀 + 不碰撞")
     import sys as _sys, tempfile, re as _re
-    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
-        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    if str((_PROJECT_ROOT / "src")) not in _sys.path:
+        _sys.path.insert(0, str((_PROJECT_ROOT / "src")))
     import services.update_service as _upd_mod
     from unittest.mock import patch, MagicMock
 
@@ -1454,8 +1472,8 @@ def test_r14_3_p1_6_validate_tighten():
     """P1-6: validate_package 对错误类型 marker + src 内 symlink 明确报。"""
     hr("R14.3 P1-6: validate_package 错误类型 marker / src symlink 检测")
     import sys as _sys, tempfile
-    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
-        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    if str((_PROJECT_ROOT / "src")) not in _sys.path:
+        _sys.path.insert(0, str((_PROJECT_ROOT / "src")))
     from services.update_service import UpdateService
 
     tmp = Path(tempfile.mkdtemp(prefix="r14_3_val_"))
@@ -1525,8 +1543,8 @@ def test_r14_3_p1_conflict_false_positive_on_common_mod_dirs():
     hr("R14.3.P1 false-positive conflict detection on ETS2 mod dirs (def/vehicle material etc.)")
 
     import tempfile, shutil as _sh, os as _os, sys as _sys
-    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
-        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    if str((_PROJECT_ROOT / "src")) not in _sys.path:
+        _sys.path.insert(0, str((_PROJECT_ROOT / "src")))
     from utils.symlink_manager import SymlinkManager, _is_junction as _ij, _create_junction
 
     tmp = Path(tempfile.mkdtemp(prefix="r143_p1_dirs_conflict_"))
@@ -1621,6 +1639,195 @@ def test_r14_3_p1_conflict_false_positive_on_common_mod_dirs():
 # End of P1 false-positive mod-dirs test
 # -----------------------------------------------------------------------------
 
+
+# =============================================================================
+# R14.final P1: move_and_link link-item transaction invariant
+# Injection test (no Windows Junction/Symlink creation permission required).
+# User-required failure scenario:
+#   orig dir contains:
+#     A_file.scs         (plain file — gets moved BEFORE the link item)
+#     link_a  →  external_target  (symlink/junction item — 2nd iteration, fires fail)
+#
+#   Inject: when deleting orig/link_a after creating new target/link_a, raise
+#   PermissionError.
+#
+# Invariant expected:
+#   result.success == False
+#   orig/link_a     STILL EXISTS    (source not deleted — original delete failed)
+#   target/link_a   DOES NOT EXIST  (rollback: just-created dest removed)
+#   external_target CONTENTS UNTOUCHED
+#   A_file.scs      RETURNED BACK to orig/A_file.scs (outer except rollback)
+# =============================================================================
+
+# =============================================================================
+# R14.final P1: move_and_link link-item transaction invariant
+# Proof test — we inject during the ITEM-LEVEL link branch itself (L322 of
+# symlink_manager.py), not during pre-check.
+#
+# To avoid relying on Windows developer mode, we monkey-patch os.symlink so it
+# succeeds "virtually" by creating a marker file at dest (not a real symlink).
+# The rollback path (dest.is_symlink() → if not fallthrough to _is_junction)
+# will not see a real link either, so we also monkey-patch dest.is_symlink for
+# the newly-created link_a to return True BEFORE the rollback unlink fires.
+#
+# Assertions required by user review 9.1/10:
+#   (0) res.method == 'move_and_link_rollback_partial_item_move' (not rejected_internal_symlink)
+#   (1) res.success == False
+#   (2) orig/link_a STILL EXISTS    (source delete never committed)
+#   (3) target/link_a DOES NOT EXIST (rollback deleted newly-created dest)
+#   (4) external/the_mod/manifest.sii UNTOUCHED
+#   (5) A_file.scs RETURNED BACK in orig via outer moved_items rollback
+#   (6) target/A_file.scs NOT present
+# =============================================================================
+def test_r14_final_move_link_transactional_invariant():
+    """move_and_link link branch: create dest → delete source FAIL → rollback dest + raise.
+    Outer except rolls back ALL earlier moved_items (A_file.scs)."""
+    hr("R14.final.P1 move_and_link link transaction (create→delete FAIL→rollback dest invariant)")
+    import tempfile, shutil as _sh, os as _os, sys as _sys
+    from pathlib import Path as _PP
+
+    if str(_PROJECT_ROOT / "src") not in _sys.path:
+        _sys.path.insert(0, str(_PROJECT_ROOT / "src"))
+    from utils import symlink_manager as _sm
+    SymlinkManager = _sm.SymlinkManager
+
+    tmp = Path(tempfile.mkdtemp(prefix="r14_final_move_link_inv_"))
+    try:
+        orig = tmp / "orig_mod"
+        target = tmp / "target_mods"
+        external = tmp / "external_storage"
+        orig.mkdir(); target.mkdir(); external.mkdir()
+
+        # Build orig layout
+        (orig / "A_file.scs").write_bytes(b"A_contents_123")
+        (orig / "link_a").write_bytes(b"IGNORED_marker")   # will patch is_symlink=True
+        (external / "the_mod").mkdir(parents=True)
+        ext_manifest = (external / "the_mod") / "manifest.sii"
+        ext_manifest.write_bytes(b"MANIFEST_v1")
+        external_target_path = external / "the_mod"
+
+        # State bookkeeping across patches
+        _created_dest_links : set[str] = set()   # os.symlink success (virtual)
+        _source_delete_fired = {"v": False}
+
+        # ---- monkey-patches -----
+        _bak_contains = _sm._contains_internal_symlinks
+        _bak_is_symlink_pp = _PP.is_symlink
+        _bak_readlink_os = _os.readlink
+        _bak_unlink_pp = _PP.unlink
+        _bak_symlink_os = _os.symlink
+
+        def p_contains(root):
+            # Pre-check passes — we want the item-level branch to fire.
+            return []
+
+        def p_is_symlink(self2):
+            # orig/link_a → True (item branch taken + tgt_target read via readlink)
+            # plus any recorded created dest link → True (so rollback dest path runs unlink)
+            s = str(self2)
+            if s in _created_dest_links:
+                return True
+            if s.endswith("link_a") and orig in self2.parents:
+                return True
+            return _bak_is_symlink_pp(self2)
+
+        def p_readlink(path, *a, **kw):
+            p = Path(path)
+            if p.name == "link_a" and orig in p.parents:
+                return str(external_target_path)
+            return _bak_readlink_os(path, *a, **kw)
+
+        def p_symlink(tgt, dst, *a, **kw):
+            # Virtual create — record so p_is_symlink/dest.exist checks work
+            dst_p = Path(dst)
+            # marker file (not real symlink) — ensures we can remove with Path.unlink()
+            dst_p.write_bytes(b"VIRTUAL_LINK_CREATED")
+            _created_dest_links.add(str(dst_p))
+            return None
+
+        def p_unlink(self2, *a, **kw):
+            # If it's the source orig/link_a, fire PermissionError on delete
+            s = str(self2)
+            if s.endswith("link_a") and orig in self2.parents:
+                _source_delete_fired["v"] = True
+                raise PermissionError(
+                    "Simulated: source unlink fail — AV/process locks orig/link_a mid-move"
+                )
+            # If it's a virtual dest link being rolled back, confirm deletion + clear record
+            if s in _created_dest_links:
+                try:
+                    # Use os.unlink(str) to bypass Path.unlink patched dispatcher → no recursion.
+                    _os.unlink(s)
+                except OSError:
+                    pass
+                _created_dest_links.discard(s)
+                return None
+            return _bak_unlink_pp(self2, *a, **kw)
+
+        # Wrap Path.exists so dest link markers count as "exists" for the
+        # "dest exists?" check in production L330 (but we ensure no duplicate)
+        _bak_exists_pp = _PP.exists
+        def p_exists(self2):
+            s = str(self2)
+            if s in _created_dest_links:
+                # still physically exists as marker file, so default is fine
+                pass
+            return _bak_exists_pp(self2)
+
+        try:
+            _sm._contains_internal_symlinks = p_contains
+            _PP.is_symlink = p_is_symlink
+            _os.readlink = p_readlink
+            _os.symlink = p_symlink
+            _PP.unlink = p_unlink
+            _PP.exists = p_exists
+            # ensure _is_junction returns False for orig/link_a — forces item.is_symlink branch
+            _bak_ij = _sm._is_junction
+            _sm._is_junction = lambda p: False
+
+            sm = SymlinkManager(orig)
+            res = sm.move_and_link(target, move_files=True)
+
+            check("FINAL-MOVE-0: method IS NOT rejected_internal_symlink (we hit item branch)",
+                  res.method != "rejected_internal_symlink",
+                  f"method={res.method!r} msg-head={str(res.message)[:120]!r}")
+            check("FINAL-MOVE-0b: source orig/link_a delete WAS attempted (proof: injected PermissionError fired)",
+                  _source_delete_fired["v"],
+                  f"fired={_source_delete_fired!r}")
+            check("FINAL-MOVE-1: result.success == False",
+                  not res.success,
+                  f"method={res.method!r} msg={str(res.message)[:200]!r}")
+            # orig/link_a STILL EXISTS (delete rollback — we raised, never deleted it)
+            check("FINAL-MOVE-2: source orig/link_a STILL EXISTS",
+                  (orig / "link_a").exists())
+            # target/link_a DOES NOT EXIST (rollback path deleted it)
+            check("FINAL-MOVE-3: target/link_a DOES NOT EXIST (just-created dest rolled back)",
+                  not (target / "link_a").exists(),
+                  f"target.children={sorted(p.name for p in target.iterdir()) if target.exists() else []} ; recorded={sorted(_created_dest_links)}")
+            # external untouched
+            check("FINAL-MOVE-4: external/the_mod/manifest.sii UNTOUCHED",
+                  ext_manifest.exists() and ext_manifest.read_bytes() == b"MANIFEST_v1")
+            # A_file.scs returned back (outer rolled back moved_items)
+            check("FINAL-MOVE-5: A_file.scs RETURNED BACK orig/ via outer rollback",
+                  (orig / "A_file.scs").exists() and (orig / "A_file.scs").read_bytes() == b"A_contents_123")
+            check("FINAL-MOVE-6: target/A_file.scs DOES NOT exist (rolled back)",
+                  not (target / "A_file.scs").exists())
+        finally:
+            _sm._contains_internal_symlinks = _bak_contains
+            _PP.is_symlink = _bak_is_symlink_pp
+            _os.readlink = _bak_readlink_os
+            _os.symlink = _bak_symlink_os
+            _PP.unlink = _bak_unlink_pp
+            _PP.exists = _bak_exists_pp
+            _sm._is_junction = _bak_ij
+    finally:
+        _sh.rmtree(str(tmp), ignore_errors=True)
+
+# -----------------------------------------------------------------------------
+# End of final P1 move_and_link link-transactional test
+# -----------------------------------------------------------------------------
+
+
 # ---------------- 主入口 ----------------
 def main():
     print("ETS2 Mod Manager - R14 验证测试")
@@ -1644,6 +1851,7 @@ def main():
     test_r14_3_p1_5_backup_uuid_shape()
     test_r14_3_p1_6_validate_tighten()
     test_r14_3_p1_conflict_false_positive_on_common_mod_dirs()
+    test_r14_final_move_link_transactional_invariant()
 
     hr("R14 测试总结")
     total = PASS_CNT[0] + FAIL_CNT[0]

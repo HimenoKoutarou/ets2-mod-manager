@@ -329,15 +329,49 @@ class SymlinkManager:
                             raise OSError(f"无法读取 {item} 的 link target，拒绝不安全 move")
                         if dest.exists():
                             raise OSError(f"目标已存在同名 link：{dest}，无法安全重建 symlink，请改名后重试")
+                        # R14.final P1: Transactional invariant for link-item move:
+                        #   SUCCESS path: new dest link exists → old src link deleted → commit (moved_items.add)
+                        #   FAIL path:    new dest link exists → old src link delete FAIL → rollback dest link → RAISE
+                        # Fallback-rollback MUST silently swallow own errors (focus on the original failure).
                         os.symlink(tgt_target, str(dest), target_is_directory=item.is_dir() or _is_junction(item))
+                        _src_delete_ok = False
+                        _src_delete_err: OSError | None = None
                         try:
                             if item.is_symlink():
                                 item.unlink()
+                                _src_delete_ok = True
                             elif _is_junction(item):
-                                try: os.rmdir(str(item))
-                                except OSError: item.unlink(missing_ok=True)
-                        except OSError:
-                            pass
+                                try:
+                                    os.rmdir(str(item))
+                                    _src_delete_ok = True
+                                except OSError as _jrm_e:
+                                    _src_delete_err = _jrm_e
+                                    try:
+                                        item.unlink(missing_ok=True)
+                                        _src_delete_ok = True
+                                        _src_delete_err = None
+                                    except OSError as _junlink_e:
+                                        _src_delete_err = OSError(f"rmdir={_jrm_e}; unlink={_junlink_e}")
+                        except OSError as _del_e:
+                            _src_delete_err = _del_e
+                        if not _src_delete_ok:
+                            # Rollback the just-created dest link. Swallow own exceptions; primary failure is _src_delete_err.
+                            try:
+                                if dest.is_symlink():
+                                    dest.unlink()
+                                elif _is_junction(dest):
+                                    try: os.rmdir(str(dest))
+                                    except OSError:
+                                        try: dest.unlink(missing_ok=True)
+                                        except OSError: pass
+                            except OSError:
+                                pass
+                            # Important: do NOT append dest to moved_items (not actually moved from source).
+                            # Also do NOT continue — raise so outer except block can rollback all earlier moved_items.
+                            raise OSError(
+                                f"迁移 symlink/junction 时删除源 link {item} 失败（{_src_delete_err}），"
+                                f"已回滚刚在 {dest} 创建的等价 link，之前已搬移的项目将被统一回滚。"
+                            )
                         moved_items.append(dest)
                         continue
                     if dest.exists():
@@ -594,8 +628,8 @@ class SymlinkManager:
                             import uuid as _u
                             quarantine_path = self.original.parent / f"{self.original.name}.partial_{int(_t.time() * 1000)}_{_u.uuid4().hex[:12]}"
                             if not quarantine_path.exists():
+                                # quarantine_path still holds the unique target name
                                 os.rename(str(self.original), str(quarantine_path))
-                                quarantine_path = quarantine_path  # rename succeeded
                             else:
                                 rmtree_skipped = True
                         except OSError:
@@ -630,9 +664,14 @@ class SymlinkManager:
         except OSError:
             pass
         ok = False
+        _jct_err_note = ""
         try:
             ok = _create_junction(target, self.original)
-        except Exception:
+        except OSError as _rrc_jct_e:
+            _jct_err_note = f"（重建 Junction 异常：{type(_rrc_jct_e).__name__}: {_rrc_jct_e}）"
+            ok = False
+        except Exception as _rrc_jct_xe:
+            _jct_err_note = f"（重建 Junction 非预期异常：{type(_rrc_jct_xe).__name__}: {_rrc_jct_xe}）"
             ok = False
         rebuild_skipped_note = ""
         if not ok:
@@ -654,7 +693,8 @@ class SymlinkManager:
                 _extra = " （注意：partial original 删除被跳过，后续可手动清理。）"
             return "已自动重建链接，target 未受损。" + _extra
         return (f"警告：无法重建链接，target 完整保留在 {target}，请手动恢复。"
-                + (" partial original 未清理。" if rmtree_skipped else ""))
+                + (" partial original 未清理。" if rmtree_skipped else "")
+                + _jct_err_note)
 
 
     # ---------- 修复：失效软链接重定向到新 target（不搬文件） ----------
