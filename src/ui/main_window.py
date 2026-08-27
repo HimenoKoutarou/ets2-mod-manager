@@ -276,7 +276,55 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
                 w.wait(3000)
         super().closeEvent(event)
 
+
+def _relaunch_without_console():
+    """Dev 模式下如果有控制台窗口，用 pythonw.exe 重启自身彻底消除终端。
+
+    用户用 `py src/__main__.py` 启动时，PowerShell 窗口是 Python 父终端，
+    代码内部无法隐藏。此函数检测到控制台后用 pythonw.exe 重启：pythonw 无
+    控制台窗口，当前进程退出后 PowerShell 窗口自动关闭。打包后 (frozen)
+    跳过——PyInstaller console=False 已经无控制台。
+    """
+    import os, sys, shutil, subprocess, ctypes
+    if sys.platform != "win32":
+        return
+    if getattr(sys, "frozen", False):
+        return
+    # 检测当前进程是否拥有控制台窗口
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if not hwnd:
+            return
+    except Exception:
+        return
+    # 找 pythonw.exe
+    pythonw = shutil.which("pythonw")
+    if not pythonw:
+        exe_dir = os.path.dirname(sys.executable)
+        candidate = os.path.join(exe_dir, "pythonw.exe")
+        if os.path.exists(candidate):
+            pythonw = candidate
+    if not pythonw:
+        # 找不到 pythonw → fallback: FreeConsole 分离（窗口不一定消失但至少 stdout 不再串到终端）
+        try:
+            ctypes.windll.kernel32.FreeConsole()
+        except Exception:
+            pass
+        return
+    # 重启：pythonw + 原始 argv
+    argv = [pythonw] + list(sys.argv)
+    try:
+        ctypes.windll.kernel32.FreeConsole()
+        subprocess.Popen(argv, creationflags=0x08000000, cwd=os.getcwd())
+        sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+
 def main():
+    _relaunch_without_console()
     app = QApplication.instance() or QApplication(sys.argv)
     ThemeManager.instance().apply(app)
     # App 级图标 + splash logo （统一 resolve_asset：dev tree / onedir / onefile 全匹配）

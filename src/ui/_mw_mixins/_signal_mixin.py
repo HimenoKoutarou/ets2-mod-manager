@@ -553,19 +553,9 @@ class _SignalMixin:
             except Exception:
                 self._close_splash()
                 self.show()
-            # 主窗口 show 完成之后，顺序弹：更新日志关 → 220ms → 未分类对话框（不再两个叠一起）
-            def _after_entry_updates():
-                try: self._async_check_update()
-                except Exception: pass
-                tasks = [lambda: self._show_update_notes_if_needed()]
-                pending_ids = getattr(self, "_startup_pending_new_mod_ids", None)
-                if pending_ids:
-                    ids = list(pending_ids)
-                    tasks.append(lambda: self._show_new_mods_dialog(ids))
-                    try: delattr(self, "_startup_pending_new_mod_ids")
-                    except Exception: pass
-                self._queue_startup_modals_sequential(tasks)
-            QTimer.singleShot(900, _after_entry_updates)
+            # 更新日志/新模组弹窗不在此处排计时器！等 close_installer_splash 回调里
+            # main.show()+activate 真正完成 → _on_main_window_shown → 再 1500ms
+            # 这样用户先看到主界面 1.5 秒，然后才弹更新日志（"进主界面后再弹"）
         else:
             self._close_splash()
             self.setEnabled(True)
@@ -590,6 +580,25 @@ class _SignalMixin:
                 pass
             _QST.singleShot(220, _step)
         _QST.singleShot(120, _step)
+
+    def _on_main_window_shown(self):
+        """close_installer_splash 回调: main.show()+activate 完成后触发。
+
+        此时主窗口已真正可见。再等 1500ms 让用户感知主界面已就绪，
+        然后顺序弹更新日志 → 新模组归类对话框。
+        """
+        def _after_entry_updates():
+            try: self._async_check_update()
+            except Exception: pass
+            tasks = [lambda: self._show_update_notes_if_needed()]
+            pending_ids = getattr(self, "_startup_pending_new_mod_ids", None)
+            if pending_ids:
+                ids = list(pending_ids)
+                tasks.append(lambda: self._show_new_mods_dialog(ids))
+                try: delattr(self, "_startup_pending_new_mod_ids")
+                except Exception: pass
+            self._queue_startup_modals_sequential(tasks)
+        QTimer.singleShot(1500, _after_entry_updates)
 
     def _bootstrap(self):
         self._show_splash()

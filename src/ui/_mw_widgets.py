@@ -452,10 +452,20 @@ class SplashScreen(QWidget):
         def _finish():
             try:
                 if then_show_main is not None:
-                    try: then_show_main.show()
+                    try:
+                        then_show_main.show()
+                        then_show_main.raise_()
+                        then_show_main.activateWindow()
+                        QApplication.processEvents()
                     except Exception: pass
                 self.close()
                 self.deleteLater()
+                # 通知 MainWindow: 主窗口已经真正 show + activate 了，
+                # 可以开始排延后的更新日志/新模组弹窗
+                cb = getattr(then_show_main, "_on_main_window_shown", None) if then_show_main else None
+                if cb:
+                    try: cb()
+                    except Exception: pass
             except Exception:
                 pass
         QTimer.singleShot(350, _finish)
