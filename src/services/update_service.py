@@ -59,6 +59,32 @@ def _compare_versions(a: str, b: str) -> int:
     return 0
 
 
+
+def _quarantine_or_cleanup_partial_install(install_path: Path) -> str:
+    """UpdateService helper: after rollback copytree backup→install fails, install_path may contain
+    a half-copied partial restore. Try to isolate it safely (rename-quarantine preferred over delete).
+    NEVER touches backup_dir; caller guarantees backup_dir integrity separately.
+    Returns: short human-readable note describing outcome (appended to error suffix by caller)."""
+    note = ""
+    if not install_path.exists():
+        return note
+    import time as _t, uuid as _u
+    qr = install_path.parent / (
+        f".{install_path.name}.rollback_partial_"
+        f"{int(_t.time())}_{_u.uuid4().hex[:12]}"
+    )
+    try:
+        os.rename(str(install_path), str(qr))
+        note = f" partial install 已隔离到 {qr}，"
+    except OSError:
+        try:
+            shutil.rmtree(str(install_path))
+            note = " partial install 已清理，"
+        except OSError as clr_e:
+            note = f" 注意：partial install 清理也失败（{clr_e}），"
+    return note
+
+
 class UpdateService(QObject):
     """自动更新服务：检查版本、下载安装。
 
@@ -334,30 +360,9 @@ class UpdateService(QObject):
                             rollback_suffix = "（跨卷复制）"
                         except OSError as rb_err:
                             # P2 yellow: copytree partial failure — install_dir may be half-restored.
-                            # Clean up / quarantine partial install; NEVER touch backup_dir (complete).
-                            partial_cleaned_note = ""
-                            try:
-                                # Quarantine rename first (safer than rmtree on partial restore):
-                                import time as _t, uuid as _u
-                                qr = install_path.parent / (
-                                    f".{install_path.name}.rollback_partial_"
-                                    f"{int(_t.time())}_{_u.uuid4().hex[:12]}"
-                                )
-                                if install_path.exists():
-                                    try:
-                                        os.rename(str(install_path), str(qr))
-                                        partial_cleaned_note = f" partial install 已隔离到 {qr}，"
-                                    except OSError:
-                                        # rename fail → try rmtree clear
-                                        try:
-                                            shutil.rmtree(str(install_path))
-                                            partial_cleaned_note = " partial install 已清理，"
-                                        except OSError as clr_e:
-                                            partial_cleaned_note = (
-                                                f" 注意：partial install 清理也失败（{clr_e}），"
-                                            )
-                            except Exception:
-                                partial_cleaned_note = ""
+                            # Use extracted helper to quarantine-or-cleanup partial install.
+                            # NEVER touch backup_dir (complete) — this helper only operates on install_path.
+                            partial_cleaned_note = _quarantine_or_cleanup_partial_install(install_path)
                             rollback_suffix = (
                                 f"且自动恢复失败（{rb_err}），{partial_cleaned_note}"
                                 f"完整备份保留在 {backup_dir}，请手动恢复（把 backup 内容复制回 install_path 即可）。"

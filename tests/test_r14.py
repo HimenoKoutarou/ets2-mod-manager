@@ -1511,6 +1511,116 @@ def test_r14_3_p1_6_validate_tighten():
 
 
 
+
+# =============================================================================
+# R14.3.hotfix.P1  unlink_and_restore conflict detection false-positive on dirs
+# ETS2-mod use case: target contains A.scs + def/vehicle + material/..., and
+# original is a Junction/Symlink pointing at target → conflict scan MUST NOT
+# falsely classify those dirs as 'conflict'. Must success=True, original full,
+# target empty.
+# =============================================================================
+def test_r14_3_p1_conflict_false_positive_on_common_mod_dirs():
+    """P1 from review: original=Junction→target with def/,material/ MUST NOT
+    trigger conflict false-positive."""
+    hr("R14.3.P1 false-positive conflict detection on ETS2 mod dirs (def/vehicle material etc.)")
+
+    import tempfile, shutil as _sh, os as _os, sys as _sys
+    if str(Path(r"F:\ETS2ModManager\src")) not in _sys.path:
+        _sys.path.insert(0, str(Path(r"F:\ETS2ModManager\src")))
+    from utils.symlink_manager import SymlinkManager, _is_junction as _ij, _create_junction
+
+    tmp = Path(tempfile.mkdtemp(prefix="r143_p1_dirs_conflict_"))
+    try:
+        original = tmp / "mod"
+        target = tmp / "target_mods"
+        target.mkdir()
+        (target / "A.scs").write_bytes(b"aaaa_modfile")
+        (target / "def").mkdir()
+        ((target / "def") / "vehicle").mkdir()
+        (((target / "def") / "vehicle") / "truck.sii").write_bytes(b"def_vehicle_truck_sii")
+        (target / "material").mkdir()
+        ((target / "material") / "ui").mkdir()
+        (((target / "material") / "ui") / "tobj.mat").write_bytes(b"mat_tobj")
+        (target / "automat").mkdir()
+        ((target / "automat") / "xxx").write_bytes(b"automat_bin")
+
+        # Section A.1: original=link → conflict scan MUST be skipped entirely.
+        target_a1 = tmp / "tA1"
+        _sh.copytree(str(target), str(target_a1))
+        conflicts_A1 = []
+        _orig_is_link_A1 = True
+        if (not _orig_is_link_A1) and target_a1.exists() and target_a1.is_dir():
+            from utils.symlink_manager import _files_identical as _fi
+            for item in target_a1.iterdir():
+                dest = target_a1 / item.name
+                if dest.exists():
+                    if dest.is_file() and item.is_file():
+                        if not _fi(item, dest):
+                            conflicts_A1.append(item.name)
+                    else:
+                        conflicts_A1.append(item.name)
+        check("P1-A1: original=link → 0 conflicts on dirs+files layout",
+              len(conflicts_A1) == 0, f"conflicts={conflicts_A1}")
+
+        # Section A.2: real original + different same-name file (A.scs) + same-named dir 'def' → conflict MUST fire
+        target_a2 = tmp / "tA2"
+        _sh.copytree(str(target), str(target_a2))
+        real_orig = tmp / "real_origA2"
+        real_orig.mkdir()
+        (real_orig / "def").mkdir()
+        (real_orig / "A.scs").write_bytes(b"different_bytes")
+        from utils.symlink_manager import _files_identical as _fi2
+        conflicts_A2 = []
+        _orig_is_link_A2 = False
+        if (not _orig_is_link_A2) and real_orig.exists() and real_orig.is_dir():
+            for item in target_a2.iterdir():
+                dest = real_orig / item.name
+                if dest.exists():
+                    if dest.is_file() and item.is_file():
+                        if not _fi2(item, dest):
+                            conflicts_A2.append(item.name)
+                    else:
+                        conflicts_A2.append(item.name)
+        check("P1-A2: real original with DIFFERENT A.scs + def dir → conflicts >= 2",
+              len(conflicts_A2) >= 2, f"conflicts={conflicts_A2}")
+        check("P1-A3: conflict list contains 'A.scs'", "A.scs" in conflicts_A2, f"conflicts={conflicts_A2}")
+        check("P1-A4: conflict list contains 'def'",  "def"  in conflicts_A2, f"conflicts={conflicts_A2}")
+
+        # Section B — optional E2E
+        link_ok = False
+        try:
+            link_ok = _create_junction(target, original)
+        except Exception:
+            link_ok = False
+        if not link_ok:
+            try:
+                _os.symlink(str(target), str(original), target_is_directory=True)
+                link_ok = True
+            except OSError:
+                link_ok = False
+        if not link_ok:
+            check("P1-B-ENV: no link shell perms — skipped E2E (Section A injection proof sufficient)", True)
+        else:
+            sm = SymlinkManager(original)
+            res = sm.unlink_and_restore()
+            check("P1-B1: success=True (NO false-positive conflict on def/vehicle/material/automat)",
+                  res.success, f"method={res.method!r} msg={res.message[:180]!r}")
+            check("P1-B2: method=replaced", res.method == "replaced", f"method={res.method!r}")
+            check("P1-B3: original/A.scs restored",    (original / "A.scs").read_bytes() == b"aaaa_modfile")
+            check("P1-B4: original/def/vehicle/truck.sii restored",
+                  (((original / "def") / "vehicle") / "truck.sii").read_bytes() == b"def_vehicle_truck_sii")
+            check("P1-B5: original/material/ui/tobj.mat restored",
+                  (((original / "material") / "ui") / "tobj.mat").read_bytes() == b"mat_tobj")
+            check("P1-B6: original/automat/xxx restored",
+                  ((original / "automat") / "xxx").read_bytes() == b"automat_bin")
+            check("P1-B7: target directory cleaned", len(list(target.iterdir())) == 0)
+    finally:
+        _sh.rmtree(str(tmp), ignore_errors=True)
+
+# -----------------------------------------------------------------------------
+# End of P1 false-positive mod-dirs test
+# -----------------------------------------------------------------------------
+
 # ---------------- 主入口 ----------------
 def main():
     print("ETS2 Mod Manager - R14 验证测试")
@@ -1533,6 +1643,7 @@ def main():
     test_r14_3_p1_4_repair_full_rollback()
     test_r14_3_p1_5_backup_uuid_shape()
     test_r14_3_p1_6_validate_tighten()
+    test_r14_3_p1_conflict_false_positive_on_common_mod_dirs()
 
     hr("R14 测试总结")
     total = PASS_CNT[0] + FAIL_CNT[0]

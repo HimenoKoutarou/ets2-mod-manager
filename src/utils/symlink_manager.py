@@ -470,8 +470,13 @@ class SymlinkManager:
 
         # R14.1 P0-1: 预扫描冲突 — 同名但内容不同/类型不同 → 立即中止，不删任何东西
         # 避免后续 cleanup 阶段误删 target 中的新文件
+        # R14.3.hotfix.P1: ONLY scan if self.original is NOT currently a Junction/Symlink.
+        # If original is still a link pointing at target, self.original/<name> resolves
+        # to target/<name> (same file) → directories always fall into the non-file
+        # 'else' branch → false-positive conflicts on def/, vehicle/, material/, etc.
         conflicts: list[str] = []
-        if self.original.exists() and self.original.is_dir():
+        _orig_is_link = bool(self.original.is_symlink() or _is_junction(self.original))
+        if (not _orig_is_link) and self.original.exists() and self.original.is_dir():
             for item in target.iterdir():
                 dest = self.original / item.name
                 if dest.exists():
@@ -577,6 +582,7 @@ class SymlinkManager:
         created_restore_dir=True 表示 original 是本事务 mkdir 创建的空目录之后
         写的 partial，允许 rmtree；否则只做"空壳目录 rmdir"保守清理。"""
         rmtree_skipped = False
+        quarantine_path: Path | None = None
         try:
             if self.original.exists():
                 if created_restore_dir:
@@ -586,9 +592,12 @@ class SymlinkManager:
                         try:
                             import time as _t
                             import uuid as _u
-                            quarantine = self.original.parent / f"{self.original.name}.partial_{int(_t.time() * 1000)}_{_u.uuid4().hex[:12]}"
-                            if not quarantine.exists():
-                                os.rename(str(self.original), str(quarantine))
+                            quarantine_path = self.original.parent / f"{self.original.name}.partial_{int(_t.time() * 1000)}_{_u.uuid4().hex[:12]}"
+                            if not quarantine_path.exists():
+                                os.rename(str(self.original), str(quarantine_path))
+                                quarantine_path = quarantine_path  # rename succeeded
+                            else:
+                                rmtree_skipped = True
                         except OSError:
                             rmtree_skipped = True
                 else:
@@ -601,6 +610,21 @@ class SymlinkManager:
                         rmtree_skipped = True
         except OSError:
             rmtree_skipped = True
+
+        # P2 hotfix: if original STILL a non-quarantined nonempty partial real dir (rmtree failed AND rename failed),
+        # do NOT proceed with mkdir + junction-attempt on top of it — that would almost certainly fail and
+        # leave an ambiguous state. Return explicit manual-handle status instead.
+        if rmtree_skipped and self.original.exists() and any(self.original.iterdir()):
+            try:
+                leftover = sorted(p.name for p in self.original.iterdir())[:8]
+            except OSError:
+                leftover = []
+            return (
+                f"警告：无法清理 partial original（rmtree + 隔离 rename 均失败），为避免将仍含真实数据的 partial 目录壳子误当作 link path，"
+                f"已中止自动重建。target 完整保留在 {target}，请手动处理：删除 {self.original}（当前仍有残留文件 {leftover}）"
+                f"后重建 Junction / Symlink 指向 target。"
+            )
+
         try:
             self.original.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -610,6 +634,7 @@ class SymlinkManager:
             ok = _create_junction(target, self.original)
         except Exception:
             ok = False
+        rebuild_skipped_note = ""
         if not ok:
             try:
                 if self.original.exists() and self.original.is_dir():
@@ -622,8 +647,12 @@ class SymlinkManager:
             except OSError:
                 pass
         if ok:
-            return ("已自动重建链接，target 未受损。"
-                    + (" （注意：partial original 删除被跳过并隔离，后续可手动清理。）" if rmtree_skipped else ""))
+            _extra = ""
+            if quarantine_path is not None:
+                _extra = f" （注意：partial original 已隔离到 {quarantine_path.name}，后续可手动清理。）"
+            elif rmtree_skipped:
+                _extra = " （注意：partial original 删除被跳过，后续可手动清理。）"
+            return "已自动重建链接，target 未受损。" + _extra
         return (f"警告：无法重建链接，target 完整保留在 {target}，请手动恢复。"
                 + (" partial original 未清理。" if rmtree_skipped else ""))
 
@@ -729,12 +758,24 @@ class SymlinkManager:
                         rollback_info = f"\n警告：原 broken symlink 也无法恢复（{rb_e}）。原位置当前为空，但真实数据仍在之前的目录中。"
                 elif _old_kind == "junction" and _old_target:
                     try:
+                        _mkdir_ok = True
                         if not orig.exists():
-                            orig.mkdir(parents=True, exist_ok=True)
-                        if _create_junction(Path(_old_target), orig):
-                            rollback_info = f"\n已恢复原 Junction 指向 {_old_target}（操作前状态）。"
-                        else:
-                            rollback_info = f"\n注意：原 Junction 未能恢复，原位置已清空。"
+                            try:
+                                orig.mkdir(parents=True, exist_ok=True)
+                            except OSError as mk_e:
+                                _mkdir_ok = False
+                                rollback_info = f"\n注意：原 Junction 恢复前 mkdir({orig!r}) 失败（{mk_e}），无法重建原重解析点。原位置仍为空，请手动恢复原 Junction 或直接重建。"
+                        if _mkdir_ok:
+                            try:
+                                _rb_ok = _create_junction(Path(_old_target), orig)
+                            except Exception as jct_e:
+                                _rb_ok = False
+                                rollback_info = f"\n注意：原 Junction 重建时出现异常（{jct_e}），原位置可能已留下一个空目录壳子，请手动清理后恢复原 Junction。"
+                            else:
+                                if _rb_ok:
+                                    rollback_info = f"\n已恢复原 Junction 指向 {_old_target}（操作前状态）。"
+                                else:
+                                    rollback_info = f"\n注意：原 Junction 恢复失败（_create_junction 返回 False）。原位置可能仍为空壳目录或已不存在，请手动删除残留目录并重试原 Junction 创建，指向 {_old_target}。"
                     except Exception as rb_y:
                         rollback_info = f"\n注意：原 Junction 恢复过程异常（{rb_y}），请手动检查。"
                 else:
