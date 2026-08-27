@@ -99,6 +99,7 @@ def save_session_state(
     dir_signatures: Optional[Dict[str, dict]] = None,
 ) -> None:
     """退出时调用：保存当前会话状态 + 可选快速扫描快照（避免启动重扫）。"""
+    global _CACHE
     data = {
         "scan_time": datetime.now().isoformat(),
         "all_mod_ids": list(all_mod_ids),
@@ -114,11 +115,34 @@ def save_session_state(
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, sp)
-        global _CACHE
         with _LOCK:
             _CACHE = data
-    except OSError:
-        pass
+    except (OSError, TypeError, ValueError, UnicodeEncodeError) as _e1:
+        # 除磁盘/权限问题外，还要防 mods_snapshot 含 bytes/Path/datetime 等不可序列化字段
+        # 降级策略：先丢大对象 mods_snapshot，再丢 dir_signatures，尽最大可能保留会话
+        import sys as _sys
+        print(f"[session] 首次保存失败: {type(_e1).__name__}: {_e1}；尝试降级写入", file=_sys.stderr)
+        _fallbacks = [
+            ("mods_snapshot", "丢弃扫描快照（可重扫恢复）"),
+            ("dir_signatures", "丢弃签名校验（可重扫恢复）"),
+        ]
+        _data2 = dict(data)
+        for _key, _reason in _fallbacks:
+            if _key in _data2:
+                del _data2[_key]
+                print(f"[session]   - {_reason}: {_key}", file=_sys.stderr)
+                try:
+                    tmp = sp.with_suffix(".tmp")
+                    with tmp.open("w", encoding="utf-8") as f:
+                        json.dump(_data2, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp, sp)
+                    with _LOCK:
+                        _CACHE = _data2
+                    return   # 降级成功
+                except (OSError, TypeError, ValueError, UnicodeEncodeError) as _e2:
+                    print(f"[session]   降级仍失败: {type(_e2).__name__}: {_e2}；继续下一级", file=_sys.stderr)
+        # 所有降级都失败，打印错误，不抛（不影响关窗主流程）
+        print(f"[session] 所有降级策略均失败，放弃本次会话保存", file=_sys.stderr)
 
 
 def load_last_session() -> Optional[dict]:

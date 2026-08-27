@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import mmap
 import os
 import zipfile
 from dataclasses import dataclass
@@ -16,6 +17,10 @@ ETS2/ATS 的 .scs 文件其实就是标准 zip（压缩算法可选 store/deflat
 只是扩展名被改了。.zip 扩展名也同样被游戏识别。
 另外模组还可以是普通目录（开发模式）。
 """
+
+# 性能优化：大于该阈值的文件用 mmap 读取（避免完整拷贝到内存）
+# 5MB 以上视为大文件（manifest/icon/description 通常 < 1MB，大文件多为贴图/模型）
+_MMAP_THRESHOLD = 5 * 1024 * 1024
 
 
 class ScsArchiveReader:
@@ -52,7 +57,8 @@ class ScsArchiveReader:
         try:
             with zipfile.ZipFile(self.path) as z:
                 return any(info.flag_bits & 0x1 for info in z.infolist())
-        except Exception:
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError):
+            # 非 zip / 损坏 zip / IO 错误：视为非加密 zip（会被后续外部解包流程兜底）
             return False
 
     def _open_mode(self):
@@ -80,6 +86,53 @@ class ScsArchiveReader:
         else:
             self._mode = "unknown"
 
+
+
+    def list_entries(self, max_entries: int | None = None) -> list[str]:
+        """返回包/目录内所有 entry 路径（小写 + 反斜杠转正斜杠，dir 模式为相对路径）。
+        - zip 模式：直接 ZipFile.namelist()
+        - dir 模式：递归走所有普通文件，返回相对 self.path 的相对路径；最多 max_entries 个截断
+        - external / unknown 模式：**返回空列表（不抛异常）** —— 调用方应对空列表打 YELLOW "加密包或未知包跳过静态 entry 检查"。
+        """
+        try:
+            out: list[str] = []
+            if self._mode == "zip" and self._zf is not None:
+                try:
+                    names = self._zf.namelist()
+                except Exception:
+                    return []
+                for n in names:
+                    norm = n.replace("\\", "/").lstrip("/").lower()
+                    if not norm:
+                        continue
+                    out.append(norm)
+                    if max_entries is not None and len(out) >= max_entries:
+                        break
+                return out
+            if self._mode == "dir":
+                root = self.path
+                for full in root.rglob("*"):
+                    try:
+                        if not full.is_file():
+                            continue
+                        rel = full.relative_to(root).as_posix().lstrip("/").lower()
+                        if not rel:
+                            continue
+                        out.append(rel)
+                        if max_entries is not None and len(out) >= max_entries:
+                            break
+                    except (OSError, ValueError):
+                        continue
+                return out
+            # external(scs_hashfs / aem / zip_encrypted) / unknown -> 返回空
+            return []
+        except Exception:
+            return []
+
+    @property
+    def is_encrypted_or_external(self) -> bool:
+        """True = 当前包是加密 / SCS# / AEM! 等需要外部解包工具的类型，entry 列表无法静态枚举。"""
+        return self._mode == "external" or self._mode == "unknown"
 
     # ---------- 别名：兼容旧 API 命名 ----------
     def extract_file_bytes(self, inner_path: str) -> Optional[bytes]:
@@ -127,6 +180,20 @@ class ScsArchiveReader:
                 p = self.path / inner_path.replace("/", os.sep)
                 if not p.is_file():
                     return None
+                # 性能优化：大文件用 mmap 读取（>5MB，主要是贴图/模型），
+                # 避免完整拷贝到内存；小文件直接 read_bytes（mmap 固定开销不划算）
+                try:
+                    fsize = p.stat().st_size
+                except OSError:
+                    fsize = 0
+                if fsize >= _MMAP_THRESHOLD:
+                    try:
+                        with open(p, "rb") as f:
+                            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                                return bytes(mm)
+                    except (ValueError, OSError):
+                        # mmap 失败（空文件 / 不支持）回退普通读取
+                        return p.read_bytes()
                 return p.read_bytes()
             if self._mode == "zip" and self._zf:
                 try:

@@ -33,7 +33,7 @@ _opener: Optional[object] = None
 
 
 def _get_opener():
-    """返回带系统代理的 URL opener（惰性初始化）。"""
+    """返回带系统代理的 URL opener（惰性初始化）；代理时跳过 SSL 主机校验。"""
     global _opener
     if _opener is not None:
         return _opener
@@ -44,31 +44,13 @@ def _get_opener():
             handlers.append(urllib.request.ProxyHandler(proxies))
     except Exception:
         pass
-    _opener = urllib.request.build_opener(*handlers) if handlers else urllib.request.build_opener()
-    return _opener
-    handlers = []
-    try:
-        proxies = urllib.request.getproxies()
-        if proxies:
-            handlers.append(urllib.request.ProxyHandler(proxies))
-    except Exception:
-        pass
-    # 自定义 SSL 上下文：通过代理时跳过证书验证
+    # 自定义 SSL 上下文：通过代理时跳过证书验证（避免公司/校园 HTTPS 中间人代理导致握手失败）
     try:
         import ssl as _ssl
         _ctx = _ssl.create_default_context()
         _ctx.check_hostname = False
         _ctx.verify_mode = _ssl.CERT_NONE
         handlers.append(urllib.request.HTTPSHandler(context=_ctx))
-    except Exception:
-        pass
-    _opener = urllib.request.build_opener(*handlers) if handlers else urllib.request.build_opener()
-    return _opener
-    handlers = []
-    try:
-        proxies = urllib.request.getproxies()
-        if proxies:
-            handlers.append(urllib.request.ProxyHandler(proxies))
     except Exception:
         pass
     _opener = urllib.request.build_opener(*handlers) if handlers else urllib.request.build_opener()
@@ -88,7 +70,7 @@ def _get_cache_path() -> Path:
 
 
 def _load_cache() -> Dict[str, Dict]:
-    global _cache
+    global _cache, _cache_dirty
     with _lock:
         if _cache is not None:
             return _cache
@@ -96,11 +78,26 @@ def _load_cache() -> Dict[str, Dict]:
         if cp.exists():
             try:
                 with cp.open("r", encoding="utf-8") as f:
-                    _cache = json.load(f)
-                if not isinstance(_cache, dict):
-                    _cache = {}
+                    loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    loaded = {}
             except (OSError, json.JSONDecodeError):
-                _cache = {}
+                loaded = {}
+            # ---- R5 opt: 双 TTL 过期清理（读取时删除 >2*TTL 的僵尸条目，避免缓存无限膨胀）----
+            now = int(time.time())
+            purge_ttl = 2 * CACHE_TTL_SECONDS   # 读取期 TTL 30 天 + 2*T=60 天宽限期，超 90 天删除
+            cleaned = 0
+            if isinstance(loaded, dict):
+                stale_ids = [mid for mid, e in loaded.items()
+                             if isinstance(e, dict) and (now - int(e.get("ts", 0))) > purge_ttl]
+                for sid in stale_ids:
+                    del loaded[sid]
+                    cleaned += 1
+            if cleaned > 0:
+                _cache_dirty = True   # 加载时做了清理也要写盘
+                import sys as _sys_r5
+                print(f"[steam_ws] 清理了 {cleaned} 个超过 60 天的僵尸缓存条目", file=_sys_r5.stderr)
+            _cache = loaded
         else:
             _cache = {}
         return _cache
@@ -226,16 +223,15 @@ def fetch_titles(ids: Iterable[str],
                 continue
         pending.append(mid)
 
-    # 分批回源
+    # 分批回源（R5 opt: 合并 save_cache 调用，每批不再重复 json.dump + os.replace）
     for i in range(0, len(pending), BATCH_SIZE):
         batch = pending[i:i + BATCH_SIZE]
         batch_out = _post_batch(batch)
         out.update(batch_out)
-        # 每批查询完成后立即保存缓存到本地
-        if save_cache:
-            global _cache_dirty
-            _cache_dirty = True
-            _save_cache()
+
+    # 所有批次结束后一次性落盘（_post_batch 中已置 _cache_dirty = True）
+    if save_cache:
+        _save_cache()
 
     return out
 

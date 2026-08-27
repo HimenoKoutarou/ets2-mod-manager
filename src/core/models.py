@@ -135,10 +135,19 @@ class Mod:
 
     @property
     def display_title(self) -> str:
-        """多层兜底：display_name → Steam Workshop API（按ID） → 子包名 → 归档名 → 未命名模组"""
+        """多层兜底：display_name → Steam Workshop API（按ID） → 子包名 → 归档名 → 未命名模组
+        首次计算后缓存到 self.__dict__["_dt_cache"]，避免重复读盘/正则/兜底链。
+        （扫描/过滤/排序阶段会被频繁调用，缓存可显著提升表格渲染速度。）"""
+        _CACHE_KEY = "_dt_cache"
+        if _CACHE_KEY in self.__dict__:
+            return self.__dict__[_CACHE_KEY]
+        def _store(val: str) -> str:
+            self.__dict__[_CACHE_KEY] = val
+            return val
+
         title = self.manifest.display_name.strip()
         if title and not _is_workshop_id_like(title):
-            return title
+            return _store(title)
         # 兜底 0：package_name（manifest 的 unit_name；游戏在 mods_info.sii 缓存的就是它，本地、快、可靠）
         # 过滤垃圾值：SCS 的 unit_name 常以 "." 或 "_nameless" 开头（引用名，非可读包名）
         _PKG_BLOCK = {"manifest", "package_name", "mod_package", "mods_info", "nameless"}
@@ -146,7 +155,7 @@ class Mod:
         if (pkg and not _is_workshop_id_like(pkg)
                 and not pkg.startswith(".") and not pkg.startswith("_")
                 and pkg.lower() not in _PKG_BLOCK and len(pkg) >= 2):
-            return pkg
+            return _store(pkg)
         # 兜底 1：Steam Workshop API（按 mod_id 查缓存，不发网络请求）
         if self.mod_id and self.mod_id.isdigit() and self.package_type == "workshop":
             try:
@@ -158,7 +167,7 @@ class Mod:
                             self.manifest.display_name = cached
                     except Exception:
                         pass
-                    return cached
+                    return _store(cached)
             except Exception:
                 pass
         # 兜底 2：从 package_path 或其子文件推导出友好名
@@ -184,7 +193,7 @@ class Mod:
                 if nice:
                     nice = " ".join(w[:1].upper() + w[1:] if w else w for w in nice.split())
                     if 2 <= len(nice) <= 80:
-                        return nice
+                        return _store(nice)
         # 3b) 用自身归档包名（本地 mod：.scs/.zip 文件名）
         stem_self = pp.stem if not pp.is_dir() else pp.name
         if stem_self and not _is_workshop_id_like(stem_self):
@@ -192,15 +201,15 @@ class Mod:
             if nice:
                 nice = " ".join(w[:1].upper() + w[1:] if w else w for w in nice.split())
                 if 2 <= len(nice) <= 80:
-                    return nice
+                    return _store(nice)
         # 兜底 3：如果 mod_id 是纯数字（Workshop ID），不显示 ID，改用 i18n 未命名模组
         if self.mod_id and _is_workshop_id_like(self.mod_id):
             try:
                 from services.i18n_service import _ as _tr
-                return _tr("mod.unnamed")
+                return _store(_tr("mod.unnamed"))
             except Exception:
-                return "未命名模组"
-        return self.mod_id
+                return _store("未命名模组")
+        return _store(self.mod_id)
 
     @property
     def display_version(self) -> str:

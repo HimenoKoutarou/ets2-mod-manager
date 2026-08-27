@@ -28,6 +28,7 @@ class SiiUnit:
           1) category[]: "a"   category[]: "b"        -> attrs["category"] = ["a","b"]
           2) category[0]: "a"  category[1]: "b"      -> attrs["category[0]"], attrs["category[1]"]
           3) mods_info 特殊： attrs 只存 "info[0]", "info[1]"...
+        （用字符串前缀 + 切片判断，避免每次调用拼接/编译正则。）
         """
         v = self.attrs.get(key)
         if isinstance(v, list):
@@ -35,22 +36,35 @@ class SiiUnit:
         result: List[str] = []
         if isinstance(v, str):
             result.append(v)
-        for k, val in sorted(self.attrs.items()):
-            m = re.match(r"^" + re.escape(key) + r"\[\d*\]$", k)
-            if m and isinstance(val, str):
+        prefix = key + "["
+        min_len = len(prefix) + 1   # "key[...]" 至少要 key[]
+        for k, val in self.attrs.items():
+            if len(k) < min_len:
+                continue
+            if not k.startswith(prefix) or not k.endswith("]"):
+                continue
+            middle = k[len(prefix):-1]
+            # 允许 "" 或纯数字（对应 category[] / category[0] / category[12]）
+            if middle and not middle.isdigit():
+                continue
+            if isinstance(val, str):
                 result.append(val)
         return result
 
     def get_indexed(self, key: str) -> List[str]:
-        """按 info[0..N] 数字升序返回值（mods_info.sii 专用）。"""
+        """按 info[0..N] 数字升序返回值（mods_info.sii 专用）。
+        （用字符串前缀 + 切片判断，避免每次调用拼接/编译正则。）"""
         found: List[Tuple[int, str]] = []
+        prefix = key + "["
+        min_len = len(prefix) + 2   # 至少 key[1]
         for k, v in self.attrs.items():
-            m = re.match(r"^" + re.escape(key) + r"\[(\d+)\]$", k)
-            if m and isinstance(v, str):
-                try:
-                    found.append((int(m.group(1)), v))
-                except ValueError:
-                    pass
+            if len(k) < min_len or not k.startswith(prefix) or not k.endswith("]"):
+                continue
+            middle = k[len(prefix):-1]
+            if not middle or not middle.isdigit():
+                continue
+            if isinstance(v, str):
+                found.append((int(middle, 10), v))
         found.sort(key=lambda x: x[0])
         return [s for _, s in found]
 

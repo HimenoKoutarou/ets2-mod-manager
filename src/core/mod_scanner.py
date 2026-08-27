@@ -1,7 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -46,11 +47,20 @@ def _mod_id_from_package(path: Path) -> str:
     return path.stem
 
 
-def _dir_size(p: Path) -> int:
-    """递归统计目录大小（字节）"""
+def _dir_size(p: Path, max_depth: int = 4) -> int:
+    """递归统计目录大小（字节），限制最大深度避免符号链接环/巨型目录卡死。"""
     total = 0
     try:
-        for root, _, files in os.walk(p):
+        p_resolved = p.resolve()
+        top_parts = len(p_resolved.parts)
+        for root, _, files in os.walk(p, followlinks=False):
+            # 深度限制
+            try:
+                depth = len(Path(root).resolve().parts) - top_parts
+            except OSError:
+                depth = -1
+            if depth > max_depth:
+                continue
             for f in files:
                 try:
                     total += os.path.getsize(os.path.join(root, f))
@@ -62,8 +72,15 @@ def _dir_size(p: Path) -> int:
 
 
 def _build_mod_from_package(package_path: Path, package_type: str,
-                             mods_info_index: Dict[str, int]) -> Mod:
-    """对单个包路径构造 Mod 对象（尝试解析 manifest/icon/description）"""
+                             mods_info_index: Dict[str, int],
+                             skip_nested: bool = False) -> Mod:
+    """对单个包路径构造 Mod 对象（尝试解析 manifest/icon/description）。
+
+    性能优化：skip_nested=True 时跳过嵌套兜底解析（Workshop 多层版本目录
+    的 manifest/icon/description 查找），让快速扫描阶段只读主包；
+    嵌套兜底延后到 async_parse 阶段调 _enrich_nested_fallback 异步执行，
+    避免扫描大量 Workshop 目录时同步阻塞。
+    """
     mod_id = _mod_id_from_package(package_path)
     size = 0
     mtime = 0.0
@@ -93,12 +110,22 @@ def _build_mod_from_package(package_path: Path, package_type: str,
             mod.manifest = mf
             mod.icon = reader.read_icon(mf.icon_filename or "")
             mod.description = reader.read_description(mf.description_filename or "")
-    except Exception:
-        # 任何解析失败都不影响主流程，只留空 manifest
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, UnicodeDecodeError, LookupError):
         pass
+    except Exception as _e:
+        import sys as _sys_r6, traceback as _tb_r6
+        print(f"[mod_scan] 主包 manifest/icon/description 解析 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+        _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+        pass
+
 
     # 嵌套兜底 1/2：workshop 常把 manifest/icon 放在第一层子 .scs 包内
     need_nested = (not mod.manifest.display_name and not mod.icon.is_available and not mod.description)
+    if skip_nested:
+        # 快速扫描阶段标记需要后续异步兜底
+        if need_nested and package_path.is_dir():
+            mod._needs_nested_fallback = True  # type: ignore[attr-defined]
+        need_nested = False  # 本轮跳过
     if need_nested and package_path.is_dir():
         try:
             sub_packages = sorted([pp for pp in package_path.iterdir() if pp.is_file() and pp.suffix.lower() in (".scs", ".zip")])[:10]
@@ -118,8 +145,14 @@ def _build_mod_from_package(package_path: Path, package_type: str,
                         mod.description = d2
                     if mod.manifest.display_name and mod.icon.is_available:
                         break
-            except Exception:
+            except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, UnicodeDecodeError, LookupError):
                 continue
+            except Exception as _e:
+                import sys as _sys_r6, traceback as _tb_r6
+                print(f"[mod_scan] 子 .scs 嵌套兜底解析 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+                _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+                continue
+
 
     # 嵌套兜底 2/2：Workshop 常不放 .scs，manifest/icon 直接在子目录（universal / 128_content / alt 等）下
     need_nested2 = (not mod.manifest.display_name and not mod.icon.is_available and not mod.description)
@@ -152,8 +185,14 @@ def _build_mod_from_package(package_path: Path, package_type: str,
             try:
                 text = mani.read_text(encoding="utf-8", errors="replace")
                 units = parse_sii(text)
-            except Exception:
+            except (OSError, ValueError, UnicodeDecodeError, LookupError):
                 continue
+            except Exception as _e:
+                import sys as _sys_r6, traceback as _tb_r6
+                print(f"[mod_scan] 子目录 manifest.sii 解析 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+                _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+                continue
+
             pkg = next((u for u in units if u.unit_type == "mod_package"),
                        units[0] if units else None)
             if not pkg:
@@ -200,8 +239,14 @@ def _build_mod_from_package(package_path: Path, package_type: str,
                                 mod.icon = ModIcon(raw_bytes=data, format=fmt,
                                                    source_path=str(icp))
                                 break
-                    except Exception:
+                    except (OSError, ValueError):
                         continue
+                    except Exception as _e:
+                        import sys as _sys_r6, traceback as _tb_r6
+                        print(f"[mod_scan] 子目录 icon 读取 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+                        _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+                        continue
+
 
             # (c) 在同一子目录下读 description
             if not mod.description:
@@ -220,8 +265,14 @@ def _build_mod_from_package(package_path: Path, package_type: str,
                             if txt:
                                 mod.description = txt
                                 break
-                    except Exception:
+                    except (OSError, ValueError, UnicodeDecodeError):
                         continue
+                    except Exception as _e:
+                        import sys as _sys_r6, traceback as _tb_r6
+                        print(f"[mod_scan] 子目录 description 读取 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+                        _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+                        continue
+
 
             # 拿到了核心信息就 break，不继续往低优先级子目录搜
             if mod.manifest.display_name and mod.icon.is_available:
@@ -365,7 +416,8 @@ class ModScanner:
                             # 快速路径：不解析子包 manifest.sii（不解包），直接 minimal，后面会 fallback 到 ws_id 做索引
                             mod = _build_mod_minimal(item, "workshop", mi_index)
                         else:
-                            mod = _build_mod_from_package(item, "workshop", mi_index)
+                            # 性能优化：Workshop 目录解析主包即返回，嵌套兜底延后到 async_parse
+                            mod = _build_mod_from_package(item, "workshop", mi_index, skip_nested=True)
                     except Exception:
                         continue
                     if mod is not None:
@@ -421,13 +473,15 @@ class ModScanner:
             if skip_parse:
                 # 偷懒：直接构造一个空 manifest 的 Mod
                 return _build_mod_minimal(item, "directory", mi_index)
-            return _build_mod_from_package(item, "directory", mi_index)
+            # 性能优化：本地目录也跳过嵌套兜底，延后到 async_parse
+            return _build_mod_from_package(item, "directory", mi_index, skip_nested=True)
         # 文件：按后缀
         suf = item.suffix.lower()
         if suf in PACKAGE_SUFFIXES:
             ptype = "scs" if suf == ".scs" else "zip"
             if skip_parse:
                 return _build_mod_minimal(item, ptype, mi_index)
+            # 单文件不需要嵌套兜底（skip_nested=False 不影响，因为 package_path 不是目录）
             return _build_mod_from_package(item, ptype, mi_index)
         return None
 
@@ -455,3 +509,130 @@ def _build_mod_minimal(package_path: Path, ptype: str, mi_index: Dict[str, int])
     )
     mod.manifest.package_name = mod_id
     return mod
+
+
+def _enrich_nested_fallback(mod: Mod) -> bool:
+    """对标记了 _needs_nested_fallback 的 Mod 异步执行嵌套兜底解析。
+
+    性能：将原 _build_mod_from_package 内的 Workshop 多层子目录兜底查找
+    （子 .scs 包 + universal/alt/neu 子目录）从同步扫描阶段延后到 async_parse，
+    避免扫描大量 Workshop 目录时同步阻塞。复用已打开的 ScsArchiveReader。
+
+    返回是否有字段被填充。
+    """
+    if not getattr(mod, "_needs_nested_fallback", False):
+        return False
+    package_path = Path(mod.package_path)
+    if not package_path.is_dir():
+        mod._needs_nested_fallback = False  # type: ignore[attr-defined]
+        return False
+
+    filled = False
+
+    # 兜底 1：第一层子 .scs / .zip 包
+    try:
+        sub_packages = sorted([pp for pp in package_path.iterdir()
+                               if pp.is_file() and pp.suffix.lower() in (".scs", ".zip")])[:10]
+    except OSError:
+        sub_packages = []
+    for sp in sub_packages:
+        try:
+            with ScsArchiveReader(sp) as r2:
+                mf2 = r2.parse_manifest()
+                if not mod.manifest.display_name and mf2.display_name:
+                    mod.manifest = mf2
+                    filled = True
+                ic2 = r2.read_icon(mf2.icon_filename or mod.manifest.icon_filename or "")
+                if ic2.is_available and not mod.icon.is_available:
+                    mod.icon = ic2
+                    filled = True
+                d2 = r2.read_description(mf2.description_filename or mod.manifest.description_filename or "")
+                if d2 and not mod.description:
+                    mod.description = d2
+                    filled = True
+                if mod.manifest.display_name and mod.icon.is_available:
+                    break
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, UnicodeDecodeError, LookupError):
+            continue
+        except Exception as _e:
+            import sys as _sys_r6, traceback as _tb_r6
+            print(f"[mod_scan] 子 .scs 嵌套兜底解析 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+            _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+            continue
+
+    # 兜底 2：universal / 数字版本号 / alt 子目录
+    if not mod.manifest.display_name and not mod.icon.is_available:
+        try:
+            sub_dirs = [pp for pp in package_path.iterdir() if pp.is_dir()]
+        except OSError:
+            sub_dirs = []
+        def _sort_key(d: Path):
+            name = d.name
+            if name.lower() == "universal":
+                return (0, 0, name.lower())
+            m = re.match(r"(\d+)", name)
+            if m:
+                return (1, -int(m.group(1)), name.lower())
+            return (2, 0, name.lower())
+        sub_dirs_sorted = sorted(sub_dirs, key=_sort_key)[:20]
+        from .sii_parser import parse_sii
+        from .models import ModIcon
+        for sd in sub_dirs_sorted:
+            mani = sd / "manifest.sii"
+            if not mani.exists():
+                continue
+            try:
+                text = mani.read_text(encoding='utf-8', errors='replace')
+                units = parse_sii(text)
+            except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, ValueError, UnicodeDecodeError, LookupError):
+                continue
+            except Exception as _e:
+                import sys as _sys_r6, traceback as _tb_r6
+                print(f"[mod_scan] 子目录 manifest.sii 解析 意外异常 {type(_e).__name__}: {_e} -> {package_path}", file=_sys_r6.stderr)
+                _tb_r6.print_exc(limit=1, file=_sys_r6.stderr)
+                continue
+
+            pkg = next((u for u in units if u.unit_type == "mod_package"),
+                       units[0] if units else None)
+            if not pkg:
+                continue
+            mf = mod.manifest if mod.manifest else ModManifest()
+            if not mf.display_name:
+                mf.display_name = pkg.get("display_name", "") or ""
+                if mf.display_name:
+                    filled = True
+            if not mf.package_name:
+                mf.package_name = pkg.unit_name or ""
+            if not mf.package_version:
+                mf.package_version = pkg.get("package_version", "") or ""
+            if not mf.author:
+                mf.author = pkg.get("author", "") or ""
+            if not mf.categories:
+                mf.categories = [c for c in pkg.get_list("category") if c]
+            if not mf.icon_filename:
+                mf.icon_filename = pkg.get("icon", "") or ""
+            if not mf.description_filename:
+                mf.description_filename = pkg.get("description_file", "") or ""
+            mod.manifest = mf
+            # icon 兜底
+            if not mod.icon.is_available:
+                cands = []
+                if mf.icon_filename:
+                    cands.append(sd / mf.icon_filename)
+                cands += [sd / "mod_icon.jpg", sd / "icon.jpg", sd / "mod_icon.png", sd / "icon.png"]
+                for icp in cands:
+                    try:
+                        if icp.exists() and icp.is_file():
+                            data = icp.read_bytes()
+                            if data:
+                                fmt = icp.suffix.lower().lstrip(".") or "jpg"
+                                mod.icon = ModIcon(raw_bytes=data, format=fmt, source_path=str(icp))
+                                filled = True
+                                break
+                    except Exception:
+                        continue
+            if mod.manifest.display_name and mod.icon.is_available:
+                break
+
+    mod._needs_nested_fallback = False  # type: ignore[attr-defined]
+    return filled

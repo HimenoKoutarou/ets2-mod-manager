@@ -207,31 +207,43 @@ def extract_from_mod(mod_path: str, mod_display_name: str = "") -> Tuple[List[Ci
         reader.close()
         return cities, countries, ferries, native_locale
 
+    _seen_inc: set[str] = set()
     for cf in _find_def_files(reader, "city"):
         text = reader.read_text(cf)
         if not text:
             continue
         for inc in _parse_include_paths(text):
+            if inc in _seen_inc:
+                continue
+            _seen_inc.add(inc)
             sui_text = reader.read_text(inc)
             if sui_text:
                 cities.extend(_extract_cities_from_text(sui_text, source))
         cities.extend(_extract_cities_from_text(text, source))
 
+    _seen_inc2: set[str] = set()
     for cf in _find_def_files(reader, "country"):
         text = reader.read_text(cf)
         if not text:
             continue
         for inc in _parse_include_paths(text):
+            if inc in _seen_inc2:
+                continue
+            _seen_inc2.add(inc)
             sui_text = reader.read_text(inc)
             if sui_text:
                 countries.extend(_extract_countries_from_text(sui_text, source))
         countries.extend(_extract_countries_from_text(text, source))
 
+    _seen_inc3: set[str] = set()
     for ff in _find_def_files(reader, "ferry"):
         text = reader.read_text(ff)
         if not text:
             continue
         for inc in _parse_include_paths(text):
+            if inc in _seen_inc3:
+                continue
+            _seen_inc3.add(inc)
             sub_text = reader.read_text(inc)
             if sub_text:
                 ferries.extend(_extract_ferries_from_text(sub_text, source))

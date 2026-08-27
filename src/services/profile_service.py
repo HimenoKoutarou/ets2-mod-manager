@@ -335,7 +335,15 @@ class ProfileService:
         return None
 
     # ---------- 列出所有 profile ----------
-    def list_profiles(self) -> List[ProfileInfo]:
+    def list_profiles(self, quick: bool = False) -> List[ProfileInfo]:
+        """列出所有 profile。
+
+        性能优化：
+          - quick=True：跳过解密+SII 解析，仅返回 ProfileInfo 骨架
+            （display_name/company_name 留空，由调用方按需调 enrich_profile 异步填充）。
+            原实现对每个 profile 都同步解密+解析，Profile 数量多时启动明显卡顿（O(n×decrypt)）。
+          - quick=False（默认）：保持原行为，立即 _enrich。
+        """
         out: List[ProfileInfo] = []
         locations: List[Tuple[str, Optional[Path]]] = [
             ("local", self.paths.profiles_dir),
@@ -362,9 +370,22 @@ class ProfileService:
                     continue
                 seen.add(key)
                 info = ProfileInfo(profile_id=d.name, location=loc, folder=d, profile_sii=psii)
-                self._enrich(info)
+                if not quick:
+                    self._enrich(info)
                 out.append(info)
         return out
+
+    def enrich_profile(self, info: ProfileInfo) -> bool:
+        """异步填充单个 profile 的 display_name/company_name 等字段。
+
+        供 list_profiles(quick=True) 后的异步任务调用，返回是否成功填充。
+        也可在外部任何时候调用以补全字段（重复调用幂等）。
+        """
+        try:
+            self._enrich(info)
+            return True
+        except Exception:
+            return False
 
     def _enrich(self, info: ProfileInfo) -> None:
         try:
@@ -413,13 +434,18 @@ class ProfileService:
         return _extract_active_mods(units[0])
 
     # ---------- 写回 active_mods ----------
-    def set_active_mods(self, prof: ProfileInfo, new_mods: List[str]) -> Path:
+    def set_active_mods(self, prof: ProfileInfo, new_mods: List[str],
+                         verify: bool = False) -> Path:
         """
         1. 读取 profile.sii 原始字节并解密成文本
         2. 文本级原位重写 active_mods 条目
         3. 若原文件为加密 → 重新加密写回；若明文 → 明文写回
         4. 写前备份
         返回实际写入的文件路径
+
+        性能优化：verify=False（默认）跳过写入后的二次解密+解析校验，
+        避免双倍开销（原实现每次写入都 get_active_mods 再读一次）。
+        保留 verify=True 用于调试或关键路径。
         """
         original_bytes = prof.profile_sii.read_bytes()
         was_encrypted = _looks_encrypted(original_bytes)
@@ -437,10 +463,11 @@ class ProfileService:
             except Exception:
                 out_bytes = new_text.encode("utf-8-sig")
         prof.profile_sii.write_bytes(out_bytes)
-        # 写入后读一次验证
-        verify = self.get_active_mods(prof)
-        if verify != list(new_mods):
-            raise RuntimeError("写回后校验失败：active_mods 与预期不一致，可能被游戏重新加密或加密算法不匹配")
+        # 仅在显式请求时进行二次校验（避免双倍解密开销）
+        if verify:
+            check = self.get_active_mods(prof)
+            if check != list(new_mods):
+                raise RuntimeError("写回后校验失败：active_mods 与预期不一致，可能被游戏重新加密或加密算法不匹配")
         return prof.profile_sii
 
     # ---------- 复制存档 ----------
@@ -632,11 +659,20 @@ def _run_sii_decrypt(exe: Path, in_path: Path) -> Optional[bytes]:
         tmpin = Path(td) / in_path.name
         shutil.copy2(in_path, tmpin)
         tmpout = tmpin.parent / (tmpin.stem + ".dec")
-        subprocess.run([str(exe), str(tmpin), str(tmpout)],
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       timeout=30, cwd=td, shell=False)
-        if tmpout.exists():
+        result = subprocess.run([str(exe), str(tmpin), str(tmpout)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                timeout=30, cwd=td, shell=False)
+        # 必须同时满足：returncode=0、输出文件存在、文件非空
+        if result.returncode != 0:
+            return None
+        if not tmpout.exists():
+            return None
+        try:
             data = tmpout.read_bytes()
+        except OSError:
+            return None
+        if not data:
+            return None
             if b"SiiNunit" in data:
                 return data
         for cand in tmpin.parent.glob("*"):

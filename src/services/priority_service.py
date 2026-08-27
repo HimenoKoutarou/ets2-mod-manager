@@ -1,6 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from core.models import Mod
 
@@ -70,6 +70,11 @@ class PriorityService:
 
     def __init__(self, known_mods: Iterable[Mod]):
         self.by_name: Dict[str, Mod] = {}
+        # 性能优化：worklist 反向索引缓存，避免 indices_for_category 每次线性扫描
+        # 结构：{ id(worklist_tuple): { frozenset(pkg_set): List[int] } }
+        # worklist 是 list[dict]，不可哈希，用元组化签名做 key
+        self._worklist_sig: Optional[int] = None
+        self._pkg_index: Optional[Dict[str, List[int]]] = None
         import re as _re_pn
         for m in known_mods:
             # manifest.package_name（unit_name 主索引）与 mod_id（文件名索引）同级 setdefault
@@ -87,6 +92,28 @@ class PriorityService:
             stripped = _re_pn.sub(r"_(workshop|copy\d*|local)$", "", m.mod_id)
             if stripped and stripped != m.mod_id and stripped.isdigit():
                 self.by_name.setdefault(stripped, m)
+
+    # ---- 分类反向索引（性能优化） ----
+    def _build_pkg_index(self, worklist: List[dict]) -> Dict[str, List[int]]:
+        """构建 { package_name: [idx,...] } 反向索引，缓存到 self._pkg_index。
+
+        性能：indices_for_category 原实现对每次批量操作都线性扫描 worklist O(n)。
+        当连续调用 move_up/down/top/bottom 时会重复扫描。本方法按 worklist 内容签名
+        缓存，签名变化时重建（worklist 是新对象或内容变了）。
+        """
+        sig = id(worklist)
+        if self._worklist_sig == sig and self._pkg_index is not None:
+            return self._pkg_index
+        idx_map: Dict[str, List[int]] = {}
+        for i, e in enumerate(worklist):
+            if not e.get("enabled"):
+                continue
+            pn = e.get("package_name")
+            if pn:
+                idx_map.setdefault(pn, []).append(i)
+        self._pkg_index = idx_map
+        self._worklist_sig = sig
+        return idx_map
 
     # ---- 当前 active_mods → 工作模型（附带 enabled 状态） ----
     def build_worklist(self, active_mods: List[str], all_package_names: List[str]) -> List[dict]:
@@ -353,13 +380,20 @@ class PriorityService:
         返回 worklist 中同时满足以下条件的条目的下标（按 worklist 原顺序升序，天然保持块内相对顺序）：
           1. entry["enabled"] is True （只对已启用的 mod 做排序）
           2. entry["package_name"] in pkg_set
+
+        性能优化：用 _build_pkg_index 的反向索引 O(1) 查询每个 pkg，
+        避免每次都线性扫描整个 worklist O(n)。
         """
         if not pkg_set:
             return []
+        # 用反向索引加速：O(|pkg_set|) 而非 O(|worklist|)
+        idx_map = self._build_pkg_index(worklist)
         idx = []
-        for i, e in enumerate(worklist):
-            if e.get("enabled") and e.get("package_name") in pkg_set:
-                idx.append(i)
+        for pn in pkg_set:
+            if pn in idx_map:
+                idx.extend(idx_map[pn])
+        # 排序保持 worklist 原顺序
+        idx.sort()
         return idx
 
     def move_up_by_package_set(self, worklist, pkg_set, steps=1):

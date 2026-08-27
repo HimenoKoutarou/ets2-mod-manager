@@ -161,8 +161,9 @@ def save_language_preference(lang: str) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("w", encoding="utf-8") as f:
             json.dump({"language": lang}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    except Exception as e:
+        import sys as _sys
+        print(f"[i18n] 保存语言配置失败: {type(e).__name__}: {e}", file=_sys.stderr)
 
 
 def _ensure_current_lang_loaded() -> None:
@@ -256,8 +257,9 @@ def set_language(lang: str, emit: bool = True, persist: bool = True) -> bool:
     if changed and emit and _HAS_QT:
         try:
             I18nNotifier.instance().languageChanged.emit(lang)
-        except Exception:
-            pass
+        except Exception as e:
+            import sys as _sys
+            print(f"[i18n] 发射 languageChanged 信号失败: {type(e).__name__}: {e}", file=_sys.stderr)
     return changed
 
 
