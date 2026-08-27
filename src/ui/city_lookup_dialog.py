@@ -126,7 +126,7 @@ class CityLookupDialog(QDialog):
 
         # 状态行
         self.lbl_status = QLabel(_("city_lookup.status_loading"))
-        self.lbl_status.setStyleSheet("color:#57606a;font-size:12px;")
+        self.lbl_status.setStyleSheet("color:#a6adc8;font-size:12px;")
         root.addWidget(self.lbl_status)
 
         # 结果表格
@@ -153,7 +153,7 @@ class CityLookupDialog(QDialog):
 
         # 底部说明
         self.lbl_hint = QLabel(_("city_lookup.hint"))
-        self.lbl_hint.setStyleSheet("color:#6e7781;font-size:11px;")
+        self.lbl_hint.setStyleSheet("color:#6c7086;font-size:11px;")
         self.lbl_hint.setWordWrap(True)
         root.addWidget(self.lbl_hint)
 

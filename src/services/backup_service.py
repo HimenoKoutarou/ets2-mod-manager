@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, List
 
 
-DEFAULT_MAX_BACKUPS = 12
+DEFAULT_MAX_BACKUPS = 10  # 与 README 文档一致
 
 
 class BackupService:

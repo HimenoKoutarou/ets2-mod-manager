@@ -105,7 +105,7 @@ class SaveEditorDialog(QDialog):
 
         self.setWindowTitle(_("se.title"))
         self.resize(680, 560)
-        self.setStyleSheet(self._stylesheet())
+        self.setStyleSheet(ThemeManager.instance().effective_theme == 'dark' and DARK_THEME or LIGHT_THEME)
 
         self._build_ui()
 
@@ -125,6 +125,9 @@ class SaveEditorDialog(QDialog):
 
     @staticmethod
     def _stylesheet() -> str:
+        return ThemeManager.instance().effective_theme == 'dark' and DARK_THEME or LIGHT_THEME
+
+    def _stylesheet_old() -> str:
         return """
         QDialog { background: #f6f8fa; }
         QGroupBox {
@@ -192,7 +195,7 @@ class SaveEditorDialog(QDialog):
         self.cb_slot.currentIndexChanged.connect(self._on_slot_changed)
         slot_row.addWidget(self.cb_slot, 1)
         self.lbl_slot_info = QLabel("")
-        self.lbl_slot_info.setStyleSheet("color:#57606a;")
+        self.lbl_slot_info.setStyleSheet("color:#a6adc8;")
         slot_row.addWidget(self.lbl_slot_info, 1)
         sel_form.addRow(QLabel(_("se.save_slot")), slot_row)
 
@@ -210,7 +213,7 @@ class SaveEditorDialog(QDialog):
         # ---- 状态栏 ----
         status_row = QHBoxLayout()
         self.lbl_status = QLabel(_("se.tip_select_profile"))
-        self.lbl_status.setStyleSheet("color:#57606a; padding:4px 2px;")
+        self.lbl_status.setStyleSheet("color:#a6adc8; padding:4px 2px;")
         status_row.addWidget(self.lbl_status, 1)
         self.progress = QProgressBar()
         self.progress.setFixedHeight(8)
@@ -369,7 +372,7 @@ class SaveEditorDialog(QDialog):
         # 说明
         tip = QLabel(_("se.rename_tip"))
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#57606a; padding:8px; background:#fff8e1; border:1px solid #ffe082; border-radius:4px;")
+        tip.setStyleSheet("color:#a6adc8; padding:8px; background:#fff8e1; border:1px solid #ffe082; border-radius:4px;")
         v.addWidget(tip)
         return w
 
@@ -412,7 +415,7 @@ class SaveEditorDialog(QDialog):
 
         tip = QLabel(_("se.copy_tip"))
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#57606a; padding:8px; background:#e7f5ff; border:1px solid #74c0fc; border-radius:4px;")
+        tip.setStyleSheet("color:#a6adc8; padding:8px; background:#e7f5ff; border:1px solid #74c0fc; border-radius:4px;")
         v.addWidget(tip)
 
         # 填充 profile 列表
@@ -435,7 +438,7 @@ class SaveEditorDialog(QDialog):
 
         tip = QLabel(_("se.unlock_warning"))
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#cf222e; padding:6px;")
+        tip.setStyleSheet("color:#f38ba8; padding:6px;")
         form.addRow(tip)
 
         self.btn_unlock_dealers = QPushButton(_("se.btn_unlock_dealers"))
@@ -493,7 +496,7 @@ class SaveEditorDialog(QDialog):
 
         tip = QLabel(_("se.repair_tip"))
         tip.setWordWrap(True)
-        tip.setStyleSheet("color:#57606a; padding:8px; background:#fff8e1; border:1px solid #ffe082; border-radius:4px;")
+        tip.setStyleSheet("color:#a6adc8; padding:8px; background:#fff8e1; border:1px solid #ffe082; border-radius:4px;")
         v.addWidget(tip)
         return w
 

@@ -31,6 +31,7 @@ import os
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -227,11 +228,8 @@ def extract_manifest_text(archive_path) -> Optional[str]:
             # 空结果也返回（避免超时包每次重新提取）
             return entry.get("manifest_text") or None
 
-    # 单文件提取 manifest.sii
-    tmp = Path(os.environ.get("TEMP", str(Path.home()))) / f"ets2mm_mf_{key}"
-    if tmp.exists():
-        shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True, exist_ok=True)
+    # P1 修复：用 mkdtemp 替代固定目录，避免并发竞争
+    tmp = Path(tempfile.mkdtemp(prefix="ets2mm_mf_"))
 
     text: Optional[str] = None
     if _extract_single_file(path, "manifest.sii", tmp):
@@ -269,11 +267,8 @@ def extract_file_bytes(archive_path, inner_name: str) -> Optional[bytes]:
             _file_bytes_cache[cache_key] = disk_data
         return disk_data
 
-    # 3) 实际提取
-    tmp = Path(os.environ.get("TEMP", str(Path.home()))) / f"ets2mm_f_{key}_{hashlib.md5(inner_name.encode('utf-8')).hexdigest()[:8]}"
-    if tmp.exists():
-        shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True, exist_ok=True)
+    # P1 修复：用 mkdtemp 替代固定目录，避免并发竞争
+    tmp = Path(tempfile.mkdtemp(prefix="ets2mm_f_"))
 
     data: Optional[bytes] = None
     if _extract_single_file(path, inner_name, tmp):

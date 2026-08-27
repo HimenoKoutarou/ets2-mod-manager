@@ -44,13 +44,15 @@ def _get_opener():
             handlers.append(urllib.request.ProxyHandler(proxies))
     except Exception:
         pass
-    # 自定义 SSL 上下文：通过代理时跳过证书验证（避免公司/校园 HTTPS 中间人代理导致握手失败）
+    # P0 安全修复：仅在有代理时降低 SSL 验证（代理可能做 MITM）；直连保持默认验证
+    _has_proxy = bool(handlers)
     try:
         import ssl as _ssl
-        _ctx = _ssl.create_default_context()
-        _ctx.check_hostname = False
-        _ctx.verify_mode = _ssl.CERT_NONE
-        handlers.append(urllib.request.HTTPSHandler(context=_ctx))
+        if _has_proxy:
+            _ctx = _ssl.create_default_context()
+            _ctx.check_hostname = False
+            _ctx.verify_mode = _ssl.CERT_NONE
+            handlers.append(urllib.request.HTTPSHandler(context=_ctx))
     except Exception:
         pass
     _opener = urllib.request.build_opener(*handlers) if handlers else urllib.request.build_opener()

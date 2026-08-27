@@ -178,6 +178,14 @@ class ScsArchiveReader:
         try:
             if self._mode == "dir":
                 p = self.path / inner_path.replace("/", os.sep)
+                # P1 安全：防止 path traversal（manifest 里的 description_file 可能为 ../../xxx）
+                try:
+                    p_resolved = p.resolve()
+                    root_resolved = self.path.resolve()
+                    if not str(p_resolved).startswith(str(root_resolved) + os.sep) and p_resolved != root_resolved:
+                        return None
+                except (OSError, ValueError):
+                    return None
                 if not p.is_file():
                     return None
                 # 性能优化：大文件用 mmap 读取（>5MB，主要是贴图/模型），

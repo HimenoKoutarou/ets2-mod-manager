@@ -63,18 +63,9 @@ from ui.save_editor_dialog import SaveEditorDialog
 from ._mw_widgets import _LangSwitchDialog, SplashScreen, ModTable
 from ._mw_workers import _QuickScanWorker, _AsyncParseWorker, _WorkshopFetchWorker, _EnrichProfilesWorker
 from ._mw_mixins import _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMixin
+from .theme import ThemeManager, THEME_DARK, THEME_LIGHT, THEME_AUTO, QTB_DEFAULT, QTB_PRIMARY
 
-# ============================================================
-# Toolbar 样式常量（避免 4 份重复 CSS 字符串；改主题时只需改这里）
-# ============================================================
-_QTB_STYLE_DEFAULT = "QToolButton{padding:4px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;}QToolButton:hover{background:#f3f4f6;}QToolButton::menu-indicator{width:0px;}"
-_QTB_STYLE_PRIMARY = "QToolButton{padding:4px 12px;border:1px solid #1a7f37;border-radius:4px;background:#2da44e;color:#fff;font-weight:700;}QToolButton:hover{background:#2c974b;}QToolButton::menu-indicator{image:none;width:4px;}"
-
-# ============================================================
-# Toolbar 样式常量（避免 4 份重复 CSS 字符串；改主题时只需改这里）
-# ============================================================
-_QTB_STYLE_DEFAULT = "QToolButton{padding:4px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;}QToolButton:hover{background:#f3f4f6;}QToolButton::menu-indicator{width:0px;}"
-_QTB_STYLE_PRIMARY = "QToolButton{padding:4px 12px;border:1px solid #1a7f37;border-radius:4px;background:#2da44e;color:#fff;font-weight:700;}QToolButton:hover{background:#2c974b;}QToolButton::menu-indicator{image:none;width:4px;}"
+# 全局深色主题从 theme.py 加载，旧的 _QTB_STYLE 常量已迁移
 
 class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMixin):
     def __init__(self):
@@ -166,8 +157,19 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
 
 
 
+
+    def closeEvent(self, event):
+        """窗口关闭时清理后台线程。"""
+        for attr in ("_quick_scan_worker", "_async_parse_worker", "_workshop_fetch_worker"):
+            w = getattr(self, attr, None)
+            if w is not None and w.isRunning():
+                w.quit()
+                w.wait(3000)
+        super().closeEvent(event)
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
+    ThemeManager.instance().apply(app)
     # App 级图标
     icon_path = Path(__file__).resolve().parent.parent / "assets" / "app_icon.png"
     if icon_path.exists():

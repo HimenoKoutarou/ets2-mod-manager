@@ -12,7 +12,6 @@ import sys
 import time
 import winreg
 import subprocess
-import threading
 from pathlib import Path
 from typing import Optional, Callable, Any
 
@@ -100,34 +99,27 @@ def find_game_docs_dir() -> Optional[Path]:
 
 
 class GameLaunchHandle:
-    """游戏启动句柄：持有进程对象 + watchdog 线程。"""
-    def __init__(self, process: subprocess.Popen, docs_dir: Path,
-                 on_exit: Callable[[bool, Optional[Path], Optional[Path]], None]):
+    """游戏启动句柄：持有进程对象。纯同步设计 — 由 UI 层 QThread 调用 wait_and_check()。"""
+    def __init__(self, process: subprocess.Popen, docs_dir: Path):
         self.process = process
         self.docs_dir = docs_dir
-        self.on_exit = on_exit
         self._crash_mtime_before: float = 0.0
-        self._watchdog: Optional[threading.Thread] = None
         self._stopped = False
-
-    def start(self) -> None:
         # 记录启动前 crash.txt mtime
-        crash_txt = self.docs_dir / "game.crash.txt"
+        crash_txt = docs_dir / "game.crash.txt"
         if crash_txt.exists():
             self._crash_mtime_before = crash_txt.stat().st_mtime
 
-        self._watchdog = threading.Thread(target=self._watch, daemon=True)
-        self._watchdog.start()
-
-    def _watch(self) -> None:
-        """等待游戏进程退出，然后判断是否崩溃。"""
+    def wait_and_check(self) -> tuple:
+        """同步等待进程退出，返回 (crashed: bool, crash_txt: Path|None, log_txt: Path|None)。
+        P1 修复：移除 threading.Thread，由 UI 层 QThread 调用此方法。"""
         try:
             self.process.wait()
         except Exception:
             pass
 
         if self._stopped:
-            return
+            return (False, None, None)
 
         time.sleep(0.5)  # 等文件系统刷新
 
@@ -146,14 +138,11 @@ class GameLaunchHandle:
         if rc is not None and rc != 0:
             crashed = True
 
-        try:
-            self.on_exit(
-                crashed,
-                crash_txt if crash_txt.exists() else None,
-                log_txt if log_txt.exists() else None,
-            )
-        except Exception:
-            pass
+        return (
+            crashed,
+            crash_txt if crash_txt.exists() else None,
+            log_txt if log_txt.exists() else None,
+        )
 
     def is_running(self) -> bool:
         return self.process.poll() is None
@@ -172,7 +161,9 @@ def launch_and_watch(
     docs_dir: Optional[Path] = None,
     on_exit: Optional[Callable[[bool, Optional[Path], Optional[Path]], None]] = None,
 ) -> Optional[GameLaunchHandle]:
-    """启动游戏并监控。返回 GameLaunchHandle 或 None（启动失败）。"""
+    """启动游戏。返回 GameLaunchHandle 或 None（启动失败）。
+    P1 修复：不再创建 threading.Thread — on_exit 回调已废弃，
+    由 UI 层 QThread 调用 handle.wait_and_check() 获取结果。"""
     if not exe_path.exists():
         return None
 
@@ -189,6 +180,4 @@ def launch_and_watch(
     except Exception:
         return None
 
-    handle = GameLaunchHandle(proc, docs_dir, on_exit or (lambda *a: None))
-    handle.start()
-    return handle
+    return GameLaunchHandle(proc, docs_dir)

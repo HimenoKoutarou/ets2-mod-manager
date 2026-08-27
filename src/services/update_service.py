@@ -173,11 +173,23 @@ class UpdateService(QObject):
 
         assets = release.get("assets", [])
         download_url = ""
+        # P0 安全修复：精确匹配项目 ZIP，不选第一个 .zip（避免下载 source.zip）
+        app_lower = "ets2"
         for asset in assets:
             name = asset.get("name", "").lower()
-            if name.endswith(".zip"):
+            if name.endswith(".zip") and (app_lower in name or "modmanager" in name or "mod-manager" in name):
                 download_url = asset.get("browser_download_url", "")
                 break
+        # 兜底：如果没有精确匹配，选最大的 zip（通常是安装包而非 source）
+        if not download_url:
+            best_size = 0
+            for asset in assets:
+                name = asset.get("name", "").lower()
+                if name.endswith(".zip") and "source" not in name:
+                    sz = asset.get("size", 0)
+                    if sz > best_size:
+                        best_size = sz
+                        download_url = asset.get("browser_download_url", "")
 
         if not download_url:
             self.error_occurred.emit("未找到可下载的 zip 压缩包")
@@ -301,8 +313,14 @@ class UpdateService(QObject):
                         self.progress.emit(downloaded, 0, f"下载中 {downloaded / 1024 / 1024:.1f} MB")
 
     def _extract_zip(self, zip_path: Path, extract_dir: Path) -> None:
-        """解压 zip 文件到指定目录。"""
+        """安全解压 zip 文件到指定目录（防 Zip Slip 路径穿越）。"""
+        extract_dir_resolved = extract_dir.resolve()
         with zipfile.ZipFile(str(zip_path), "r") as zf:
+            for info in zf.infolist():
+                # 检查每个 entry 的路径是否在 extract_dir 内
+                target = (extract_dir_resolved / info.filename).resolve()
+                if not str(target).startswith(str(extract_dir_resolved) + os.sep) and target != extract_dir_resolved:
+                    raise RuntimeError(f"Zip Slip 检测：不安全的 ZIP entry: {info.filename}")
             zf.extractall(str(extract_dir))
 
     def _copy_extracted_to(self, extract_dir: Path, target_dir: Path) -> None:

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 
+from ui.theme import ThemeManager, DARK_THEME, LIGHT_THEME
 from services.crash_service import (
     Severity, CrashSuspicion, CrashSuspectMod, CrashAnalyzeResult,
     analyze_crashlog, discover_latest_crash_pair,
@@ -38,11 +39,11 @@ from services.game_launcher_service import (
 # ============================================================
 # 颜色常量
 # ============================================================
-_RED_HEX = "#D7263D"
-_YELLOW_HEX = "#F46036"
-_GREEN_HEX = "#1B998B"
-_ORANGE_HEX = "#F46036"
-_BRIGHT_YELLOW_HEX = "#FFD500"
+_RED_HEX = "#f38ba8"
+_YELLOW_HEX = "#f9e2af"
+_GREEN_HEX = "#a6e3a1"
+_ORANGE_HEX = "#fab387"
+_BRIGHT_YELLOW_HEX = "#fcd346"
 
 
 # ============================================================
@@ -142,6 +143,7 @@ class _GameLaunchWorker(QThread):
 # CrashCheckDialog 主体
 # ============================================================
 class CrashCheckDialog(QDialog):
+    _theme_applied = False
     """崩溃排查对话框：Crashlog 解析 + 启动游戏监控。
 
     尺寸 1000x680；上方启动游戏 + 路径选择，下方嫌疑表 + 证据原文。"""

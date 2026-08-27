@@ -457,12 +457,29 @@ class ProfileService:
         # 输出字节
         out_bytes = new_text.encode("utf-8-sig")
         if was_encrypted:
-            # 尝试重新加密
+            # P0 安全修复：加密失败拒绝写明文（防止损坏 profile）
             try:
                 out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
-            except Exception:
-                out_bytes = new_text.encode("utf-8-sig")
-        prof.profile_sii.write_bytes(out_bytes)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Profile 加密失败，拒绝写入明文以保护存档: {e}"
+                ) from e
+        # P0 原子写入：先写 .tmp 再 os.replace，防止写入中途崩溃损坏 profile
+        import tempfile as _tf
+        tmp_fd, tmp_path = _tf.mkstemp(
+            prefix=".profile_sii_", dir=str(prof.profile_sii.parent)
+        )
+        try:
+            with os.fdopen(tmp_fd, "wb") as f:
+                f.write(out_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(prof.profile_sii))
+        except Exception:
+            if os.path.exists(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
+            raise
         # 仅在显式请求时进行二次校验（避免双倍解密开销）
         if verify:
             check = self.get_active_mods(prof)

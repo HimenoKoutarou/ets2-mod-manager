@@ -264,7 +264,13 @@ class SymlinkManager:
                     )
 
         # 4. 创建 Junction（最稳健的方式）
-        created = _create_junction(target, orig.parent / orig.name)
+        # P0 修复：CreateFileW(OPEN_EXISTING) 要求 link_path 存在，必须先创建空目录
+        link_path = orig.parent / orig.name
+        try:
+            link_path.mkdir(parents=True, exist_ok=False)
+        except OSError:
+            pass  # 目录可能已存在（上面 rename 失败后的残留）
+        created = _create_junction(target, link_path)
         if created:
             return SymlinkResult(True, _T("sym.msg_junction_ok"),
                                  orig, target, method="junction")
@@ -275,6 +281,15 @@ class SymlinkManager:
                                  orig, target, method="symlink_py")
         except OSError as e_sym:
             err_info = f"Junction 和 Symlink 均创建失败：{e_sym}\n"
+            # P0 修复：回滚 — 尝试把备份目录恢复回原位置，避免 mod 目录消失
+            try:
+                if 'backup_path' in dir() and backup_path and backup_path.exists():
+                    if link_path.exists():
+                        shutil.rmtree(link_path, ignore_errors=True)
+                    os.rename(backup_path, orig)
+                    err_info += "已自动恢复原目录，数据未丢失。\n"
+            except OSError:
+                err_info += f"警告：原目录可能已移至 {backup_path}，请手动恢复。\n"
             if not _is_admin():
                 err_info += '提示：请右键以管理员身份运行此程序，或在 Windows 设置中开启「开发者模式」。'
             else:
@@ -368,8 +383,14 @@ class SymlinkManager:
             return SymlinkResult(False, _T("sym.msg_repair_clear_fail", orig=str(orig)) or f"无法清除原位置的旧链接/目录：{orig}，请手动删除后再试", orig, target)
 
         # 2) 重建 — 先试 Junction
+        # P0 修复：先创建空目录再建 Junction
+        link_path = orig.parent / orig.name
         try:
-            ok = _create_junction(target, orig.parent / orig.name)
+            link_path.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        try:
+            ok = _create_junction(target, link_path)
         except Exception as e:
             return SymlinkResult(False, _T("sym.msg_repair_jct_fail", e=str(e)) or f"重建 Junction 异常：{e}", orig, target)
         if ok:
