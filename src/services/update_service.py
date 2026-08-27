@@ -276,19 +276,18 @@ class UpdateService(QObject):
         backup_dir = install_path.parent / f".{install_path.name}_backup_{int(_time.time())}"
 
         try:
-            # 1. 验证解压内容有效（至少包含 src/ 或 run.py）
+            # 1. R14.2 P2: 用 _validate_package() 做严格校验（抽出独立函数，规则加强）
             items = list(extract_dir.iterdir())
             if len(items) == 1 and items[0].is_dir():
                 source_root = items[0]
             else:
                 source_root = extract_dir
 
-            has_valid_content = any(
-                (source_root / marker).exists()
-                for marker in ("run.py", "src", "main.py", "ETS2ModManager.spec")
-            )
-            if not has_valid_content:
-                raise RuntimeError("解压内容不包含有效程序文件，拒绝安装")
+            validation_issues = UpdateService._validate_package(source_root)
+            if validation_issues:
+                raise RuntimeError(
+                    "解压内容校验失败，拒绝安装：" + "；".join(validation_issues)
+                )
 
             # 2. 备份当前版本（R14.1: backup 目录带 timestamp，不再清理旧 backup）
             self.progress.emit(30, 100, "备份当前版本")
@@ -443,6 +442,47 @@ class UpdateService(QObject):
                 UpdateService._merge_dirs(item, dest_item)
             else:
                 shutil.copy2(str(item), str(dest_item))
+
+    @staticmethod
+    def _validate_package(source_root: Path) -> list[str]:
+        """R14.2 P2: 验证解压后的软件包内容有效性。
+
+        返回问题字符串列表；为空表示通过。
+
+        规则：
+          - 至少包含一个启动器（run.py is_file 或 main.py is_file 或 ETS2ModManager.spec is_file）
+          - 若存在 src/，必须是目录且至少包含 1 个 .py 文件（不是空壳）
+          - 至少满足以上任一条件（不是纯空目录）
+        """
+        issues: list[str] = []
+        if not source_root.exists() or not source_root.is_dir():
+            issues.append("软件包根目录不存在或不是文件夹")
+            return issues
+
+        launcher_files = ("run.py", "main.py", "ETS2ModManager.spec")
+        has_launcher = any(
+            (source_root / m).is_file() for m in launcher_files
+        )
+        if not has_launcher:
+            issues.append(
+                f"未找到启动器文件（需要其中之一：{', '.join(launcher_files)}）"
+            )
+
+        src_path = source_root / "src"
+        if src_path.exists():
+            if not src_path.is_dir():
+                issues.append("src 存在但不是文件夹（不是空壳即可）")
+            else:
+                # src 是目录：至少有一个 .py
+                has_py = any(p.suffix == ".py" for p in src_path.rglob("*") if p.is_file())
+                if not has_py:
+                    issues.append("src/ 目录下没有任何 .py 文件，疑似空壳包")
+
+        # 兜底：完全没有内容
+        if not any(source_root.iterdir()):
+            issues.append("软件包解压后内容为空")
+
+        return issues
 
     @staticmethod
     def _safe_remove(path: Path) -> None:

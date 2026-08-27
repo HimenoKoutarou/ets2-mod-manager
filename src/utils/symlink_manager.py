@@ -574,7 +574,33 @@ class SymlinkManager:
             return SymlinkResult(True, _T("sym.msg_repair_sym_ok", target=str(target)) or f"已修复软链接：原位置重建 Symlink → {target}。重启 ETS2 即生效。",
                                  orig, target, method="symlink_py")
         except OSError as e_sym:
-            err = f"Junction 与 Symlink 重建都失败：{e_sym}\n"
+            # R14.2 P1: 重建都失败 — 尝试恢复原 broken link，保持操作前状态
+            rollback_info = ""
+            try:
+                # 先清理当前位置可能的空目录残留
+                if orig.exists() and orig.is_dir():
+                    try:
+                        orig.rmdir()
+                    except OSError:
+                        pass
+                # 恢复原 broken symlink（不管 old_target 是否存在，都要让状态回到操作前）
+                if _old_kind in ("symlink", "symlink_broken") and _old_target:
+                    try:
+                        os.symlink(str(_old_target), str(orig), target_is_directory=True)
+                        rollback_info = f"\n已尝试恢复原链接指向 {_old_target}。"
+                    except OSError as rb_e:
+                        rollback_info = f"\n警告：原 broken link 也无法恢复（{rb_e}）。原位置当前为空，数据仍保留在之前的真实目录。"
+                elif _old_kind == "junction" and _old_target:
+                    try:
+                        if not orig.exists():
+                            orig.mkdir(parents=True, exist_ok=True)
+                        if _create_junction(Path(_old_target), orig):
+                            rollback_info = f"\n已尝试恢复原 Junction 指向 {_old_target}。"
+                    except Exception:
+                        rollback_info = f"\n注意：原 Junction 未恢复，原位置已清空，请手动重建或检查。"
+            except Exception as rb_x:
+                rollback_info = f"\n回滚时出错：{rb_x}"
+            err = f"Junction 与 Symlink 重建都失败：{e_sym}{rollback_info}\n"
             if not _is_admin():
                 err += "提示：请右键「以管理员身份运行」，或在 Windows 设置开启「开发者模式」。"
             return SymlinkResult(False, err, orig, target)
