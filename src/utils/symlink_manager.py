@@ -50,15 +50,31 @@ def _is_junction(path: Path) -> bool:
 
 
 def _files_identical(a: Path, b: Path) -> bool:
-    """R13: SHA256 compare two files (size-only is NOT safe)."""
+    """R14: SHA256 compare two files (chunked for large files)."""
     try:
-        if a.stat().st_size != b.stat().st_size:
+        sa = a.stat()
+        sb = b.stat()
+        if sa.st_size != sb.st_size:
             return False
-        ha = hashlib.sha256(a.read_bytes()).hexdigest()
-        hb = hashlib.sha256(b.read_bytes()).hexdigest()
-        return ha == hb
+        # R14.5: 大文件分块 hash，避免一次性 read_bytes() 撑爆内存
+        return _sha256_file(a) == _sha256_file(b)
     except OSError:
         return False
+
+
+_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB
+
+
+def _sha256_file(path: Path) -> str:
+    """R14.5: 分块计算文件 SHA256，支持大文件。"""
+    h = hashlib.sha256()
+    with open(str(path), "rb") as f:
+        while True:
+            chunk = f.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _create_junction(target: Path, link: Path) -> bool:

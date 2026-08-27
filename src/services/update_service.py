@@ -265,10 +265,63 @@ class UpdateService(QObject):
             return False
 
         self.status_changed.emit("正在安装新版本...")
-        self.progress.emit(0, 100, "复制文件")
+        self.progress.emit(0, 100, "准备安装")
+
+        # R14.3: 事务式安装 — staging → backup → commit → rollback on failure
+        install_path = Path(install_dir)
+        backup_dir = install_path.parent / f".{install_path.name}_backup_r14"
 
         try:
-            self._copy_extracted_to(extract_dir, Path(install_dir))
+            # 1. 验证解压内容有效（至少包含 src/ 或 run.py）
+            items = list(extract_dir.iterdir())
+            if len(items) == 1 and items[0].is_dir():
+                source_root = items[0]
+            else:
+                source_root = extract_dir
+
+            has_valid_content = any(
+                (source_root / marker).exists()
+                for marker in ("run.py", "src", "main.py", "ETS2ModManager.spec")
+            )
+            if not has_valid_content:
+                raise RuntimeError("解压内容不包含有效程序文件，拒绝安装")
+
+            # 2. 备份当前版本
+            self.progress.emit(30, 100, "备份当前版本")
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            if install_path.exists():
+                try:
+                    # 尝试 rename（最快，同卷原子操作）
+                    os.rename(str(install_path), str(backup_dir))
+                except OSError:
+                    # fallback: copytree
+                    shutil.copytree(str(install_path), str(backup_dir))
+                    shutil.rmtree(str(install_path), ignore_errors=True)
+
+            # 3. 复制新版本到 install_dir
+            self.progress.emit(50, 100, "安装新版本")
+            try:
+                self._copy_extracted_to(extract_dir, install_path)
+            except Exception as copy_err:
+                # R14.3: 安装失败 → 从 backup 回滚
+                self.status_changed.emit("安装失败，正在回滚...")
+                if install_path.exists():
+                    shutil.rmtree(str(install_path), ignore_errors=True)
+                if backup_dir.exists():
+                    try:
+                        os.rename(str(backup_dir), str(install_path))
+                    except OSError:
+                        shutil.copytree(str(backup_dir), str(install_path))
+                raise RuntimeError(
+                    f"安装失败，已从备份恢复: {copy_err}"
+                ) from copy_err
+
+            # 4. 安装成功 → 删除备份
+            self.progress.emit(90, 100, "清理临时文件")
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+
         except Exception as e:
             self.error_occurred.emit(f"安装失败: {e}")
             self._safe_remove(extract_dir)
