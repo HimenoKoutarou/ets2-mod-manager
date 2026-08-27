@@ -329,9 +329,9 @@ class SymlinkManager:
         try:
             if link_path.exists() and link_path.is_dir():
                 try:
-                    link_path.rmdir()  # 只删空目录，不删有内容的
+                    link_path.rmdir()  # R13.1: 只删空目录，绝不 rmtree
                 except OSError:
-                    shutil.rmtree(link_path, ignore_errors=True)
+                    pass  # rmdir 失败就放弃，不强制删除
         except Exception:
             pass
         try:
@@ -344,7 +344,10 @@ class SymlinkManager:
             try:
                 if 'backup_path' in dir() and backup_path and backup_path.exists():
                     if link_path.exists():
-                        shutil.rmtree(link_path, ignore_errors=True)
+                        try:
+                            link_path.rmdir()  # R13.1: 只删空目录，绝不 rmtree
+                        except OSError:
+                            pass
                     os.rename(backup_path, orig)
                     err_info += "已自动恢复原目录，数据未丢失。\n"
             except OSError:
@@ -386,7 +389,11 @@ class SymlinkManager:
             for item in list(target.iterdir()):
                 dest = self.original / item.name
                 if dest.exists():
-                    continue  # 已存在则跳过
+                    # R13.1: 用 SHA256 比较（不是 size-only）
+                    if dest.is_file() and item.is_file() and _files_identical(item, dest):
+                        continue
+                    # 内容不同或类型不同 → 跳过不覆盖（保留两边）
+                    continue
                 if item.is_dir():
                     shutil.copytree(str(item), str(dest))
                 else:
@@ -476,9 +483,9 @@ class SymlinkManager:
         try:
             if link_path.exists() and link_path.is_dir():
                 try:
-                    link_path.rmdir()
+                    link_path.rmdir()  # R13.1: 只删空目录
                 except OSError:
-                    shutil.rmtree(link_path, ignore_errors=True)
+                    pass  # 不 rmtree
         except Exception:
             pass
         try:

@@ -545,12 +545,24 @@ class ProfileService:
                 backups_dir.mkdir(parents=True, exist_ok=True)
                 zip_path = backups_dir / f"{prof.profile_id}_{ts}_pre-copy.zip"
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    backup_count = 0
+                    expected_count = 0
                     for f in prof.folder.rglob("*"):
                         if f.is_file():
+                            expected_count += 1
                             try:
                                 zf.write(f, str(f.relative_to(prof.folder.parent)))
-                            except Exception:
-                                pass
+                                backup_count += 1
+                            except Exception as e:
+                                raise RuntimeError(
+                                    f"备份失败：文件 {f.name} 无法写入 zip ({e})，已中止"
+                                ) from e
+                    if backup_count != expected_count:
+                        raise RuntimeError(
+                            f"备份不完整：期望 {expected_count} 文件，实际 {backup_count}"
+                        )
+        except RuntimeError:
+            raise
         except Exception:
             pass
 
@@ -690,12 +702,22 @@ class ProfileService:
                 zip_path = backups_dir / zip_name
                 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                     if prof.folder.exists():
+                        backup_count = 0
+                        expected_count = 0
                         for f in prof.folder.rglob("*"):
                             if f.is_file():
+                                expected_count += 1
                                 try:
                                     zf.write(f, str(f.relative_to(prof.folder.parent)))
-                                except Exception:
-                                    pass
+                                    backup_count += 1
+                                except Exception as e:
+                                    raise RuntimeError(
+                                        f"备份失败：文件 {f.name} 无法写入 zip ({e})，已中止删除"
+                                    ) from e
+                        if backup_count != expected_count:
+                            raise RuntimeError(
+                                f"备份不完整：期望 {expected_count} 文件，实际 {backup_count}，拒绝删除"
+                            )
                     # 同时把真实 profile.sii 所在目录也打包进 zip（如果在其他位置）
                     sii_parent = prof.profile_sii.parent
                     if sii_parent != prof.folder and sii_parent.exists():
