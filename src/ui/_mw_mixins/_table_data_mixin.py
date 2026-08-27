@@ -99,6 +99,12 @@ class _TableDataMixin:
             self._profile_fill_pending = True
             return
         self._profile_fill_pending = False
+        # profile 成功加载后建立启用+优先级 hash 基线，后续改动据此判定 dirty
+        try:
+            if hasattr(self, "current_worklist") and hasattr(self, "_clear_priority_dirty"):
+                self._clear_priority_dirty()
+        except Exception:
+            pass
         try:
             active = self.profile_svc.get_active_mods(prof)
         except Exception as e:
@@ -427,6 +433,8 @@ class _TableDataMixin:
         self.current_worklist = self.priority_svc.move_up_by_package_set(
             self.current_worklist, pkg_set, steps=steps
         )
+        try: self._mark_priority_dirty("已按分类整体上移 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
         count = len([p for p in pkg_set if any(
             e.get("package_name") == p and e.get("enabled") for e in self.current_worklist
         )])
@@ -445,6 +453,8 @@ class _TableDataMixin:
         self.current_worklist = self.priority_svc.move_down_by_package_set(
             self.current_worklist, pkg_set, steps=steps
         )
+        try: self._mark_priority_dirty("已按分类整体下移 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
         count = len([p for p in pkg_set if any(
             e.get("package_name") == p and e.get("enabled") for e in self.current_worklist
         )])
@@ -463,6 +473,8 @@ class _TableDataMixin:
         self.current_worklist = self.priority_svc.move_top_by_package_set(
             self.current_worklist, pkg_set
         )
+        try: self._mark_priority_dirty("已按分类整体置顶 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
         count = len([p for p in pkg_set if any(
             e.get("package_name") == p and e.get("enabled") for e in self.current_worklist
         )])
@@ -481,6 +493,8 @@ class _TableDataMixin:
         self.current_worklist = self.priority_svc.move_bottom_by_package_set(
             self.current_worklist, pkg_set
         )
+        try: self._mark_priority_dirty("已按分类整体置底 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
         count = len([p for p in pkg_set if any(
             e.get("package_name") == p and e.get("enabled") for e in self.current_worklist
         )])
@@ -681,12 +695,15 @@ class _TableDataMixin:
         if not self._ensure_backup_before_save():
             return
         new_active = PriorityService.worklist_to_active(self.current_worklist)
+        dirty_note = "（* 有未保存的优先级/启用变更）" if getattr(self, "_dirty_priority", False) else ""
         ret = QMessageBox.question(
             self, _("dlg.save_confirm_title"),
-            _("dlg.save_confirm_msg", prof=self.current_profile.profile_id[:16], n=len(new_active)))
+            _("dlg.save_confirm_msg", prof=self.current_profile.profile_id[:16], n=len(new_active)) + dirty_note)
         if ret != QMessageBox.Yes: return
         try:
             wrote = self.profile_svc.set_active_mods(self.current_profile, new_active)
+            try: self._clear_priority_dirty()
+            except Exception: pass
             QMessageBox.information(self, _("dlg.save_ok_title"), _("dlg.save_ok_msg", wrote=wrote))
             self.statusBar().showMessage(_("ui.sb_saved", n=len(new_active)))
         except Exception as e:
@@ -954,9 +971,16 @@ class _TableDataMixin:
                                 cb.setCurrentIndex(idx); break
             cb.addItem(_("dlg.nm_new_folder"), "__new_folder__")
             rows.append((mid, m, cb))
-        dlg = QDialog(self)
+        dlg = QDialog(
+            self,
+            Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
+        )
         dlg.setWindowTitle(_("dlg.nm_title", n=len(new_ids)))
-        dlg.resize(660, 560)
+        dlg.setModal(True)
+        dlg.setMinimumWidth(660)
+        dlg.setMinimumHeight(560)
+        dlg.resize(680, 580)
+        dlg.setSizeGripEnabled(True)
         lv = QVBoxLayout(dlg)
         lv.addWidget(QLabel(
             _("dlg.nm_info", n=len(new_ids))
@@ -993,10 +1017,18 @@ class _TableDataMixin:
         qbtn.clicked.connect(_apply_all)
         hb.addWidget(qbtn); hb.addStretch(1)
         lv.addLayout(hb)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        bb.button(QDialogButtonBox.Ok).setText(_("dlg.nm_ok"))
-        bb.button(QDialogButtonBox.Cancel).setText(_("dlg.nm_cancel"))
-        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dlg)
+        ok_btn = bb.button(QDialogButtonBox.Ok)
+        cancel_btn = bb.button(QDialogButtonBox.Cancel)
+        ok_btn.setText(_("dlg.nm_ok"))
+        ok_btn.setMinimumHeight(34)
+        ok_btn.setMinimumWidth(120)
+        cancel_btn.setText(_("dlg.nm_cancel"))
+        cancel_btn.setMinimumHeight(34)
+        cancel_btn.setMinimumWidth(120)
+        ok_btn.setDefault(True)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
         lv.addWidget(bb)
         dlg.exec()   # OK/Cancel 都保留 combo 当前选择（Cancel 即使用默认：未分类）
         changes: dict[str, str] = {}

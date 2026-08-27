@@ -845,19 +845,25 @@ class _ToolbarMixin:
                 to_remove.add(entry)
         if not to_remove:
             return
-        new_active = [e for e in active if e not in to_remove]
+        new_active_entries = [e for e in active if e not in to_remove]
+        # P2 async priority: memory-only + dirty, user must click 保存
+        self._sync_worklist_from_table()
         try:
-            self.profile_svc.set_active_mods(self.current_profile, new_active)
-        except Exception as e:
-            QMessageBox.warning(self, "禁用 mod", f"写入 profile 失败: {e}")
-            return
+            rebuild = PriorityService.rebuild_from_active(self.priority_svc, self.current_worklist, new_active_entries)
+            if rebuild:
+                self.current_worklist = rebuild
+        except Exception:
+            pass
+        try: self._mark_priority_dirty(f"检测到 {len(to_remove)} 个 RED 告警 mod 已建议禁用 · 请点「保存」写回 profile")
+        except Exception: pass
         try:
             self._fill_table_for_profile(self.current_profile)
         except Exception:
             pass
         QMessageBox.information(
-            self, "已禁用",
-            f"已禁用 {len(to_remove)} 个 RED 告警 mod 并保存 profile。"
+            self, "已禁用（未保存）",
+            f"已禁用 {len(to_remove)} 个 RED 告警 mod。所有变更都还在内存中，\n"
+            f"请点工具栏「保存 ▼」→「保存 profile」后才真正写回游戏 profile。"
         )
 
     def _move_mod_to_bottom(self, mod_id: str) -> None:
@@ -887,17 +893,23 @@ class _ToolbarMixin:
             return  # 已在最底
         active.pop(idx)
         active.append(entry)
+        # P2 async priority: memory-only + dirty, user must click 保存
+        self._sync_worklist_from_table()
         try:
-            self.profile_svc.set_active_mods(self.current_profile, active)
-        except Exception as e:
-            QMessageBox.warning(self, "移动 mod", f"写入 profile 失败: {e}")
-            return
+            rebuild = PriorityService.rebuild_from_active(self.priority_svc, self.current_worklist, active)
+            if rebuild:
+                self.current_worklist = rebuild
+        except Exception:
+            pass
+        try: self._mark_priority_dirty("已将崩溃嫌疑 mod 移到加载最末尾 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
         try:
             self._fill_table_for_profile(self.current_profile)
         except Exception:
             pass
         QMessageBox.information(
-            self, "已移动",
-            f"已将 mod 移至加载顺序最底: {mod_id}"
+            self, "已移动（未保存）",
+            f"已将 mod 移至加载顺序最底: {mod_id}。所有变更都还在内存中，\n"
+            f"请点工具栏「保存 ▼」→「保存 profile」后才真正写回游戏 profile。"
         )
 

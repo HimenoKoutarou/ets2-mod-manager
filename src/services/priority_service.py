@@ -116,6 +116,64 @@ class PriorityService:
         return idx_map
 
     # ---- 当前 active_mods → 工作模型（附带 enabled 状态） ----
+
+    @classmethod
+    def rebuild_from_active(cls, current_svc, current_worklist, new_active_entries):
+        # Rebuild worklist rows after an in-memory active-mods reorder.
+        # Mirrors build_worklist() row shape: enabled, priority_index, package_name,
+        # mod + display_title metadata carried over from current_worklist where present.
+        # Disabled rows get priority_index = None.
+        if current_worklist is None:
+            current_worklist = []
+        active_keys = []
+        for e in new_active_entries:
+            if isinstance(e, dict):
+                key = (e.get("package_name") or e.get("mod_id") or "").strip()
+            else:
+                key = str(e).strip()
+            if key:
+                active_keys.append(key)
+        active_rank = {k: i for i, k in enumerate(active_keys)}
+        new_wl = []
+        for row in current_worklist:
+            r2 = dict(row)
+            pkg = str(r2.get("package_name") or "").strip()
+            if pkg and pkg in active_rank:
+                r2["enabled"] = True
+                r2["priority_index"] = active_rank[pkg]
+            else:
+                r2["enabled"] = False
+                r2["priority_index"] = None
+            new_wl.append(r2)
+        seen = {str(r.get("package_name") or "").strip() for r in new_wl}
+        mod_index = {}
+        mods_src = getattr(current_svc, "mods", None) or []
+        for m in mods_src:
+            for key in (getattr(m, "package_name", None), getattr(m, "mod_id", None)):
+                if key:
+                    mod_index[str(key).strip()] = m
+        for k in active_keys:
+            if k and k not in seen:
+                m = mod_index.get(k)
+                new_wl.append({
+                    "mod": m,
+                    "package_name": k,
+                    "display_title": (getattr(m, "display_title", None) or k) if m else k,
+                    "enabled": True,
+                    "priority_index": active_rank[k],
+                    "source": "",
+                    "size_mb": None,
+                    "compatible_versions": "",
+                })
+                seen.add(k)
+        def _key(r):
+            pkg = str(r.get("package_name") or "").strip()
+            if pkg in active_rank:
+                return (0, active_rank[pkg], pkg)
+            return (1, 0, pkg)
+        new_wl.sort(key=_key)
+        return new_wl
+
     def build_worklist(self, active_mods: List[str], all_package_names: List[str]) -> List[dict]:
         """
         产出 [{

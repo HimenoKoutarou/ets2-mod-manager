@@ -553,17 +553,43 @@ class _SignalMixin:
             except Exception:
                 self._close_splash()
                 self.show()
-            # 主窗口 show 完成之后，再在 ~800ms 之后（不再 race splash）调更新内容弹窗
+            # 主窗口 show 完成之后，顺序弹：更新日志关 → 220ms → 未分类对话框（不再两个叠一起）
             def _after_entry_updates():
                 try: self._async_check_update()
                 except Exception: pass
-                try: self._show_update_notes_if_needed()
-                except Exception: pass
+                tasks = [lambda: self._show_update_notes_if_needed()]
+                pending_ids = getattr(self, "_startup_pending_new_mod_ids", None)
+                if pending_ids:
+                    ids = list(pending_ids)
+                    tasks.append(lambda: self._show_new_mods_dialog(ids))
+                    try: delattr(self, "_startup_pending_new_mod_ids")
+                    except Exception: pass
+                self._queue_startup_modals_sequential(tasks)
             QTimer.singleShot(900, _after_entry_updates)
         else:
             self._close_splash()
             self.setEnabled(True)
             # 原逻辑：_async_check_update / notes 由 bootstrap 顶部的 singleshot 处理
+
+
+    @classmethod
+    def _queue_startup_modals_sequential(cls, tasks) -> None:
+        # Fire startup dialog tasks sequentially, 220ms gap between each.
+        # Eliminates update-notes + uncategorized dialog stacking complaint.
+        from PySide6.QtCore import QTimer as _QST
+        tasks = list(tasks or [])
+        if not tasks:
+            return
+        def _step():
+            if not tasks:
+                return
+            fn = tasks.pop(0)
+            try:
+                fn()
+            except Exception:
+                pass
+            _QST.singleShot(220, _step)
+        _QST.singleShot(120, _step)
 
     def _bootstrap(self):
         self._show_splash()
@@ -737,8 +763,12 @@ class _SignalMixin:
         except Exception:
             pass
         # 新模组弹窗
+        installer = getattr(self, "_bootstrap_after_installer_splash", False)
         if new_ids:
-            QTimer.singleShot(250, lambda ids=list(new_ids): self._show_new_mods_dialog(ids))
+            if installer:
+                self._startup_pending_new_mod_ids = list(new_ids)
+            else:
+                QTimer.singleShot(250, lambda ids=list(new_ids): self._show_new_mods_dialog(ids))
         self._quick_scan_worker = None
         # 第二阶段：解析加密包 + Steam 标题查询（并行）
         self._start_async_parse()
@@ -981,6 +1011,8 @@ class _SignalMixin:
     def _on_table_order_changed(self):
         self._sync_worklist_from_table()
         self._refresh_status_after_change()
+        try: self._mark_priority_dirty("加载顺序已更改 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
 
     def _on_check_changed(self, item: QTableWidgetItem):
         if item.column() != COL_ENABLED: return
@@ -1004,6 +1036,8 @@ class _SignalMixin:
                 return
             self._sync_worklist_from_table()
             self._schedule_refresh(order=True, filter=True, counts=True, status=True)
+            try: self._mark_priority_dirty("启用状态已变更 · 请点工具栏「保存」写回 profile")
+            except Exception: pass
             # 详情面板同步（立即执行，不走防抖）—— 重新从 owner_tbl 取一次，避免 row delete 后错位
             try:
                 pkg_item = owner_tbl.item(item.row(), COL_PKG)
@@ -1047,6 +1081,8 @@ class _SignalMixin:
         if not self.priority_svc: return
         self._sync_worklist_from_table()
         self.current_worklist = self.priority_svc.apply_preset(self.current_worklist)
+        try: self._mark_priority_dirty("已按预设重排优先级 · 请点工具栏「保存」写回 profile")
+        except Exception: pass
         if self.current_profile: self._fill_table_for_profile(self.current_profile)
         QMessageBox.information(self, _("dlg.preset_title"), _("dlg.preset_msg"))
 

@@ -57,6 +57,40 @@ from ui.save_editor_dialog import SaveEditorDialog
 
 
 
+def resolve_asset(rel: str) -> Path:
+    r"""Unified assets/ resolver covering dev tree + PyInstaller onedir (_MEIPASS)
+    + onefile.
+
+    Dev  tree  : F:\\ETS2ModManager\\src\\ui\\main_window.py
+                   parents[2] = F:\\ETS2ModManager  -> assets\\logo.png OK
+    onedir col : ETS2ModManager.exe + assets/ NEXT TO EXE
+                   sys.executable.parent + assets\\*.png OK
+    onefile    : sys._MEIPASS/assets (PyInstaller exploded tree)
+                   Path(_MEIPASS) + assets\\*.png OK
+    Always returns absolute Path; caller must .exists() before opening.
+    """
+    import sys as _sys
+    relp = Path(rel)
+    # 1) onefile mode _MEIPASS
+    meipass = getattr(_sys, "_MEIPASS", None)
+    if meipass:
+        c = Path(meipass) / relp
+        if c.exists():
+            return c.resolve()
+    # 2) onedir / normal install: exe sibling
+    frozen = getattr(_sys, "frozen", False)
+    if frozen:
+        c = Path(_sys.executable).resolve().parent / relp
+        if c.exists():
+            return c.resolve()
+    # 3) dev tree: src/ui/x.py -> PROJECT_ROOT (parents[2])
+    try:
+        project_root = Path(__file__).resolve().parents[2]
+    except Exception:
+        project_root = Path.cwd()
+    return (project_root / relp).resolve()
+
+
 # ---------------------------------------------------------------------------
 #  启动加载屏（SplashScreen）——扫描期间显示，禁止主窗口交互
 # 拆分出来的辅助 Widget / Worker（单文件 3785 行 → ~3060 行，降低 IDE 诊断压力）
@@ -70,13 +104,17 @@ from .theme import ThemeManager, THEME_DARK, THEME_LIGHT, THEME_AUTO, QTB_DEFAUL
 class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMixin):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{_('app.title')}  v{__version__}")
+        self._base_window_title = f"{_('app.title')}  v{__version__}"
+        self.setWindowTitle(self._base_window_title)
         self.resize(1280, 780)
-        # 设置窗口图标
-        icon_path = Path(__file__).resolve().parent.parent.parent / "assets" / "app_icon.png"
+        # 设置窗口图标 + 启动 splash 备用 logo 路径（统一走 resolve_asset 兼容 dev/frozen/onefile）
+        icon_path = resolve_asset("assets/app_icon.png")
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self._logo_path = str(Path(__file__).resolve().parent.parent.parent / "assets" / "logo.png")
+        logo_path = resolve_asset("assets/logo.png")
+        if not logo_path.exists():
+            logo_path = resolve_asset("assets/app_icon.png")
+        self._logo_path = str(logo_path)
         self._splash: Optional["SplashScreen"] = None
 
         # --- 初始化核心对象 ---
@@ -94,6 +132,9 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self.profiles: List[ProfileInfo] = []
         self._current_filter_cat: str | None = None
         self._profile_fill_pending: bool = False
+        # P2 async priority dirty state (memory-only changes until Save)
+        self._dirty_priority: bool = False
+        self._baseline_worklist_hash: int = 0
         self._all_mods_by_id: dict[str, object] = {}
         self._profile_tree_items: dict[str, QTreeWidgetItem] = {}
         self._cat_items: dict[str, QTreeWidgetItem] = {}
@@ -161,6 +202,71 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
 
 
 
+
+    # ---------- async-priority dirty state (P2) ----------
+    def _mark_priority_dirty(self, status_msg: str | None = None) -> None:
+        """Call after ANY memory-only priority/enable change that hasn't been persisted yet."""
+        self._dirty_priority = True
+        base = getattr(self, "_base_window_title", None)
+        if base is None:
+            base = self.windowTitle()[1:] if self.windowTitle().startswith("*") else self.windowTitle()
+            self._base_window_title = base
+        if not self.windowTitle().startswith("*"):
+            self.setWindowTitle(f"*{base}")
+        btn = getattr(self, "btn_save", None)
+        if btn is not None:
+            try:
+                current = btn.styleSheet() or ""
+                if "font-weight" not in current:
+                    btn.setStyleSheet(current + "QToolButton,QPushButton{font-weight:700;}")
+            except Exception:
+                pass
+        if status_msg:
+            try: self.statusBar().showMessage(status_msg, 5000)
+            except Exception: pass
+
+    def _clear_priority_dirty(self) -> None:
+        """Call after successful set_active_mods write."""
+        self._dirty_priority = False
+        base = getattr(self, "_base_window_title", None)
+        if base is None:
+            base = self.windowTitle()[1:] if self.windowTitle().startswith("*") else self.windowTitle()
+            self._base_window_title = base
+        self.setWindowTitle(base)
+        btn = getattr(self, "btn_save", None)
+        if btn is not None:
+            try: btn.setStyleSheet("")
+            except Exception: pass
+        try:
+            h = hash(tuple(
+                (str(e.get("package_name") or ""), int(e.get("priority_index") or 0), bool(e.get("enabled")))
+                for e in self.current_worklist
+            ))
+            self._baseline_worklist_hash = h
+        except Exception:
+            pass
+
+    def _refresh_dirty_from_worklist(self) -> None:
+        """Recompute dirty flag from worklist vs baseline hash."""
+        try:
+            h = hash(tuple(
+                (str(e.get("package_name") or ""), int(e.get("priority_index") or 0), bool(e.get("enabled")))
+                for e in self.current_worklist
+            ))
+        except Exception:
+            h = -1
+        baseline = getattr(self, "_baseline_worklist_hash", 0) or 0
+        self._dirty_priority = (baseline != 0 and h != baseline)
+        base = getattr(self, "_base_window_title", None) or (
+            self.windowTitle()[1:] if self.windowTitle().startswith("*") else self.windowTitle()
+        )
+        self.setWindowTitle(f"*{base}" if self._dirty_priority else base)
+        btn = getattr(self, "btn_save", None)
+        if btn is not None:
+            try:
+                btn.setStyleSheet("" if not self._dirty_priority else "QToolButton,QPushButton{font-weight:700;}")
+            except Exception:
+                pass
     def closeEvent(self, event):
         """窗口关闭时清理后台线程。"""
         for attr in ("_quick_scan_worker", "_async_parse_worker", "_workshop_fetch_worker"):
@@ -173,9 +279,11 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
     ThemeManager.instance().apply(app)
-    # App 级图标
-    icon_path = Path(__file__).resolve().parent.parent / "assets" / "app_icon.png"
-    logo_path = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
+    # App 级图标 + splash logo （统一 resolve_asset：dev tree / onedir / onefile 全匹配）
+    icon_path = resolve_asset("assets/app_icon.png")
+    logo_path = resolve_asset("assets/logo.png")
+    if not logo_path.exists():
+        logo_path = resolve_asset("assets/app_icon.png")
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 

@@ -145,7 +145,31 @@ class SplashScreen(QWidget):
         logo_label = QLabel()
         logo_label.setFixedSize(80, 80)
         logo_label.setAlignment(Qt.AlignCenter)
-        logo_pix = QPixmap(logo_path) if logo_path and Path(logo_path).exists() else QPixmap()
+        # Try logo_path -> fallback to assets/app_icon.png -> fallback emoji.
+        logo_pix = QPixmap()
+        candidate_paths = []
+        if logo_path:
+            candidate_paths.append(logo_path)
+        try:
+            # Resolve app_icon sibling via same resolver used by main_window
+            import sys as _sys
+            meipass = getattr(_sys, "_MEIPASS", None)
+            if meipass:
+                candidate_paths.append(str(Path(meipass) / "assets" / "app_icon.png"))
+            if getattr(_sys, "frozen", False):
+                candidate_paths.append(str(Path(_sys.executable).resolve().parent / "assets" / "app_icon.png"))
+            candidate_paths.append(str(Path(__file__).resolve().parents[2] / "assets" / "app_icon.png"))
+        except Exception:
+            pass
+        for p in candidate_paths:
+            try:
+                if p and Path(p).exists():
+                    trial = QPixmap(p)
+                    if not trial.isNull():
+                        logo_pix = trial
+                        break
+            except Exception:
+                continue
         if not logo_pix.isNull():
             scaled = logo_pix.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             logo_label.setPixmap(scaled)
