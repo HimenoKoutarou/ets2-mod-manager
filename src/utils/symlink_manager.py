@@ -260,14 +260,46 @@ class SymlinkManager:
         # 2. 如果原始目录存在且是真实目录，搬移内容
         status = self.get_status()
         if status.get("kind") == "real_dir" and orig.exists() and move_files:
-            # 把 orig 下的所有内容复制/移动到 target
+            # R14.3 P1-3: 预检 orig 与 target 里的嵌套 symlink/junction
+            bad_orig = _contains_internal_symlinks(orig)
+            bad_target = _contains_internal_symlinks(target)
+            if bad_orig or bad_target:
+                all_bad = bad_orig + bad_target
+                shown = ", ".join(all_bad[:10]) + ("..." if len(all_bad) > 10 else "")
+                return SymlinkResult(
+                    False,
+                    (f"检测到源或目标目录内嵌套 {len(all_bad)} 个 symlink/junction：{shown}。"
+                     "为避免 shutil.move 跟随 link 造成的非预期数据搬移/缺失，已拒绝本次迁移。"
+                     "请先手动移除嵌套 symlink 后再试。"),
+                    orig, target, method="rejected_internal_symlink"
+                )
             moved_items = []
             try:
                 for item in list(orig.iterdir()):
                     dest = target / item.name
-                    # 如果目标已存在同名：hash 相同则跳过，不同则 _dup
+                    # R14.3 P1-3: item 自身是 symlink/junction 则重建 link 本身，不跟随
+                    if item.is_symlink() or _is_junction(item):
+                        tgt_target = None
+                        try:
+                            tgt_target = os.readlink(str(item)) if item.is_symlink() else SymlinkManager._read_junction_target(item)
+                        except OSError:
+                            tgt_target = None
+                        if not tgt_target:
+                            raise OSError(f"无法读取 {item} 的 link target，拒绝不安全 move")
+                        if dest.exists():
+                            raise OSError(f"目标已存在同名 link：{dest}，无法安全重建 symlink，请改名后重试")
+                        os.symlink(tgt_target, str(dest), target_is_directory=item.is_dir() or _is_junction(item))
+                        try:
+                            if item.is_symlink():
+                                item.unlink()
+                            elif _is_junction(item):
+                                try: os.rmdir(str(item))
+                                except OSError: item.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        moved_items.append(dest)
+                        continue
                     if dest.exists():
-                        # R13: 同名文件用 SHA256 比较（size 相同不代表内容相同）
                         try:
                             if _files_identical(item, dest):
                                 item.unlink()
@@ -463,14 +495,34 @@ class SymlinkManager:
                 pass
         return SymlinkResult(True, _T("sym.msg_unlink_ok"), self.original, target, method="replaced")
 
-    def _rollback_relink(self, target: Path) -> str:
-        """R14.1 P0-2: 复制失败后清理 partial original 并重建 link → target。
-        返回人类可读的回滚结果描述。"""
+    def _rollback_relink(self, target: Path, *, created_restore_dir: bool = False) -> str:
+        """R14.3 P1-2: 复制失败后清理 partial original 并重建 link → target。
+        created_restore_dir=True 表示 original 是本事务 mkdir 创建的空目录之后
+        写的 partial，允许 rmtree；否则只做"空壳目录 rmdir"保守清理。"""
+        rmtree_skipped = False
         try:
             if self.original.exists():
-                shutil.rmtree(str(self.original), ignore_errors=True)
+                if created_restore_dir:
+                    try:
+                        shutil.rmtree(str(self.original))
+                    except OSError:
+                        try:
+                            import time as _t
+                            quarantine = self.original.parent / f"{self.original.name}.partial_{int(_t.time() * 1000)}"
+                            if not quarantine.exists():
+                                os.rename(str(self.original), str(quarantine))
+                        except OSError:
+                            rmtree_skipped = True
+                else:
+                    try:
+                        if not any(self.original.iterdir()):
+                            self.original.rmdir()
+                        else:
+                            rmtree_skipped = True
+                    except OSError:
+                        rmtree_skipped = True
         except OSError:
-            pass
+            rmtree_skipped = True
         try:
             self.original.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -481,7 +533,6 @@ class SymlinkManager:
         except Exception:
             ok = False
         if not ok:
-            # 兜底：os.symlink
             try:
                 if self.original.exists() and self.original.is_dir():
                     try:
@@ -493,8 +544,10 @@ class SymlinkManager:
             except OSError:
                 pass
         if ok:
-            return "已自动重建链接，target 未受损。"
-        return f"警告：无法重建链接，target 完整保留在 {target}，请手动恢复。"
+            return ("已自动重建链接，target 未受损。"
+                    + (" （注意：partial original 删除被跳过并隔离，后续可手动清理。）" if rmtree_skipped else ""))
+        return (f"警告：无法重建链接，target 完整保留在 {target}，请手动恢复。"
+                + (" partial original 未清理。" if rmtree_skipped else ""))
 
 
     # ---------- 修复：失效软链接重定向到新 target（不搬文件） ----------
@@ -517,7 +570,10 @@ class SymlinkManager:
             return SymlinkResult(False, _T("sym.msg_target_not_writable", e=str(e)) or f"目标目录不可写：{e}", orig, target)
 
         # 1) 清除原位置残留的失效 link / 重解析点 / 空目录
+        # R14.3 P1-4: 删之前先保存原状态；任何一步失败都要恢复原 broken link
         status = self.get_status()
+        _old_kind = status.get("kind")
+        _old_target = status.get("target")
         removed = False
         try:
             if status.get("kind") in ("symlink", "symlink_broken") and orig.is_symlink():
@@ -555,10 +611,14 @@ class SymlinkManager:
         try:
             ok = _create_junction(target, link_path)
         except Exception as e:
-            return SymlinkResult(False, _T("sym.msg_repair_jct_fail", e=str(e)) or f"重建 Junction 异常：{e}", orig, target)
+            ok = False
+            _junction_err = f"重建 Junction 异常：{e}"
+        else:
+            _junction_err = None
         if ok:
             return SymlinkResult(True, _T("sym.msg_repair_jct_ok", target=str(target)) or f"已修复软链接：原位置重建目录联接 → {target}。重启 ETS2 即生效。",
                                  orig, target, method="junction")
+        # R14.3 P1-4: Junction 创建失败 → 不直接 return；与 Symlink 失败合并做 rollback
         # 兜底：os.symlink
         # R13: Junction 失败后 link_path 是空目录，os.symlink 要求目标不存在
         try:
@@ -574,36 +634,69 @@ class SymlinkManager:
             return SymlinkResult(True, _T("sym.msg_repair_sym_ok", target=str(target)) or f"已修复软链接：原位置重建 Symlink → {target}。重启 ETS2 即生效。",
                                  orig, target, method="symlink_py")
         except OSError as e_sym:
-            # R14.2 P1: 重建都失败 — 尝试恢复原 broken link，保持操作前状态
+            _sym_err = f"Symlink 重建失败：{e_sym}"
             rollback_info = ""
             try:
-                # 先清理当前位置可能的空目录残留
-                if orig.exists() and orig.is_dir():
+                for p in (link_path, orig):
                     try:
-                        orig.rmdir()
-                    except OSError:
-                        pass
-                # 恢复原 broken symlink（不管 old_target 是否存在，都要让状态回到操作前）
+                        if p.exists() and p.is_dir():
+                            try: p.rmdir()
+                            except OSError: pass
+                    except Exception: pass
                 if _old_kind in ("symlink", "symlink_broken") and _old_target:
                     try:
                         os.symlink(str(_old_target), str(orig), target_is_directory=True)
-                        rollback_info = f"\n已尝试恢复原链接指向 {_old_target}。"
+                        rollback_info = f"\n已恢复原链接指向 {_old_target}（操作前状态）。"
                     except OSError as rb_e:
-                        rollback_info = f"\n警告：原 broken link 也无法恢复（{rb_e}）。原位置当前为空，数据仍保留在之前的真实目录。"
+                        rollback_info = f"\n警告：原 broken symlink 也无法恢复（{rb_e}）。原位置当前为空，但真实数据仍在之前的目录中。"
                 elif _old_kind == "junction" and _old_target:
                     try:
                         if not orig.exists():
                             orig.mkdir(parents=True, exist_ok=True)
                         if _create_junction(Path(_old_target), orig):
-                            rollback_info = f"\n已尝试恢复原 Junction 指向 {_old_target}。"
-                    except Exception:
-                        rollback_info = f"\n注意：原 Junction 未恢复，原位置已清空，请手动重建或检查。"
+                            rollback_info = f"\n已恢复原 Junction 指向 {_old_target}（操作前状态）。"
+                        else:
+                            rollback_info = f"\n注意：原 Junction 未能恢复，原位置已清空。"
+                    except Exception as rb_y:
+                        rollback_info = f"\n注意：原 Junction 恢复过程异常（{rb_y}），请手动检查。"
+                else:
+                    rollback_info = f"\n（原 kind={_old_kind!r}，无可恢复的 broken link）"
             except Exception as rb_x:
                 rollback_info = f"\n回滚时出错：{rb_x}"
-            err = f"Junction 与 Symlink 重建都失败：{e_sym}{rollback_info}\n"
+            j_msg = _junction_err if "_junction_err" in locals() and _junction_err else None
+            head_parts = []
+            if j_msg:
+                head_parts.append(j_msg)
+            head_parts.append(_sym_err)
+            err = "；".join(head_parts) + f"{rollback_info}\n"
             if not _is_admin():
                 err += "提示：请右键「以管理员身份运行」，或在 Windows 设置开启「开发者模式」。"
             return SymlinkResult(False, err, orig, target)
+
+        _final_j_err = locals().get("_junction_err") or "Junction 创建失败"
+        rollback_info = ""
+        try:
+            for p in (link_path, orig):
+                try:
+                    if p.exists() and p.is_dir():
+                        try: p.rmdir()
+                        except OSError: pass
+                except Exception: pass
+            if _old_kind in ("symlink", "symlink_broken") and _old_target:
+                try:
+                    os.symlink(str(_old_target), str(orig), target_is_directory=True)
+                    rollback_info = f"（已恢复原链接指向 {_old_target}）"
+                except OSError:
+                    pass
+            elif _old_kind == "junction" and _old_target:
+                try:
+                    orig.mkdir(parents=True, exist_ok=True)
+                    _create_junction(Path(_old_target), orig)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return SymlinkResult(False, f"{_final_j_err}{rollback_info}", orig, target)
 
     # ---------- 别名 ----------
     def relocate_to(self, new_target_dir: Path) -> SymlinkResult:

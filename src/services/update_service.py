@@ -272,8 +272,10 @@ class UpdateService(QObject):
         #   P1-3: 事务核心路径拿掉 ignore_errors=True（失败必须知道）
         #   P1-4: 区分 ROLLBACK_SUCCESS / ROLLBACK_FAILED，不再误报"已恢复"
         import time as _time
+        import uuid as _uuid
         install_path = Path(install_dir)
-        backup_dir = install_path.parent / f".{install_path.name}_backup_{int(_time.time())}"
+        # R14.3 P1-5: 秒级 timestamp + uuid，彻底避免碰撞
+        backup_dir = install_path.parent / f".{install_path.name}_backup_{int(_time.time())}_{_uuid.uuid4().hex[:12]}"
 
         try:
             # 1. R14.2 P2: 用 _validate_package() 做严格校验（抽出独立函数，规则加强）
@@ -460,6 +462,16 @@ class UpdateService(QObject):
             return issues
 
         launcher_files = ("run.py", "main.py", "ETS2ModManager.spec")
+        # R14.3 P1-6: 存在但类型不对（如 run.py 是目录）也要单独报
+        wrong_type_markers = []
+        for m in launcher_files:
+            p = source_root / m
+            if p.exists() and not p.is_file():
+                wrong_type_markers.append(m)
+        if wrong_type_markers:
+            issues.append(
+                "启动器标记存在但类型错误（应为文件，实为目录/其他）：" + ", ".join(wrong_type_markers)
+            )
         has_launcher = any(
             (source_root / m).is_file() for m in launcher_files
         )
@@ -473,10 +485,22 @@ class UpdateService(QObject):
             if not src_path.is_dir():
                 issues.append("src 存在但不是文件夹（不是空壳即可）")
             else:
-                # src 是目录：至少有一个 .py
-                has_py = any(p.suffix == ".py" for p in src_path.rglob("*") if p.is_file())
+                # R14.3 P1-6: 先扫描 src 内 symlink
+                hidden_symlinks = []
+                for p in src_path.rglob("*"):
+                    try:
+                        if p.is_symlink():
+                            hidden_symlinks.append(str(p.relative_to(source_root)))
+                    except OSError:
+                        continue
+                if hidden_symlinks:
+                    issues.append(
+                        f"src/ 内含 {len(hidden_symlinks)} 个 symlink（可能指向外部目录伪造内容）：" +
+                        ", ".join(hidden_symlinks[:8])
+                    )
+                has_py = any(p.suffix == ".py" for p in src_path.rglob("*") if p.is_file() and not p.is_symlink())
                 if not has_py:
-                    issues.append("src/ 目录下没有任何 .py 文件，疑似空壳包")
+                    issues.append("src/ 目录下没有任何真实 .py 文件，疑似空壳包")
 
         # 兜底：完全没有内容
         if not any(source_root.iterdir()):
