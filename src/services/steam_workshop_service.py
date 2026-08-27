@@ -44,17 +44,9 @@ def _get_opener():
             handlers.append(urllib.request.ProxyHandler(proxies))
     except Exception:
         pass
-    # P0 安全修复：仅在有代理时降低 SSL 验证（代理可能做 MITM）；直连保持默认验证
-    _has_proxy = bool(handlers)
-    try:
-        import ssl as _ssl
-        if _has_proxy:
-            _ctx = _ssl.create_default_context()
-            _ctx.check_hostname = False
-            _ctx.verify_mode = _ssl.CERT_NONE
-            handlers.append(urllib.request.HTTPSHandler(context=_ctx))
-    except Exception:
-        pass
+    # R12 安全修复：完全恢复 TLS 验证 — 代理不是关闭证书验证的理由
+    # 企业代理应通过系统 CA 或自定义 CA 解决，不应 CERT_NONE
+    # （不添加任何自定义 SSL context，使用 Python 默认验证）
     _opener = urllib.request.build_opener(*handlers) if handlers else urllib.request.build_opener()
     return _opener
 
@@ -169,8 +161,12 @@ def _post_batch(ids: List[str]) -> Dict[str, str]:
             continue
         result = it.get("result", 0)
         if result != 1:
-            # result=9 = 已删除/私密，也写一条负缓存占位，避免下次再请求
-            cache[mid] = {"title": "", "ts": now, "result": result}
+            # R12: result==9 = 已删除/私密 → 长期缓存；其他错误 → 短期 5 分钟
+            if result == 9:
+                cache[mid] = {"title": "", "ts": now, "result": result}
+            else:
+                # 瞬时错误（API 异常/限流）— 5 分钟后过期重试
+                cache[mid] = {"title": "", "ts": now - CACHE_TTL_SECONDS + 300, "result": result}
             _cache_dirty = True
             continue
         title = it.get("title") or ""

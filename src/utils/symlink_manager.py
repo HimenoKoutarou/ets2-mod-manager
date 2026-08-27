@@ -232,13 +232,19 @@ class SymlinkManager:
         status = self.get_status()
         if status.get("kind") == "real_dir" and orig.exists() and move_files:
             # 把 orig 下的所有内容复制/移动到 target
+            moved_items = []
             try:
-                moved_count = 0
                 for item in list(orig.iterdir()):
                     dest = target / item.name
-                    # 如果目标已存在同名则跳过（保留两者）
+                    # 如果目标已存在同名：hash 相同则跳过，不同则 _dup
                     if dest.exists():
-                        # 追加 _dup 后缀
+                        # R12: 同名文件比较 size，相同则跳过（避免不必要的 _dup）
+                        try:
+                            if item.stat().st_size == dest.stat().st_size:
+                                item.unlink()
+                                continue
+                        except OSError:
+                            pass
                         i = 1
                         while True:
                             alt = target / f"{item.stem}_dup{i}{item.suffix}"
@@ -246,9 +252,17 @@ class SymlinkManager:
                                 dest = alt; break
                             i += 1
                     shutil.move(str(item), str(dest))
-                    moved_count += 1
+                    moved_items.append(dest)
             except OSError as e:
-                return SymlinkResult(False, _T("sym.msg_move_error", e=str(e)) or f"搬移文件时出错（已中止，文件未受损）：{e}", orig, target)
+                # R12: partial move rollback — 把已搬的文件搬回来
+                for moved_dest in moved_items:
+                    try:
+                        back = orig / moved_dest.name
+                        if not back.exists():
+                            shutil.move(str(moved_dest), str(back))
+                    except OSError:
+                        pass
+                return SymlinkResult(False, _T("sym.msg_move_error", e=str(e)) or f"搬移文件时出错（已回滚，文件未受损）：{e}", orig, target)
 
         # 3. 处理原目录的"让位"
         if orig.exists() or orig.is_symlink():
@@ -289,6 +303,15 @@ class SymlinkManager:
             return SymlinkResult(True, _T("sym.msg_junction_ok"),
                                  orig, target, method="junction")
         # 5. 失败的话，尝试 os.symlink（需要开发者模式/管理员）
+        # R12 修复：Junction 失败后 link_path 是空目录，os.symlink 要求目标不存在
+        try:
+            if link_path.exists() and link_path.is_dir():
+                try:
+                    link_path.rmdir()  # 只删空目录，不删有内容的
+                except OSError:
+                    shutil.rmtree(link_path, ignore_errors=True)
+        except Exception:
+            pass
         try:
             os.symlink(str(target), str(orig), target_is_directory=True)
             return SymlinkResult(True, _T("sym.msg_symlink_ok"),
@@ -334,11 +357,22 @@ class SymlinkManager:
                 os.rmdir(str(self.original))
         except OSError as e:
             return SymlinkResult(False, _T("sym.msg_unlink_delete_fail", e=str(e)) or f"删除链接失败：{e}", self.original, target)
-        # 2. 搬回真实目录
+        # 2. 搬回真实目录 — R12: 用 copytree 代替逐个 move（失败时 target 仍有完整数据）
         try:
             self.original.mkdir(parents=True)
+            # 先复制（target 保持不动），成功后再清理 target
             for item in list(target.iterdir()):
-                shutil.move(str(item), str(self.original / item.name))
+                dest = self.original / item.name
+                if dest.exists():
+                    if item.stat().st_size == dest.stat().st_size:
+                        continue
+                shutil.copy2(str(item), str(dest))
+            # 全部复制成功后删除 target 中的源文件
+            for item in list(target.iterdir()):
+                try:
+                    item.unlink()
+                except OSError:
+                    pass
         except OSError as e:
             return SymlinkResult(
                 False,

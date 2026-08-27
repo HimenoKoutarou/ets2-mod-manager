@@ -586,7 +586,15 @@ class ProfileService:
                     new_cloud_dir = self.paths.steam_cloud_dir / new_id
                     if new_cloud_dir.exists():
                         shutil.rmtree(new_cloud_dir)
-                    shutil.copytree(orig_cloud_dir, new_cloud_dir)
+                    try:
+                        shutil.copytree(orig_cloud_dir, new_cloud_dir)
+                    except Exception as e:
+                        # R12: cloud copy failed — rollback local copy
+                        if new_folder.exists():
+                            shutil.rmtree(new_folder, ignore_errors=True)
+                        raise RuntimeError(
+                            f"Steam Cloud 目录复制失败，已回滚本地副本: {e}"
+                        ) from e
                     new_sii_target = new_cloud_dir / "profile.sii"
                 else:
                     candidate = self.paths.steam_cloud_dir / new_id / "profile.sii"
