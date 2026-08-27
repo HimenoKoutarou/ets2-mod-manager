@@ -407,14 +407,34 @@ class _SignalMixin:
             pass
 
     def _show_update_notes_dialog(self):
-        """弹窗展示当前版本的更新内容。"""
-        from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QScrollArea
+        """弹窗展示当前版本的更新内容。
+
+        展示原则（v1.2.1 修正）：
+          - 只作为 application-modal（阻止操作主窗口），不再跨进程置顶；
+            否则用户切到浏览器/资源管理器时会被一个不可关的绿色更新条一直挡在前面。
+          - 必须保证三种方式都能关：标题栏 [X] / ESC / "知道了" 按钮；
+            之前单按钮在 125%~150% DPI 下有时 layout 高度不足导致按钮被截，用户会误判为"点不掉"。
+          - 内容与实际当前版本交付一致（R14 filesystem 收束 + cmd popup fix），不再复写旧版的
+            Workshop/scan 文案。
+        """
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QLabel, QHBoxLayout, QScrollArea, QWidget,
+            QDialogButtonBox, QSizePolicy,
+        )
         from PySide6.QtCore import Qt
 
-        dlg = QDialog(self)
+        # Flags via constructor → never lose native [X] close button.
+        dlg = QDialog(
+            self,
+            Qt.Dialog | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
+        )
         dlg.setWindowTitle(f"🎉 v{__version__} 更新内容")
-        dlg.setFixedSize(560, 520)
-        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+        dlg.setModal(True)
+        # Minimum instead of fixed so high-DPI scaling never clips the "知道了" button.
+        dlg.setMinimumWidth(600)
+        dlg.setMinimumHeight(560)
+        dlg.resize(600, 560)
+        dlg.setSizeGripEnabled(True)
 
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -425,51 +445,73 @@ class _SignalMixin:
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2da44e;")
         layout.addWidget(title)
 
-        subtitle = QLabel("本次更新带来以下改进：")
+        subtitle = QLabel("本次更新（R14 收束阶段）交付内容：")
         subtitle.setStyleSheet("font-size: 13px; color: #555;")
         layout.addWidget(subtitle)
 
-        # 更新内容（滚动区域）
+        # 更新内容（滚动区域）— 当前版本 bb364b5 / c29f330 真实交付
         notes = [
-            ("🔧", "Steam 创意工坊 Mod 读取修复", "彻底修复了创意工坊订阅的 Mod 无法正确读取的问题。现在 Workshop 内部真实的 unit_name 会被正确保留，不再被强制覆盖为纯数字 ID。"),
-            ("⚡", "启用/禁用/移动操作大幅提速", "单步操作从整表销毁重建改为快速路径+30ms 防抖合并刷新。勾选 Mod 不再触发 takeItem/insertRow 风暴，操作量减少约 21 倍。"),
-            ("🚀", "快速扫描速度提升约 10 倍", "快速扫描时跳过 Workshop 子包 manifest 解析和分类检测写入，扫描时间从 ~54 秒降至 ~5.6 秒。"),
-            ("💾", "全解析缓存优化", "第二次启动跳过 89% 的 Mod 重解析（213s → 23s）。快照新增 compatible_versions 和 categories 字段，移除导致异常的 icon.is_available 写入。"),
-            ("🎯", "Mod 索引双键匹配", "主索引同时支持 manifest.package_name（unit_name）和 mod_id（文件名），4 层 fallback 查询确保 profile.active_mods 条目都能正确匹配到 Mod 对象。"),
-            ("📦", "package_name 智能回填", "异步解析完成后，如果 package_name 是兜底值（=mod_id）且解析出了真实 unit_name，自动覆盖并同步索引。"),
-            ("🗑️", "丢失 Mod 智能处理", "存档中已启用但文件丢失的 Mod 名称标红显示；未启用的丢失 Mod 自动从列表过滤，不再占用视觉空间。"),
-            ("🌐", "42 种语言支持", "支持 ETS2 全部 42 种 locale 的翻译导入和管理。"),
+            ("🛡️", "文件系统事务不再误删 / 误判冲突（R14 核心关闭）",
+             "一键迁移的 move_and_link() 对 Junction/Symlink 真正做成了两阶段事务："
+             "先在 target 建等价 link → 删 original link → 失败立刻回滚 target link 并搬回之前已经移动的普通文件；"
+             "保证 old 仍在 ↔ new 不在的二择一不变量。即使回滚自己再次失败，错误消息会明确写'仍可能存在，请手动检查'，不再伪称已回滚。"),
+            ("🚫", "启动扫描不再狂弹 CMD 黑窗口",
+             "扫描加密 mod 时每个 extractor.exe / sxc64.exe / SII_Decrypt.exe / cmd /c dir 子进程统一加 "
+             "CREATE_NO_WINDOW + STARTF_USESHOWWINDOW。50+ 加密 mod 的用户从'每次启动几百次黑窗闪动'变'一次都不闪'。"),
+            ("🧪", "回归测试 121 条，全部可复现",
+             "覆盖 move-and-link 单失败 / 双失败回滚（rollback 自己也 fail 的最坏情况）、Junction 目录 false-positive、"
+             "Update partial-install 隔离、backup collision UUID12、命名统一策略等。"),
+            ("🗂️", "备份/隔离/让位文件名策略统一 UUID12 后缀",
+             "Update backup dir、rollback quarantine 空壳目录、move_and_link 让位 backup 三处都改成"
+             " timestamp + uuid4().hex[:12]，同一秒重复操作也不会 false failure。"),
+            ("🌍", "测试彻底脱离 F 盘硬编码依赖",
+             "test_r14.py 13 处 Path(r'F:\\ETS2ModManager\\src') 全部替换成模块级 "
+             "_PROJECT_ROOT = Path(__file__).resolve().parents[1]，任意 clone 路径、GitHub Actions、"
+             "另一台电脑都能直接跑出 121 PASS。"),
+            ("🧼", "dead-code / broad-exception 收尾清理",
+             "删除 quarantine_path = quarantine_path 无意义自赋值行；"
+             "rollback 重建 Junction 的 except Exception 分支绑定异常名并拼 type+msg 到返回字符串；"
+             "pre-check 之后 original→Junction 的目录 conflict scan 正确跳过（不会把 def/vehicle/material 判成'冲突'）。"),
+            ("📦", "自助更新 Release 包（v1.2.0+）",
+             "打包流程标准化：PyInstaller onedir → 根目录平级 ETS2ModManager.exe（解包即运行）→ "
+             "Compress-Archive Optimal → GitHub Release API 上传。更新后自动弹更新内容说明。"),
+            ("♻️", "Update package root 判定保持现状，未扩改",
+             "v1.2.0 审查指出的 validate 和 install 各自 resolve wrapper dir 属 architecture P2，"
+             "本轮不做结构变动，以免在 R14 收尾引入新的回归。"),
         ]
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
         content = QWidget()
+        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 8, 0, 8)
         content_layout.setSpacing(14)
 
         for icon, title_text, desc_text in notes:
-            item_layout = QVBoxLayout()
-            item_layout.setSpacing(4)
+            item_wrap = QVBoxLayout()
+            item_wrap.setSpacing(4)
             head = QLabel(f"{icon}  {title_text}")
             head.setStyleSheet("font-size: 14px; font-weight: bold; color: #1f2328;")
-            item_layout.addWidget(head)
+            item_wrap.addWidget(head)
             body = QLabel(desc_text)
             body.setWordWrap(True)
             body.setStyleSheet("font-size: 12px; color: #656d76; padding-left: 28px;")
-            item_layout.addWidget(body)
-            content_layout.addLayout(item_layout)
+            item_wrap.addWidget(body)
+            content_layout.addLayout(item_wrap)
 
-        content.setLayout(content_layout)
+        content_layout.addStretch(1)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
 
-        # 底部按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        btn = QPushButton("  知道了  ")
-        btn.setStyleSheet("""
+        # 底部按钮（QDialogButtonBox — 保证 ESC / X / 点按钮三种方式全关）
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok)
+        ok_btn = btn_box.button(QDialogButtonBox.Ok)
+        ok_btn.setText("知道了")
+        ok_btn.setMinimumHeight(36)
+        ok_btn.setMinimumWidth(140)
+        ok_btn.setStyleSheet("""
             QPushButton {
                 background-color: #2da44e;
                 color: white;
@@ -481,9 +523,9 @@ class _SignalMixin:
             }
             QPushButton:hover { background-color: #2c974b; }
         """)
-        btn.clicked.connect(dlg.accept)
-        btn_layout.addWidget(btn)
-        layout.addLayout(btn_layout)
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.accept)  # ESC still closes
+        layout.addWidget(btn_box)
 
         dlg.exec()
 
