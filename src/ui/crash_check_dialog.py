@@ -497,6 +497,7 @@ class CrashCheckDialog(QDialog):
                 self._launch_worker.wait(1000)
                 if self._launch_worker.isRunning():
                     self._launch_worker.terminate()
-        except Exception:
-            pass
+        except Exception as _e:
+            import sys as _sys
+            print(f"[crash_dialog] closeEvent error: {_e}", file=_sys.stderr)
         super().closeEvent(event)

@@ -149,6 +149,7 @@ def discover_default_game_dirs() -> Dict[str, Optional[Path]]:
             cands_ets2.append(docs / "Euro Truck Simulator 2")
             cands_ats.append(docs / "American Truck Simulator")
     except Exception:
+        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
         pass
     try:
         onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
@@ -157,6 +158,7 @@ def discover_default_game_dirs() -> Dict[str, Optional[Path]]:
             cands_ets2.append(od_docs / "Euro Truck Simulator 2")
             cands_ats.append(od_docs / "American Truck Simulator")
     except Exception:
+        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
         pass
     # 兜底硬编码：本机已确认存在的实机路径
     cands_ets2.append(Path(r"C:\Users\11253\Documents\Euro Truck Simulator 2"))
@@ -253,6 +255,7 @@ def precheck_active_mods(
                 try:
                     mid = m.mod_id
                 except Exception:
+                    import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                     continue
                 if mid and mid not in mods_by_id:
                     mods_by_id[mid] = m
@@ -265,6 +268,7 @@ def precheck_active_mods(
             try:
                 m.priority_index = idx
             except Exception:
+                import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                 pass
             active_objs.append(m)
         # docs_dir 默认值
@@ -325,10 +329,12 @@ def _cancel_requested(cancel_flag) -> bool:
         if hasattr(cancel_flag, "is_set"):
             return bool(cancel_flag.is_set())
     except Exception:
+        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
         pass
     try:
         return bool(cancel_flag)
     except Exception:
+        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
         return False
 
 
@@ -343,6 +349,7 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
         try:
             found_ids.add(m.mod_id)
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
     for idx, mid in enumerate(active_mods):
         if mid in found_ids:
@@ -366,6 +373,7 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
                     suggestion="重新下载该 mod 或从 active_mods 移除。",
                 ))
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
     # L0-2：scs/zip 包头校验
     for m in active_objs:
@@ -397,8 +405,10 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
                     suggestion="重新下载该 mod 包；或用 7-zip 验证 zip 完整性。",
                 ))
             except Exception:
+                import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                 pass
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
     # L0-3：manifest.sii 语法 + 控制字符污染
     for m in active_objs:
@@ -444,6 +454,7 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
                     suggestion="修复 manifest.sii 语法；可参考 SCS 官方 mod 模板。",
                 ))
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
     # L0-4：同 mod_id 重复
     id_count: Dict[str, int] = {}
@@ -451,6 +462,7 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
         try:
             id_count[m.mod_id] = id_count.get(m.mod_id, 0) + 1
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
     for mid, cnt in id_count.items():
         if cnt < 2:
@@ -467,6 +479,7 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
                     suggestion="仅保留一个；移除重复项并重新启用 mod。",
                 ))
             except Exception:
+                import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                 pass
     # L0-5：directory 型 mod 路径非法字符 / 过长
     for m in active_objs:
@@ -492,6 +505,7 @@ def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[Prechec
                     suggestion="把 mod 目录挪到更浅的路径，例如 F:\\ETS2ModManager\\mods\\。",
                 ))
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
 
 
@@ -591,8 +605,10 @@ def _run_L1(active_objs: List[Mod], issues: List[PrecheckIssue],
                             suggestion="磁盘可能坏块；重新下载该 mod。",
                         ))
                 except Exception:
+                    import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                     pass
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
     # L1-4：directory 型 mod 内嵌 .scs 递归 L0+L1-1/1-3
     for m in active_objs:
@@ -640,8 +656,10 @@ def _run_L1(active_objs: List[Mod], issues: List[PrecheckIssue],
                             suggestion="重新下载或修复该嵌套子包。",
                         ))
                 except Exception:
+                    import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                     continue
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
 
 
@@ -755,6 +773,7 @@ def _run_L2(active_objs: List[Mod], profile, issues: List[PrecheckIssue], cancel
             mod_refs[m.mod_id] = refs
             mod_manifest_unit_paths[m.mod_id] = unit_paths
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             continue
     # L2-1：交叉引用缺失 + L2-2：低优 mod 主 def 被遮蔽
     if not timed_out:
@@ -790,6 +809,7 @@ def _run_L2(active_objs: List[Mod], profile, issues: List[PrecheckIssue], cancel
                             suggestion="调整 mod 优先级或移除冲突。",
                         ))
             except Exception:
+                import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                 pass
     # L2-3：profile.sii 加密 roundtrip
     try:
@@ -802,6 +822,7 @@ def _run_L2(active_objs: List[Mod], profile, issues: List[PrecheckIssue], cancel
                 suggestion="备份 profile.sii 后让游戏重建。",
             ))
     except Exception:
+        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
         pass
     # L2-4：超时降级
     if timed_out:
@@ -870,6 +891,7 @@ def _run_L3(active_objs: List[Mod], active_mods: List[str],
     try:
         tail_lines = _read_tail_lines(log_path, 600)
     except Exception:
+        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
         return
     if not tail_lines:
         return
@@ -901,6 +923,7 @@ def _run_L3(active_objs: List[Mod], active_mods: List[str],
             if pn:
                 pkg_to_mod.setdefault(pn.lower(), m)
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             pass
 
     # 收集 session 中 [hashfs] Created 包名集合（用于组合对比）
@@ -1168,21 +1191,25 @@ def analyze_crashlog(
                         if stem:
                             mod_lookup[stem] = m
                     except Exception:
+                        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                         pass
                     try:
                         if m.manifest and m.manifest.package_name:
                             mod_lookup.setdefault(m.manifest.package_name.lower(), m)
                     except Exception:
+                        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                         pass
                     try:
                         mod_lookup.setdefault(m.mod_id.lower(), m)
                     except Exception:
+                        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                         pass
                     try:
                         dt = (m.display_title or "").lower()
                         if dt:
                             mod_lookup.setdefault(dt, m)
                     except Exception:
+                        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                         pass
 
             def _match_mod(pkg_stem: str) -> Optional[Mod]:
@@ -1199,6 +1226,7 @@ def analyze_crashlog(
                         if pkg_stem in (mv.display_title or "").lower():
                             return mv
                     except Exception:
+                        import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                         continue
                 return None
 
@@ -1329,5 +1357,6 @@ def _context_lines(lines: List[str], idx: int, around: int) -> List[str]:
         try:
             out.append(lines[i].rstrip())
         except Exception:
+            import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
             continue
     return out

@@ -22,7 +22,7 @@ from PySide6.QtCore import QObject, Signal
 from version import __version__, __release_api__
 
 GITHUB_API_LATEST = "https://api.github.com/repos/HimenoKoutarou/ets2-mod-manager/releases/latest"
-_DEFAULT_PROXY = "http://127.0.0.1:7897"
+_DEFAULT_PROXY = None  # 不硬编码代理，优先读环境变量
 _DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 
@@ -82,7 +82,7 @@ class UpdateService(QObject):
 
     def __init__(self, proxy_url: Optional[str] = None, parent=None):
         super().__init__(parent)
-        self._proxy_url = proxy_url or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        self._proxy_url = proxy_url or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or os.environ.get("https_proxy")
         self._github_api_url = GITHUB_API_LATEST
         self._latest_version: Optional[str] = None
         self._download_url: Optional[str] = None

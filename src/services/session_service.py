@@ -33,17 +33,22 @@ def _dir_signature(path: Optional[Path]) -> dict:
         count = 0
         total = 0
         mtime_max = 0.0
-        for p in path.rglob("*"):
-            try:
-                if p.is_file():
-                    count += 1
-                    st = p.stat()
-                    total += st.st_size
+        # 只遍历第一层（不 rglob），避免 Workshop 万级文件卡死
+        try:
+            for entry in path.iterdir():
+                try:
+                    st = entry.stat()
+                    if entry.is_file():
+                        count += 1
+                        total += st.st_size
+                    elif entry.is_dir():
+                        count += 1
                     if st.st_mtime > mtime_max:
                         mtime_max = st.st_mtime
-                    # 只统计第一层 .scs/.zip/子目录数量即可？不，rglob 全量更准
-            except OSError:
-                continue
+                except OSError:
+                    continue
+        except OSError:
+            pass
         sig.update({
             "exists": True,
             "is_file": False,

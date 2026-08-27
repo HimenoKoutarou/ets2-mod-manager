@@ -70,6 +70,12 @@ from ._mw_mixins import _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMix
 _QTB_STYLE_DEFAULT = "QToolButton{padding:4px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;}QToolButton:hover{background:#f3f4f6;}QToolButton::menu-indicator{width:0px;}"
 _QTB_STYLE_PRIMARY = "QToolButton{padding:4px 12px;border:1px solid #1a7f37;border-radius:4px;background:#2da44e;color:#fff;font-weight:700;}QToolButton:hover{background:#2c974b;}QToolButton::menu-indicator{image:none;width:4px;}"
 
+# ============================================================
+# Toolbar 样式常量（避免 4 份重复 CSS 字符串；改主题时只需改这里）
+# ============================================================
+_QTB_STYLE_DEFAULT = "QToolButton{padding:4px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;}QToolButton:hover{background:#f3f4f6;}QToolButton::menu-indicator{width:0px;}"
+_QTB_STYLE_PRIMARY = "QToolButton{padding:4px 12px;border:1px solid #1a7f37;border-radius:4px;background:#2da44e;color:#fff;font-weight:700;}QToolButton:hover{background:#2c974b;}QToolButton::menu-indicator{image:none;width:4px;}"
+
 class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMixin):
     def __init__(self):
         super().__init__()
@@ -113,7 +119,7 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self._current_mod_tab: str = "all"   # "all" | "active"
 
         # 自动更新服务
-        self.update_svc = UpdateService(proxy_url="http://127.0.0.1:7897")
+        self.update_svc = UpdateService()  # 代理自动从环境变量读取
         self.update_svc.update_available.connect(self._on_update_available)
         self.update_svc.no_update_needed.connect(self._on_no_update_needed)
         self.update_svc.error_occurred.connect(self._on_update_error)
