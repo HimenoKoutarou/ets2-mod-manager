@@ -163,6 +163,8 @@ class _ToolbarMixin:
         self.table_all.order_changed.connect(self._on_table_order_changed)
         self.table_all.itemSelectionChanged.connect(lambda: self._on_selection_changed(self.table_all))
         self.table_all.itemChanged.connect(self._on_check_changed)
+        self.table_all.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_all.customContextMenuRequested.connect(lambda p: self._on_mod_context_menu(self.table_all, p))
         lay_all.addWidget(self.table_all)
         self.tab_mods.addTab(self._tab_page_all, _("ui.tab_all_mods"))
         self._tab_page_active = QWidget()
@@ -171,6 +173,8 @@ class _ToolbarMixin:
         self.table_active.order_changed.connect(self._on_table_order_changed)
         self.table_active.itemSelectionChanged.connect(lambda: self._on_selection_changed(self.table_active))
         self.table_active.itemChanged.connect(self._on_check_changed)
+        self.table_active.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_active.customContextMenuRequested.connect(lambda p: self._on_mod_context_menu(self.table_active, p))
         lay_act.addWidget(self.table_active)
         self.tab_mods.addTab(self._tab_page_active, _("ui.tab_active_mods"))
         self.tab_mods.currentChanged.connect(self._on_mod_tab_changed)
@@ -530,15 +534,34 @@ class _ToolbarMixin:
             from pathlib import Path as _P
         except Exception:
             return False
+        # Make the potentially slow signature check visible on the startup
+        # splash instead of leaving the user with a static label.
+        try:
+            if getattr(self, "_splash", None) is not None:
+                self._splash.mark_phase_start("quick_scan", "读取模组目录签名…")
+                QApplication.processEvents()
+        except Exception:
+            pass
         snap = load_scan_snapshot(
             self.paths.mod_dir,
             self.paths.workshop_content_dir,
             self.paths.mods_info_path,
         )
+        try:
+            if getattr(self, "_splash", None) is not None:
+                self._splash._detail_label.setText("目录签名完成 · 正在恢复扫描缓存…" if snap else "目录签名完成 · 准备扫描模组…")
+                if snap:
+                    self._splash._log(f"发现缓存快照，共 {len(snap)} 个模组，开始恢复…", "info")
+                else:
+                    self._splash._log("未找到可用扫描缓存，将执行完整扫描。", "info")
+                QApplication.processEvents()
+        except Exception:
+            pass
         if not snap:
             return False
         mods: list = []
-        for md in snap:
+        total_snap = len(snap)
+        for idx, md in enumerate(snap, 1):
             try:
                 m = Mod(
                     mod_id=str(md["mod_id"]),
@@ -567,13 +590,34 @@ class _ToolbarMixin:
                     m.manifest.description_filename = md["description_filename"]
                 if md.get("description"):
                     m.description = md["description"]
+                # Do not synchronously reopen every archive here. Preview bytes
+                # are restored by the async parser after the cache is loaded;
+                # keeping startup metadata-only makes the splash responsive.
                 if md.get("category_tag"):
                     m.category_tag = md["category_tag"]
                 mods.append(m)
             except Exception:
                 continue
+            # Keep the splash responsive and expose periodic progress while
+            # rebuilding the cached Mod objects (including icon cache lookup).
+            if idx == 1 or idx == total_snap or idx % 25 == 0:
+                try:
+                    if getattr(self, "_splash", None) is not None:
+                        self._splash.set_phase_progress_ratio("quick_scan", idx, total_snap)
+                        self._splash._detail_label.setText(f"正在恢复扫描缓存… {idx}/{total_snap}")
+                        self._splash._log(f"缓存恢复进度：{idx}/{total_snap}", "info")
+                    QApplication.processEvents()
+                except Exception:
+                    pass
         if not mods:
             return False
+        try:
+            if getattr(self, "_splash", None) is not None:
+                self._splash._log(f"扫描缓存恢复完成，共恢复 {len(mods)} 个模组。", "success")
+                self._splash._detail_label.setText(f"缓存恢复完成 · {len(mods)} 个模组")
+                QApplication.processEvents()
+        except Exception:
+            pass
         # 恢复显示
         self.all_mods = mods
         self.all_mods_by_pkg = self._build_mod_index(mods)
@@ -600,14 +644,20 @@ class _ToolbarMixin:
         except Exception:
             new_ids = []
         if new_ids:
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(250, lambda ids=list(new_ids): self._show_new_mods_dialog(ids))
+            # During installer startup defer categorization until MainWindow is visible.
+            if getattr(self, "_bootstrap_after_installer_splash", False):
+                self._startup_pending_new_mod_ids = list(new_ids)
+            elif not getattr(self, "_startup_new_mods_dialog_shown", False):
+                from PySide6.QtCore import QTimer
+                self._startup_new_mods_dialog_shown = True
+                QTimer.singleShot(350, lambda ids=list(new_ids): self._show_new_mods_dialog(ids))
         self.statusBar().showMessage(
             _("ui.sb_from_cache", n=len(mods), size=f"{total_size:.1f}")
         )
         # 如果所有 mod 都已有 display_name，跳过异步解析（真正从缓存秒开）
         need_parse = any(
             not m.manifest.display_name or not m.description
+            or not m.manifest.compatible_versions or not m.icon.is_available
             for m in mods
         )
         if need_parse:
@@ -623,6 +673,8 @@ class _ToolbarMixin:
 
     def _start_async_parse(self) -> None:
         """启动后台异步解析：解析加密包 + 回填目录型/scs/zip 的 icon/description/display_name"""
+        self._async_parse_started = False
+        self._async_parse_batch_refresh = True
         from services.external_extractor_service import supports_archive
         from pathlib import Path as _P
         pending = []
@@ -663,6 +715,7 @@ class _ToolbarMixin:
         worker.progress.connect(self._on_async_parse_progress)
         worker.one_parsed.connect(self._on_mod_parsed)
         worker.finished.connect(self._on_async_parse_finished)
+        self._async_parse_started = True
         worker.start()
 
     def _fetch_workshop_titles_async(self):

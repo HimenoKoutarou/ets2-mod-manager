@@ -33,7 +33,65 @@ from services.i18n_service import _, tr
 from core.models import Mod
 
 
+class _UpdateInstallWorker(QThread):
+    """Run the transactional updater without blocking the GUI thread."""
+
+    completed = Signal(bool)
+    error_occurred = Signal(str)
+
+    def __init__(self, update_service):
+        super().__init__()
+        self._update_service = update_service
+
+    def run(self):
+        try:
+            self.completed.emit(bool(self._update_service.download_and_install()))
+        except Exception as exc:
+            # Keep updater failures inside the worker and report them through Qt.
+            self.error_occurred.emit(f"{type(exc).__name__}: {exc}")
+            self.completed.emit(False)
+
+
 class _SignalMixin:
+    def _on_mod_context_menu(self, table, pos):
+        """Context actions for copying a mod's name or metadata."""
+        from PySide6.QtGui import QAction
+        from PySide6.QtWidgets import QApplication, QMenu
+        index = table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = index.row()
+        pkg_item = table.item(row, COL_PKG)
+        if pkg_item is None:
+            return
+        pkg = pkg_item.text()
+        mod = self._lookup_mod(pkg)
+        name = getattr(mod, "display_title", "") if mod else ""
+        name = name or pkg
+        menu = QMenu(table)
+        a_name = menu.addAction("复制 Mod 名称")
+        a_info = menu.addAction("复制 Mod 信息")
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen is a_name:
+            QApplication.clipboard().setText(name)
+            self.statusBar().showMessage("已复制 Mod 名称", 2000)
+        elif chosen is a_info:
+            if mod:
+                mf = mod.manifest
+                info = "\n".join([
+                    f"名称: {name}",
+                    f"Package: {getattr(mf, 'package_name', '')}",
+                    f"作者: {getattr(mf, 'author', '')}",
+                    f"版本: {getattr(mf, 'package_version', '')}",
+                    f"适配版本: {', '.join(getattr(mf, 'compatible_versions', []) or [])}",
+                    f"路径: {getattr(mod, 'package_path', '')}",
+                    f"描述:\n{getattr(mod, 'description', '')}",
+                ])
+            else:
+                info = f"名称: {name}\nPackage: {pkg}"
+            QApplication.clipboard().setText(info)
+            self.statusBar().showMessage("已复制 Mod 信息", 2000)
+
     def _schedule_refresh(self, *, order=False, filter=False, counts=False, status=False):
         self._need_refresh_order = self._need_refresh_order or order
         self._need_refresh_filter = self._need_refresh_filter or filter
@@ -45,6 +103,7 @@ class _SignalMixin:
     def _do_deferred_refresh(self):
         for t in (self.table_all, self.table_active):
             t.setUpdatesEnabled(False)
+            t.blockSignals(True)
         try:
             if self._need_refresh_order:
                 self._reorder_table_according_to_worklist()
@@ -57,6 +116,7 @@ class _SignalMixin:
                 self._refresh_status_after_change()
         finally:
             for t in (self.table_all, self.table_active):
+                t.blockSignals(False)
                 t.setUpdatesEnabled(True)
         self._need_refresh_order = False
         self._need_refresh_filter = False
@@ -357,7 +417,37 @@ class _SignalMixin:
             QMessageBox.Yes
         )
         if reply == QMessageBox.Yes:
-            self.update_svc.download_and_install()
+            worker = getattr(self, "_update_install_thread", None)
+            if worker is not None and worker.isRunning():
+                self.statusBar().showMessage(_("update.installing"))
+                return
+            worker = _UpdateInstallWorker(self.update_svc)
+            worker.completed.connect(self._on_update_install_completed)
+            worker.error_occurred.connect(self._on_update_install_error)
+            worker.finished.connect(self._on_update_install_thread_finished)
+            worker.finished.connect(worker.deleteLater)
+            self._update_install_thread = worker
+            self.statusBar().showMessage(_("update.installing"))
+            worker.start()
+
+    def _on_update_install_completed(self, success: bool):
+        if success:
+            # The notes belong to the first launch of the newly installed build.
+            # Persist a one-shot marker instead of showing notes on every version change.
+            prefs = self._load_behavior_prefs()
+            prefs["pending_update_notes"] = True
+            prefs["pending_update_version"] = (
+                self.update_svc.get_latest_version() or __version__
+            )
+            self._save_behavior_prefs(prefs)
+        else:
+            self.statusBar().showMessage(_("update.install_failed"))
+
+    def _on_update_install_error(self, error_msg: str):
+        self.statusBar().showMessage(_("update.install_failed") + f" ({error_msg})")
+
+    def _on_update_install_thread_finished(self):
+        self._update_install_thread = None
     
     def _on_no_update_needed(self):
         """已是最新版本。"""
@@ -392,16 +482,18 @@ class _SignalMixin:
         )
 
     def _show_update_notes_if_needed(self):
-        """版本升级后首次启动时弹窗展示更新内容。通过 behavior.json 的 last_seen_version 判断。"""
+        """仅在自动更新安装成功后的下一次启动展示一次更新内容。"""
         try:
-            prefs = self._load_behavior_prefs()
-            last_seen = prefs.get("last_seen_version", "")
-            if last_seen == __version__:
+            if getattr(self, "_update_notes_dialog_shown", False):
                 return
-            # 版本不同（升级或降级），弹窗
+            prefs = self._load_behavior_prefs()
+            if not prefs.get("pending_update_notes", False):
+                return
             self._show_update_notes_dialog()
-            # 记录已展示
-            prefs["last_seen_version"] = __version__
+            self._update_notes_dialog_shown = True
+            # Consume the marker immediately so a normal restart stays quiet.
+            prefs["pending_update_notes"] = False
+            prefs.pop("pending_update_version", None)
             self._save_behavior_prefs(prefs)
         except Exception:
             pass
@@ -550,6 +642,17 @@ class _SignalMixin:
             # 让 splash 播放 100% 完成提示后再 show main window
             try:
                 self._splash.close_installer_splash(then_show_main=self)
+                # Defensive fallback: if a platform/window-manager drops the
+                # splash timer callback, never leave the application invisible.
+                def _ensure_main_visible():
+                    try:
+                        if not self.isVisible():
+                            self.show()
+                            self.raise_()
+                            self.activateWindow()
+                    except Exception:
+                        pass
+                QTimer.singleShot(1200, _ensure_main_visible)
             except Exception:
                 self._close_splash()
                 self.show()
@@ -559,6 +662,13 @@ class _SignalMixin:
         else:
             self._close_splash()
             self.setEnabled(True)
+            pending_ids = getattr(self, "_startup_pending_new_mod_ids", None)
+            if pending_ids and not getattr(self, "_startup_new_mods_dialog_shown", False):
+                ids = list(pending_ids)
+                self._startup_new_mods_dialog_shown = True
+                try: delattr(self, "_startup_pending_new_mod_ids")
+                except Exception: pass
+                QTimer.singleShot(350, lambda: self._show_new_mods_dialog(ids))
             # 原逻辑：_async_check_update / notes 由 bootstrap 顶部的 singleshot 处理
 
 
@@ -588,19 +698,28 @@ class _SignalMixin:
         然后顺序弹更新日志 → 新模组归类对话框。
         """
         def _after_entry_updates():
+            if getattr(self, "_startup_entry_modals_started", False):
+                return
+            self._startup_entry_modals_started = True
             try: self._async_check_update()
             except Exception: pass
             tasks = [lambda: self._show_update_notes_if_needed()]
             pending_ids = getattr(self, "_startup_pending_new_mod_ids", None)
             if pending_ids:
                 ids = list(pending_ids)
-                tasks.append(lambda: self._show_new_mods_dialog(ids))
+                # Cache restore and scan can report the same ids more than once.
+                if not getattr(self, "_startup_new_mods_dialog_shown", False):
+                    tasks.append(lambda: self._show_new_mods_dialog(ids))
+                    self._startup_new_mods_dialog_shown = True
                 try: delattr(self, "_startup_pending_new_mod_ids")
                 except Exception: pass
             self._queue_startup_modals_sequential(tasks)
         QTimer.singleShot(1500, _after_entry_updates)
 
     def _bootstrap(self):
+        if getattr(self, "_bootstrap_started", False):
+            return
+        self._bootstrap_started = True
         self._show_splash()
         self.setEnabled(False)
         self._start_ui_refresh_timer()
@@ -639,7 +758,10 @@ class _SignalMixin:
                 except Exception: pass
             self._load_profiles()
         # 如果是缓存恢复（同步完成），此处直接收尾
-        if restored:
+        # Cached startup also launches the parse/decrypt worker. Keep the
+        # splash/main transition pending until that worker has finished so no
+        # extractor process runs after the main window is usable.
+        if restored and not getattr(self, "_async_parse_started", False):
             self._finalize_bootstrap()
 
     def _on_ui_refresh_timer(self):
@@ -774,9 +896,10 @@ class _SignalMixin:
         # 新模组弹窗
         installer = getattr(self, "_bootstrap_after_installer_splash", False)
         if new_ids:
-            if installer:
+            if installer or getattr(self, "_splash", None) is not None or not self.isEnabled():
                 self._startup_pending_new_mod_ids = list(new_ids)
-            else:
+            elif not getattr(self, "_startup_new_mods_dialog_shown", False):
+                self._startup_new_mods_dialog_shown = True
                 QTimer.singleShot(250, lambda ids=list(new_ids): self._show_new_mods_dialog(ids))
         self._quick_scan_worker = None
         # 第二阶段：解析加密包 + Steam 标题查询（并行）
@@ -786,7 +909,7 @@ class _SignalMixin:
             not m.manifest.display_name or not m.description
             for m in self.all_mods
         )
-        if not need_parse:
+        if not need_parse and not getattr(self, "_async_parse_started", False):
             self._finalize_bootstrap()
 
     def _on_quick_scan_failed(self, err_msg: str):
@@ -821,11 +944,13 @@ class _SignalMixin:
             left = new_pkg.split("|", 1)[0].strip()
             if left and left != new_pkg:
                 self.all_mods_by_pkg.setdefault(left, m)
-        # 刷新两张表
-        for tbl in (self.table_all, self.table_active):
-            row = tbl.find_row_by_pkg(mod_id)
-            if row is not None:
-                tbl.update_row_for_mod(row, m)
+        # During startup parsing, avoid rebuilding rows for every package. The
+        # complete table refresh is performed once when the worker finishes.
+        if not getattr(self, "_async_parse_batch_refresh", False):
+            for tbl in (self.table_all, self.table_active):
+                row = tbl.find_row_by_pkg(mod_id)
+                if row is not None:
+                    tbl.update_row_for_mod(row, m)
         # 详情面板刷新：当前选中行（任何一张表）的 pkg 如果和这个 mod 匹配就刷新
         try:
             import re as _re_fr_om
@@ -844,15 +969,15 @@ class _SignalMixin:
         except Exception:
             pass
         # 刷新分类计数（可能拿到了新的 display_title）
-        try: self._refresh_category_counts()
-        except Exception: pass
+        if not getattr(self, "_async_parse_batch_refresh", False):
+            try: self._refresh_category_counts()
+            except Exception: pass
 
     def _on_async_parse_finished(self) -> None:
         """全部加密包解析完成"""
         if getattr(self, "_bootstrap_after_installer_splash", False) and self._splash is not None:
             try: self._splash.mark_phase_complete("parse")
             except Exception: pass
-        self._finalize_bootstrap()
         # 移除顶部主进度条
         self._hide_scan_progress()
         # 移除状态栏小进度条
@@ -863,9 +988,60 @@ class _SignalMixin:
             self._async_parse_progress = None
         total_size = sum(m.file_size for m in self.all_mods) / 1024 / 1024
         self.statusBar().showMessage(_("ui.sb_scanned", n=len(self.all_mods), size=f"{total_size:.1f}"))
+        # Persist the fully enriched metadata (including decrypted packages) so
+        # the next startup can restore it without invoking the extractor again.
+        try:
+            from services.session_service import save_session_state, _dir_signature
+            snapshot = []
+            for m in self.all_mods:
+                snapshot.append({
+                    "mod_id": m.mod_id,
+                    "package_path": m.package_path,
+                    "package_type": m.package_type or "",
+                    "file_size": int(m.file_size or 0),
+                    "last_modified": float(m.last_modified or 0.0),
+                    "mods_info_timestamp": int(getattr(m, "mods_info_timestamp", 0) or 0),
+                    "display_name": getattr(m.manifest, "display_name", "") or "",
+                    "package_name": getattr(m.manifest, "package_name", "") or "",
+                    "author": getattr(m.manifest, "author", "") or "",
+                    "package_version": getattr(m.manifest, "package_version", "") or "",
+                    "compatible_versions": list(getattr(m.manifest, "compatible_versions", []) or []),
+                    "categories": list(getattr(m.manifest, "categories", []) or []),
+                    "icon_filename": getattr(m.manifest, "icon_filename", "") or "",
+                    "description_filename": getattr(m.manifest, "description_filename", "") or "",
+                    "description": getattr(m, "description", "") or "",
+                    "category_tag": getattr(m, "category_tag", "") or "",
+                })
+            save_session_state(
+                [m.mod_id for m in self.all_mods], {}, mods_snapshot=snapshot,
+                dir_signatures={
+                    "mod_dir": _dir_signature(self.paths.mod_dir),
+                    "workshop_dir": _dir_signature(self.paths.workshop_content_dir),
+                    "mods_info_path": _dir_signature(self.paths.mods_info_path),
+                },
+            )
+        except Exception:
+            pass
+        # Refresh both tables once after all metadata has been enriched.
+        self._async_parse_batch_refresh = False
+        try:
+            if self.current_profile:
+                self._fill_table_for_profile(self.current_profile)
+            self._refresh_category_counts()
+        except Exception:
+            pass
+        # Only reveal the main window after the enriched snapshot is safely
+        # persisted; writing a large metadata cache must remain part of startup.
+        self._finalize_bootstrap()
         self._async_parse_worker = None
+        self._async_parse_started = False
 
     def closeEvent(self, event):
+        update_worker = getattr(self, "_update_install_thread", None)
+        if update_worker is not None and update_worker.isRunning():
+            QMessageBox.warning(self, _("update.title"), _("update.close_blocked"))
+            event.ignore()
+            return
         # 退出时保存当前会话状态
         try:
             from services.session_service import save_session_state
@@ -931,7 +1107,8 @@ class _SignalMixin:
             pid = getattr(prof, "profile_id", str(id(prof)))
             active = self.profile_svc.get_active_mods(prof)
             new_in_profile = get_new_active_in_profile(pid, list(active or []))
-            if new_in_profile:
+            if new_in_profile and getattr(self, "_splash", None) is None and self.isEnabled() and not getattr(self, "_startup_new_mods_dialog_shown", False):
+                self._startup_new_mods_dialog_shown = True
                 QTimer.singleShot(300, lambda ids=list(new_in_profile): self._show_new_mods_dialog(ids))
         except Exception:
             pass
@@ -1044,7 +1221,9 @@ class _SignalMixin:
             if item.row() >= owner_tbl.rowCount():
                 return
             self._sync_worklist_from_table()
-            self._schedule_refresh(order=True, filter=True, counts=True, status=True)
+            # Checkbox changes only need state/filter/count updates. Defer the
+            # expensive full-row reorder until an explicit move/batch action.
+            self._schedule_refresh(order=False, filter=True, counts=True, status=True)
             try: self._mark_priority_dirty("启用状态已变更 · 请点工具栏「保存」写回 profile")
             except Exception: pass
             # 详情面板同步（立即执行，不走防抖）—— 重新从 owner_tbl 取一次，避免 row delete 后错位
@@ -1054,7 +1233,8 @@ class _SignalMixin:
                     try:
                         pkg = pkg_item.text()
                         mod = self._lookup_mod(pkg)
-                        self._show_mod_detail(pkg, mod, {})
+                        from PySide6.QtCore import QTimer
+                        QTimer.singleShot(0, lambda p=pkg, m=mod: self._show_mod_detail(p, m, {}))
                     except Exception:
                         pass
             except Exception:

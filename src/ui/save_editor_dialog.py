@@ -889,7 +889,7 @@ class SaveEditorDialog(QDialog):
                 self.lbl_status.setText(fail_msg or _("se.failed"))
                 if fail_msg:
                     QMessageBox.warning(self, _("se.error"), f"{fail_msg}\n{msg}" if msg else fail_msg)
-            if post_callback is not None:
+            if success and post_callback is not None:
                 try:
                     post_callback()
                 except Exception:

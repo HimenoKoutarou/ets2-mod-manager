@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import List, Optional, Dict
 
-from PySide6.QtCore import Qt, QSize, QMimeData, QByteArray, Signal, QTimer, QObject
+from PySide6.QtCore import Qt, QSize, QMimeData, QByteArray, Signal, QTimer, QObject, QThread
 from PySide6.QtGui import QAction, QIcon, QPixmap, QImage, QBrush, QColor, QFont, QDrag
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QFrame,
@@ -116,6 +116,7 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
             logo_path = resolve_asset("assets/app_icon.png")
         self._logo_path = str(logo_path)
         self._splash: Optional["SplashScreen"] = None
+        self._bootstrap_started = False
 
         # --- 初始化核心对象 ---
         self.paths: ETS2Paths = detect_paths()
@@ -151,6 +152,7 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self._current_mod_tab: str = "all"   # "all" | "active"
 
         # 自动更新服务
+        self._update_install_thread: Optional[QThread] = None
         self.update_svc = UpdateService()  # 代理自动从环境变量读取
         self.update_svc.update_available.connect(self._on_update_available)
         self.update_svc.no_update_needed.connect(self._on_no_update_needed)
@@ -189,7 +191,9 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         # 打包模式下 main() 已经显示 installer splash 并在 60ms 后手动调 _bootstrap：
         # _bootstrap 自己会检查 self._bootstrap_after_installer_splash 决定最终 show 时机。
         if not getattr(self, "_bootstrap_after_installer_splash", False):
-            QTimer.singleShot(50, self._bootstrap)
+            # Give the installer entry point time to attach its splash and set
+            # bootstrap mode before this fallback timer can fire.
+            QTimer.singleShot(150, self._bootstrap)
 
         # 语言切换通知 → 刷新 UI（已在 _do_switch_language 中处理，保留用于外部触发）
         try:
@@ -355,14 +359,19 @@ def main():
     def _bootstrap_and_show():
         try:
             w._bootstrap()
-        except Exception:
-            # 致命错误：还是 show 主窗让用户看 error bar + trace
+        except Exception as exc:
+            # Keep the application alive on startup failures so the user can
+            # inspect the window/status bar instead of the process vanishing.
             try:
                 splash.close_splash_early("启动过程出现未处理异常")
             except Exception:
                 pass
-            w.show()
-            raise
+            try:
+                w.show()
+                w.setEnabled(True)
+                w.statusBar().showMessage(f"初始化失败：{type(exc).__name__}: {exc}", 15000)
+            except Exception:
+                pass
 
     QTimer.singleShot(60, _bootstrap_and_show)
     sys.exit(app.exec())

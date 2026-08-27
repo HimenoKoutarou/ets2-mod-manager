@@ -20,6 +20,8 @@ import struct
 import zlib
 import re
 import shutil
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
@@ -138,6 +140,40 @@ def _read_u32_at(data: bytes, offset: int) -> Optional[int]:
 
 def _write_u32_at(data: bytearray, offset: int, value: int) -> None:
     struct.pack_into("<I", data, offset, value & 0xFFFFFFFF)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Atomically replace *path* with *data* using a sibling temporary file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _looks_like_schema_continuation(data: bytes, offset: int) -> bool:
+    """Return True when *offset* starts the next BSII field declaration."""
+    if offset + 5 > len(data):
+        return False
+    name_len = struct.unpack_from("<I", data, offset)[0]
+    if not 1 <= name_len <= 96 or offset + 4 + name_len > len(data):
+        return False
+    raw_name = data[offset + 4:offset + 4 + name_len]
+    try:
+        name = raw_name.decode("ascii")
+    except UnicodeDecodeError:
+        return False
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_\.]*", name))
 
 
 # =========================================================================
@@ -298,32 +334,26 @@ class SaveEditorService:
     # ---------- 通用字段查找/修改 ----------
 
     def find_float_field_value(self, bsii: bytes, field_name: str) -> List[Tuple[int, float]]:
-        """查找指定名称字段后的 float32 值。"""
+        """查找可安全确认的内联 float32 值；结构定义区不做猜测。"""
         results: List[Tuple[int, float]] = []
         for pos in _find_field_positions(bsii, field_name):
             type_info = _read_field_type(bsii, pos, field_name)
             if type_info is None:
                 continue
             type_byte, type_offset = type_info
-            # BSII 中 0x05 后跟 3 个 0x00 padding，尝试多个偏移
-            for delta in (1, 4, 5, 8):
-                val = _read_float32_at(bsii, type_offset + delta)
-                if val is not None:
-                    results.append((type_offset + delta, val))
+            if type_byte != self.T_F32 or bsii[type_offset + 1:type_offset + 4] != b"\x00\x00\x00":
+                continue
+            value_offset = type_offset + 4
+            if _looks_like_schema_continuation(bsii, value_offset):
+                continue
+            val = _read_float32_at(bsii, value_offset)
+            if val is not None:
+                results.append((value_offset, val))
         return results
 
     def find_u32_field_value(self, bsii: bytes, field_name: str) -> List[Tuple[int, int]]:
-        results: List[Tuple[int, int]] = []
-        for pos in _find_field_positions(bsii, field_name):
-            type_info = _read_field_type(bsii, pos, field_name)
-            if type_info is None:
-                continue
-            type_byte, type_offset = type_info
-            for delta in (1, 4, 5, 8):
-                val = _read_u32_at(bsii, type_offset + delta)
-                if val is not None:
-                    results.append((type_offset + delta, val))
-        return results
+        """整数值尚无可靠的内联类型标记，不进行猜测式定位。"""
+        return []
 
     def replace_float_value(self, bsii: bytearray, value_offset: int, new_value: float) -> None:
         _write_float32_at(bsii, value_offset, new_value)
@@ -357,7 +387,7 @@ class SaveEditorService:
                 raise RuntimeError(f"profile.sii 重新加密失败，已取消写入以防存档损坏: {e}") from e
 
         self.ps.backup.backup(prof.profile_sii, tag="pre-rename")
-        prof.profile_sii.write_bytes(out_bytes)
+        _atomic_write_bytes(prof.profile_sii, out_bytes)
         return prof.profile_sii
 
     @staticmethod
@@ -405,18 +435,6 @@ class SaveEditorService:
                 self.replace_float_value(bsii, offset, float(new_money))
                 modified = True
 
-        # 策略2：全文件搜索 float32(当前值) 并替换
-        if not modified and current_money_hint is not None:
-            target_bytes = struct.pack("<f", float(current_money_hint))
-            start = 0
-            while True:
-                pos = bsii.find(target_bytes, start)
-                if pos == -1:
-                    break
-                self.replace_float_value(bsii, pos, float(new_money))
-                modified = True
-                start = pos + 4
-
         if modified:
             self._save_game_sii(slot, bytes(bsii))
         return modified
@@ -436,19 +454,6 @@ class SaveEditorService:
             self.replace_float_value(bsii, offset, float(new_xp))
             modified = True
 
-        if not modified and current_xp_hint is not None:
-            target_bytes = struct.pack("<f", float(current_xp_hint))
-            start = 0
-            count = 0
-            while count < 10:
-                pos = bsii.find(target_bytes, start)
-                if pos == -1:
-                    break
-                self.replace_float_value(bsii, pos, float(new_xp))
-                modified = True
-                start = pos + 4
-                count += 1
-
         if modified:
             self._save_game_sii(slot, bytes(bsii))
         return modified
@@ -467,21 +472,6 @@ class SaveEditorService:
             self.replace_u32_value(bsii, offset, int(new_level))
             modified = True
 
-        if not modified and current_level_hint is not None:
-            target_bytes = struct.pack("<I", int(current_level_hint))
-            start = 0
-            count = 0
-            while count < 5:
-                pos = bsii.find(target_bytes, start)
-                if pos == -1:
-                    break
-                existing = _read_u32_at(bsii, pos)
-                if existing is not None and existing < 1000:
-                    self.replace_u32_value(bsii, pos, int(new_level))
-                    modified = True
-                start = pos + 4
-                count += 1
-
         if modified:
             self._save_game_sii(slot, bytes(bsii))
         return modified
@@ -489,25 +479,10 @@ class SaveEditorService:
     # ---------- 功能 6：解锁地图 / 车库 / 经销商 ----------
 
     def unlock_all_dealers(self, slot: SaveSlotInfo) -> bool:
-        bsii = bytearray(self.decrypt_game_sii(slot))
-        modified = False
-
-        for fname in ("unlocked_dealers", "unlocked_recruitments"):
-            for pos in _find_field_positions(bsii, fname):
-                type_info = _read_field_type(bsii, pos, fname)
-                if type_info is None:
-                    continue
-                type_byte, type_offset = type_info
-                for delta in (1, 4, 5):
-                    if type_offset + delta + 4 <= len(bsii):
-                        old = _read_u32_at(bsii, type_offset + delta)
-                        if old is not None and old < 0x10000:
-                            self.replace_u32_value(bsii, type_offset + delta, 1)
-                            modified = True
-
-        if modified:
-            self._save_game_sii(slot, bytes(bsii))
-        return modified
+        # These are container fields in current BSII saves. Editing bytes beside
+        # their schema names corrupts the field table, so keep this disabled until
+        # a real BSII object/value parser is available.
+        return False
 
     def unlock_all_garages(self, slot: SaveSlotInfo) -> bool:
         bsii = bytearray(self.decrypt_game_sii(slot))
@@ -518,8 +493,12 @@ class SaveEditorService:
             if type_info is None:
                 continue
             type_byte, type_offset = type_info
-            if type_byte == self.T_BOOL and type_offset + 1 < len(bsii):
-                bsii[type_offset + 1] = 0x01
+            value_offset = type_offset + 4
+            if (type_byte == self.T_BOOL
+                    and bsii[type_offset + 1:type_offset + 4] == b"\x00\x00\x00"
+                    and value_offset < len(bsii)
+                    and not _looks_like_schema_continuation(bsii, value_offset)):
+                bsii[value_offset] = 0x01
                 modified = True
 
         if modified:
@@ -540,10 +519,12 @@ class SaveEditorService:
 
         for fname in self.WEAR_FIELDS:
             for field_pos, type_byte, type_offset in index.get(fname, []):
-                # 保守策略：将 type_byte 后 8 字节全部清零
-                for delta in range(1, 9):
-                    if type_offset + delta < len(bsii):
-                        bsii[type_offset + delta] = 0x00
+                if type_byte != self.T_F32 or bsii[type_offset + 1:type_offset + 4] != b"\x00\x00\x00":
+                    continue
+                value_offset = type_offset + 4
+                if _looks_like_schema_continuation(bsii, value_offset):
+                    continue
+                self.replace_float_value(bsii, value_offset, 0.0)
                 count += 1
 
         if count > 0:
@@ -558,10 +539,13 @@ class SaveEditorService:
 
         for fname in self.FUEL_FIELDS:
             for field_pos, type_byte, type_offset in index.get(fname, []):
-                for delta in (1, 4, 5):
-                    if type_offset + delta + 4 <= len(bsii):
-                        self.replace_float_value(bsii, type_offset + delta, fuel_amount)
-                        count += 1
+                if type_byte != self.T_F32 or bsii[type_offset + 1:type_offset + 4] != b"\x00\x00\x00":
+                    continue
+                value_offset = type_offset + 4
+                if _looks_like_schema_continuation(bsii, value_offset):
+                    continue
+                self.replace_float_value(bsii, value_offset, fuel_amount)
+                count += 1
 
         if count > 0:
             self._save_game_sii(slot, bytes(bsii))
@@ -574,7 +558,7 @@ class SaveEditorService:
         game_sii = slot.game_sii
         self.ps.backup.backup(game_sii, tag="pre-save-edit")
         encrypted = self.encrypt_game_sii(new_bsii, slot)
-        game_sii.write_bytes(encrypted)
+        _atomic_write_bytes(game_sii, encrypted)
         # 写操作后使缓存失效，下次读取会重新解密
         slot.invalidate_cache()
 

@@ -365,12 +365,11 @@ def extract_files_batch(archive_path, inner_names) -> dict:
         return {}
 
     key = _cache_key(path)
-    # 磁盘缓存：检查是否标记为 batch_empty（上次提取全空，避免重复超时）
+    # Do not short-circuit on a previous empty batch. Candidate paths may have
+    # expanded (for example encrypted Workshop mods with nested icons).
     cache = _load_cache()
     entry = cache.get(key)
-    if isinstance(entry, dict) and entry.get("batch_empty"):
-        if time.time() - entry.get("ts", 0) < _TTL_SECONDS:
-            return {}
+    # A previous batch_empty marker is informational only; retry extraction.
 
     # 磁盘文件缓存预检查：如果所有候选都能从磁盘缓存命中，直接返回
     disk_hit: dict = {}
@@ -407,14 +406,14 @@ def extract_files_batch(archive_path, inner_names) -> dict:
 
         ok = False
         try:
-            result = subprocess.run(
+            proc = subprocess.run(
                 [str(_EXTRACTOR), str(path), "--deep", f"--partial={multi}",
                  "-d", str(tmp), "-s"],
                 capture_output=True, timeout=_TIMEOUT_SECONDS,
                 creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
             )
             # R11.1: check returncode
-            ok = result.returncode == 0
+            ok = proc.returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             ok = False
 
@@ -439,10 +438,6 @@ def extract_files_batch(archive_path, inner_names) -> dict:
                 if data:
                     _disk_cache_put(key, n, data)
         shutil.rmtree(tmp, ignore_errors=True)
-        # SCS# 全空结果缓存 batch_empty，避免重复超时
-        if not any(result.values()):
-            cache[key] = {"batch_empty": True, "ts": time.time(), "magic": magic}
-            _save_cache()
         return result
 
     # AEM!/ZIP: 逐个提取（有进程内缓存）

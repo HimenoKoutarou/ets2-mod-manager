@@ -21,6 +21,7 @@ ETS2/ATS 的 .scs 文件其实就是标准 zip（压缩算法可选 store/deflat
 # 性能优化：大于该阈值的文件用 mmap 读取（避免完整拷贝到内存）
 # 5MB 以上视为大文件（manifest/icon/description 通常 < 1MB，大文件多为贴图/模型）
 _MMAP_THRESHOLD = 5 * 1024 * 1024
+_ICON_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
 
 
 class ScsArchiveReader:
@@ -159,7 +160,15 @@ class ScsArchiveReader:
     # ---------- 底层文件读取 ----------
     def exists(self, inner_path: str) -> bool:
         if self._mode == "dir":
-            return (self.path / inner_path.replace("/", os.sep)).exists()
+            p = self.path / inner_path.replace("/", os.sep)
+            if p.exists():
+                return True
+            target = inner_path.replace("\\", "/").strip("/").lower()
+            try:
+                return any(x.is_file() and x.relative_to(self.path).as_posix().lower() == target
+                           for x in self.path.rglob("*"))
+            except OSError:
+                return False
         if self._mode == "zip" and self._zf:
             # Zip 里的路径通常以 "/" 分隔
             try:
@@ -178,6 +187,13 @@ class ScsArchiveReader:
         try:
             if self._mode == "dir":
                 p = self.path / inner_path.replace("/", os.sep)
+                if not p.is_file():
+                    target = inner_path.replace("\\", "/").strip("/").lower()
+                    try:
+                        p = next((x for x in self.path.rglob("*")
+                                  if x.is_file() and x.relative_to(self.path).as_posix().lower() == target), p)
+                    except (OSError, StopIteration):
+                        pass
                 # P1 安全：防止 path traversal（manifest 里的 description_file 可能为 ../../xxx）
                 try:
                     p_resolved = p.resolve()
@@ -210,7 +226,13 @@ class ScsArchiveReader:
                     try:
                         return self._zf.read(inner_path.replace("/", "\\"))
                     except KeyError:
-                        return None
+                        target = inner_path.replace("\\", "/").lstrip("/").lower()
+                        try:
+                            name = next((n for n in self._zf.namelist()
+                                         if n.replace("\\", "/").lstrip("/").lower() == target), None)
+                            return self._zf.read(name) if name else None
+                        except (KeyError, OSError):
+                            return None
         except OSError:
             return None
         return None
@@ -276,7 +298,16 @@ class ScsArchiveReader:
         manifest.categories = [c for c in pkg.get_list("category") if c]
         manifest.icon_filename = pkg.get("icon", "") or ""
         manifest.description_filename = pkg.get("description_file", "") or ""
-        manifest.compatible_versions = [v for v in pkg.get_list("compatible_versions") if v]
+        # Support both current and legacy manifest field names.
+        values = []
+        for key in ("compatible_versions", "compatible_game_versions", "game_versions", "game_version"):
+            values.extend(pkg.get_list(key))
+        manifest.compatible_versions = []
+        for value in values:
+            for part in str(value).replace(",", " ").split():
+                part = part.strip()
+                if part and part not in manifest.compatible_versions:
+                    manifest.compatible_versions.append(part)
         manifest.dlc_dependencies = [d for d in pkg.get_list("dlc_dependencies") if d]
         # multiplayer_optional 可能缺省
         mo = pkg.get("multiplayer_optional", "")
@@ -293,13 +324,7 @@ class ScsArchiveReader:
         if self._external_cache is not None:
             return
         # 构建候选列表（与 read_icon/read_description 的候选一致）
-        icon_candidates: List[str] = []
-        if icon_filename:
-            icon_candidates.append(icon_filename)
-            if not icon_filename.lower().endswith((".jpg", ".jpeg", ".png")):
-                icon_candidates += [icon_filename + ".jpg", icon_filename + ".jpeg", icon_filename + ".png"]
-        icon_candidates += ["mod_icon.jpg", "icon.jpg", "preview.jpg", "thumbnail.jpg",
-                            "mod_icon.png", "icon.png"]
+        icon_candidates = self._icon_candidates(icon_filename)
         desc_candidates: List[str] = []
         if desc_filename:
             desc_candidates.append(desc_filename)
@@ -311,6 +336,42 @@ class ScsArchiveReader:
             self._external_cache = extract_files_batch(self.path, all_candidates)
         except Exception:
             self._external_cache = {}
+
+    @staticmethod
+    def _icon_candidates(filename: str) -> List[str]:
+        """Generate extractor-friendly icon paths, including nested/encrypted layouts."""
+        out: List[str] = []
+        def add(value: str) -> None:
+            value = str(value or "").replace("\\", "/").lstrip("/")
+            if value and value not in out:
+                out.append(value)
+        if filename:
+            base = str(filename).replace("\\", "/").lstrip("/")
+            add(base)
+            stem, ext = os.path.splitext(base)
+            if not ext:
+                for suffix in _ICON_EXTENSIONS:
+                    add(base + suffix)
+            # Some manifests contain only a basename while the file is nested.
+            add(os.path.basename(base))
+            # Be tolerant of a manifest extension that differs from the actual
+            # file (common in older/custom map packages).
+            if ext:
+                for suffix in _ICON_EXTENSIONS:
+                    add(stem + suffix)
+        for name in (
+            "mod_icon.jpg", "icon.jpg", "preview.jpg", "thumbnail.jpg",
+            "mod_icon.png", "icon.png", "preview.png", "thumbnail.png",
+            "mod_icon.jpeg", "icon.jpeg", "cover.jpg", "cover.png",
+            "logo.jpg", "logo.png", "banner.jpg", "banner.png",
+        ):
+            add(name)
+        roots = ("universal", "content", "resource", "map", "def", "material")
+        existing = list(out)
+        for root in roots:
+            for name in existing:
+                add(f"{root}/{name}")
+        return out
 
     # ---------- 高层：提取描述 ----------
     def read_description(self, filename: str) -> str:
@@ -366,14 +427,24 @@ class ScsArchiveReader:
     def read_icon(self, filename: str) -> ModIcon:
         icon = ModIcon()
         # 尝试直接文件名，也尝试 .jpg/.png 作为 fallback
-        candidates: List[str] = []
-        if filename:
-            candidates.append(filename)
-            if not filename.lower().endswith((".jpg", ".jpeg", ".png")):
-                candidates += [filename + ".jpg", filename + ".jpeg", filename + ".png"]
-        # 如果 manifest 没写 icon，但包根目录有 "mod_icon.jpg" / "icon.jpg" 也兜底
-        candidates += ["mod_icon.jpg", "icon.jpg", "preview.jpg", "thumbnail.jpg",
-                       "mod_icon.png", "icon.png"]
+        candidates: List[str] = self._icon_candidates(filename)
+        # Volga Map and several Workshop packages keep previews in a nested
+        # folder or use an arbitrary image filename. Enumerate image entries as
+        # a final fallback (bounded to avoid scanning huge archives).
+        try:
+            entries = self.list_entries(max_entries=5000)
+            image_entries = [
+                name for name in entries
+                if name.lower().endswith(_ICON_EXTENSIONS)
+                and name not in candidates
+            ]
+            # Prefer semantically named images, then allow arbitrary custom
+            # filenames such as Volga Map's `volgamap.jpg`.
+            priority = ("icon", "preview", "thumb", "logo", "cover", "banner")
+            image_entries.sort(key=lambda n: (0 if any(k in n.lower() for k in priority) else 1, n.lower()))
+            candidates.extend(image_entries)
+        except Exception:
+            pass
         raw: Optional[bytes] = None
         used = ""
         for c in candidates:

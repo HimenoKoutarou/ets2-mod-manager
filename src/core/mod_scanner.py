@@ -5,7 +5,7 @@ import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .models import Mod, ModManifest
 from .scs_archive import ScsArchiveReader
@@ -86,9 +86,19 @@ def _try_nested_scs(mod: Mod, package_path: Path) -> bool:
         try:
             with ScsArchiveReader(sp) as r2:
                 mf2 = r2.parse_manifest()
-                if not mod.manifest.display_name and mf2.display_name:
-                    mod.manifest = mf2
-                    filled = True
+                # Merge nested metadata field-by-field; root manifests are
+                # often partial (for example title present, versions absent).
+                for attr in ("package_name", "package_version", "display_name",
+                             "author", "icon_filename", "description_filename"):
+                    if not getattr(mod.manifest, attr, "") and getattr(mf2, attr, ""):
+                        setattr(mod.manifest, attr, getattr(mf2, attr))
+                        filled = True
+                if mf2.categories and not mod.manifest.categories:
+                    mod.manifest.categories = list(mf2.categories); filled = True
+                if mf2.compatible_versions and not mod.manifest.compatible_versions:
+                    mod.manifest.compatible_versions = list(mf2.compatible_versions); filled = True
+                if mf2.dlc_dependencies and not mod.manifest.dlc_dependencies:
+                    mod.manifest.dlc_dependencies = list(mf2.dlc_dependencies); filled = True
                 ic2 = r2.read_icon(mf2.icon_filename or mod.manifest.icon_filename or "")
                 if ic2.is_available and not mod.icon.is_available:
                     mod.icon = ic2
@@ -167,7 +177,7 @@ def _try_nested_subdir(mod: Mod, package_path: Path) -> bool:
         if not mf.description_filename:
             mf.description_filename = pkg.get("description_file", "") or ""
         if not mf.compatible_versions:
-            mf.compatible_versions = [v for v in pkg.get_list("compatible_versions") if v]
+            mf.compatible_versions = _compatible_versions_from_unit(pkg)
         if not mf.dlc_dependencies:
             mf.dlc_dependencies = [dd for dd in pkg.get_list("dlc_dependencies") if dd]
         mod.manifest = mf
@@ -229,6 +239,20 @@ def _try_nested_subdir(mod: Mod, package_path: Path) -> bool:
         if mod.manifest.display_name and mod.icon.is_available:
             break
     return filled
+
+
+def _compatible_versions_from_unit(pkg) -> list[str]:
+    """Read compatible game versions across manifest schema variants."""
+    values = []
+    for key in ("compatible_versions", "compatible_game_versions", "game_versions", "game_version"):
+        values.extend(pkg.get_list(key))
+    out = []
+    for value in values:
+        for part in str(value).replace(",", " ").split():
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
 
 
 def _build_mod_from_package(package_path: Path, package_type: str,
@@ -393,9 +417,9 @@ class ModScanner:
                 return {}
         return {}
 
-    def scan(self, skip_manifest_parse: bool = False) -> List[Mod]:
+    def scan(self, skip_manifest_parse: bool = False) -> Tuple[List[Mod], List[str]]:
         """
-        扫描所有模组。
+        扫描所有模组，返回 ``(mods_list, new_mod_ids)``。
         如果 skip_manifest_parse=True 则不解析 .scs 内部（只得到文件名/大小/时间等基础信息），
         用于第一次快速显示列表，后续可逐个懒加载。
         """
@@ -546,7 +570,10 @@ def _enrich_nested_fallback(mod: Mod) -> bool:
         filled = True
 
     # 兜底 2：复用共享函数
-    if not mod.manifest.display_name and not mod.icon.is_available:
+    # Fill each missing field independently. A package may have a title in its
+    # root manifest while keeping its icon/description in a version subfolder.
+    if (not mod.icon.is_available or not mod.description or
+            not mod.manifest.display_name or not mod.manifest.compatible_versions):
         if _try_nested_subdir(mod, package_path):
             filled = True
 

@@ -33,21 +33,26 @@ def _dir_signature(path: Optional[Path]) -> dict:
         count = 0
         total = 0
         mtime_max = 0.0
-        # 只遍历第一层（不 rglob），避免 Workshop 万级文件卡死
+        # Fast first-level scan. os.scandir avoids repeated Path conversions;
+        # cap entries so a damaged/network-mounted directory cannot block the
+        # startup splash indefinitely.
         try:
-            for entry in path.iterdir():
-                try:
-                    st = entry.stat()
-                    if entry.is_file():
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    if count >= 10000:
+                        break
+                    try:
+                        st = entry.stat(follow_symlinks=False)
                         count += 1
-                        total += st.st_size
-                    elif entry.is_dir():
-                        count += 1
-                    if st.st_mtime > mtime_max:
-                        mtime_max = st.st_mtime
-                except OSError:
-                    continue
+                        if entry.is_file(follow_symlinks=False):
+                            total += st.st_size
+                        if st.st_mtime > mtime_max:
+                            mtime_max = st.st_mtime
+                    except OSError:
+                        continue
         except OSError:
+            # Treat an unreadable directory as present but empty; the real scan
+            # will report any accessible mods instead of freezing startup.
             pass
         sig.update({
             "exists": True,

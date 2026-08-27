@@ -116,9 +116,10 @@ def test_mod_scanner():
     mi = scanner.load_mods_info_index()
     print(f"  mods_info 索引条目: {len(mi)}")
     # skip_parse=True 只读基础信息
-    mods = scanner.scan(skip_manifest_parse=True)
+    mods, new_ids = scanner.scan(skip_manifest_parse=True)
     total_size = sum(m.file_size for m in mods)
     print(f"  扫描到模组(仅基础信息): {len(mods)} 个, 总大小 {total_size/1024/1024:.1f} MB")
+    print(f"  相比上次会话新增: {len(new_ids)} 个")
     # 有 mods_info 但 /mod 目录可能空（因为你用了 workshop ？），这是正常现象
     if len(mods) == 0 and len(mi) > 500:
         print("  ℹ️  提示：本地 mod 目录为空，573 个模组全部来自 Steam Workshop，这是正常的")

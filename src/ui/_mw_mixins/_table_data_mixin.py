@@ -137,6 +137,8 @@ class _TableDataMixin:
     def _reorder_table_for(self, tbl):
         """对指定 tbl 按 current_worklist 重排序并 renumber"""
         tbl.setUpdatesEnabled(False)
+        signals_blocked = tbl.signalsBlocked()
+        tbl.blockSignals(True)
         try:
             ordered = [x for x in self.current_worklist if x.get("enabled")] +                       [x for x in self.current_worklist if not x.get("enabled")]
             pkg_order = [x["package_name"] for x in ordered]
@@ -170,6 +172,7 @@ class _TableDataMixin:
                 rows_by_pkg[pn] = cells[1:]
             tbl._renumber_order()
         finally:
+            tbl.blockSignals(signals_blocked)
             tbl.setUpdatesEnabled(True)
 
     def _take_row_from(self, tbl, r):
@@ -621,7 +624,10 @@ class _TableDataMixin:
             if isinstance(raw, dict):
                 pref = str(raw.get("backup_before_profile_save", "prompt"))
                 if pref in ("always", "prompt", "never"):
-                    return {"backup_before_profile_save": pref}
+                    # Preserve one-shot flags used by update notifications.
+                    result = dict(raw)
+                    result["backup_before_profile_save"] = pref
+                    return result
             return default
         except Exception:
             return default
@@ -700,13 +706,28 @@ class _TableDataMixin:
             self, _("dlg.save_confirm_title"),
             _("dlg.save_confirm_msg", prof=self.current_profile.profile_id[:16], n=len(new_active)) + dirty_note)
         if ret != QMessageBox.Yes: return
+        progress = QDialog(self)
+        progress.setWindowTitle("正在保存 Mod 配置")
+        progress.setModal(True)
+        progress.setFixedSize(380, 150)
+        pl = QVBoxLayout(progress)
+        label = QLabel("正在准备写入 profile…")
+        bar = QProgressBar(); bar.setRange(0, 100); bar.setValue(10)
+        pl.addWidget(label); pl.addWidget(bar)
+        self.setEnabled(False)
+        progress.show(); QApplication.processEvents()
         try:
+            label.setText("正在写入 profile…"); bar.setValue(45); QApplication.processEvents()
             wrote = self.profile_svc.set_active_mods(self.current_profile, new_active)
+            label.setText("正在刷新界面…"); bar.setValue(90); QApplication.processEvents()
             try: self._clear_priority_dirty()
             except Exception: pass
+            bar.setValue(100); label.setText("保存完成"); QApplication.processEvents()
+            progress.close(); progress.deleteLater(); self.setEnabled(True)
             QMessageBox.information(self, _("dlg.save_ok_title"), _("dlg.save_ok_msg", wrote=wrote))
             self.statusBar().showMessage(_("ui.sb_saved", n=len(new_active)))
         except Exception as e:
+            progress.close(); progress.deleteLater(); self.setEnabled(True)
             QMessageBox.critical(self, _("dlg.save_fail_title"), _("dlg.save_fail_msg", e=f"{e!r}"))
 
     def _do_backup_now(self):

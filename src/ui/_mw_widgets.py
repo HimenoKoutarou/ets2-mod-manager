@@ -268,7 +268,8 @@ class SplashScreen(QWidget):
 
         self._log_text = QTextEdit()
         self._log_text.setReadOnly(True)
-        self._log_text.setMaximumHeight(120)
+        self._log_text.setMinimumHeight(150)
+        self._log_text.setMaximumHeight(180)
         self._log_text.setStyleSheet("""
             QTextEdit {
                 background: transparent;
@@ -338,15 +339,16 @@ class SplashScreen(QWidget):
         }
         color = color_map.get(level, "#a6adc8")
         html = f'<span style="color:{color};">{message}</span>'
+        sb = self._log_text.verticalScrollBar()
+        follow_tail = sb.value() >= sb.maximum() - 2
         self._log_text.append(html)
         from PySide6.QtGui import QTextCursor
         cursor = self._log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self._log_text.setTextCursor(cursor)
         # 自动滚动到底部显示最新日志
-        self._log_text.verticalScrollBar().setValue(
-            self._log_text.verticalScrollBar().maximum()
-        )
+        if follow_tail:
+            sb.setValue(sb.maximum())
 
     def _step_index(self, phase: str) -> int:
         mapping = {
