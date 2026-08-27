@@ -51,21 +51,36 @@ class _LangSwitchDialog(QDialog):
 class SplashScreen(QWidget):
     """专业启动加载屏：显示详细扫描进度和当前任务。"""
 
-    STEPS = ["init", "quick_scan", "parse"]
+    STEPS = ["init", "paths", "quick_scan", "parse", "enrich", "done"]
     STEP_LABELS = {
-        "init": "初始化",
+        "init":     "初始化引擎",
+        "paths":    "检测文档与配置",
         "quick_scan": "快速扫描模组",
-        "parse": "解析加密模组包",
+        "parse":    "解析加密模组包",
+        "enrich":   "填充存档信息",
+        "done":     "准备进入主界面",
+    }
+    # 每个阶段的进度权重（合计 100）——像安装程序那样阶段推进有意义，不一直 busy.
+    PHASE_WEIGHTS = {
+        "init":       8,
+        "paths":      7,
+        "quick_scan": 35,
+        "parse":      38,
+        "enrich":     10,
+        "done":       2,
     }
 
     def __init__(self, logo_path: str = "", parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFixedSize(520, 580)
+        self.setFixedSize(560, 620)   # installer splash 稍微大一圈，容纳阶段提示更宽松
         self._first_scan = False
         self._current_step = 0
         self._progress_percent = 0
+        self._cumulative_pct = 0            # installer 累计权重
+        self._phases_started: "set[str]" = set()
+        self._installer_mode = False         # True → 关 splash 前 MainWindow 仍隐藏
 
         # --- 现代深色主题样式 ---
         self.setStyleSheet("""
@@ -320,6 +335,117 @@ class SplashScreen(QWidget):
                 return idx
         return self._current_step
 
+    def show_installer_splash(self, center_on_primary: bool = True):
+        """安装式启动：有焦点 + 在其他应用之上但仅 app-local（不跨进程 always-on-top
+        那样去挡用户浏览器）。Splash 自己居中到主屏幕。
+
+        设计选择：不使用 WindowStaysOnTopHint（跨进程置顶，会挡用户在启动时打开的
+        资源管理器 / 浏览器）。改为：先 show → raise_ → activateWindow 一次。因为
+        此时 MainWindow 还没 show，Splash 就是用户唯一点到的窗口，体验像安装程序。
+        """
+        self._installer_mode = True
+        screen = QApplication.primaryScreen()
+        if screen and center_on_primary:
+            geo = screen.availableGeometry()
+            x = geo.center().x() - self.width() // 2
+            y = geo.center().y() - self.height() // 2
+            self.move(x, y)
+        # show → activate （首次启动有明确焦点，安装进度那种感觉）
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        QApplication.processEvents()
+        # Initial: mark init phase
+        self.mark_phase_start("init", "读取语言/主题缓存…")
+
+    def mark_phase_start(self, phase_key: str, first_detail: str = ""):
+        """进入新阶段：把上一阶段剩余权重一次性填满；新阶段从 0 开始 busy/detailed。"""
+        if phase_key in self._phases_started:
+            return
+        prev_steps = [s for s in self.STEPS if s not in self._phases_started and s != phase_key
+                      and self.STEPS.index(s) < self.STEPS.index(phase_key)]
+        for s in prev_steps:
+            if s not in self._phases_started:
+                self._cumulative_pct += int(self.PHASE_WEIGHTS.get(s, 0))
+                self._phases_started.add(s)
+        self._phases_started.add(phase_key)
+        phase_label = self.STEP_LABELS.get(phase_key, phase_key)
+        self._current_step = self.STEPS.index(phase_key) if phase_key in self.STEPS else 0
+        self._step_label.setText(phase_label)
+        self._step_counter.setText(f"阶段 {min(self._current_step + 1, len(self.STEPS))}/{len(self.STEPS)}")
+        self._log(f"[{phase_label}] 开始…", "info")
+        self._progress.setRange(0, 100)
+        self._progress.setValue(min(self._cumulative_pct, 100))
+        self._percent_label.setText(f"{min(self._cumulative_pct, 100)}%")
+        if first_detail:
+            self._detail_label.setText(first_detail[:60] + ("…" if len(first_detail) > 60 else ""))
+        QApplication.processEvents()
+
+    def mark_phase_complete(self, phase_key: str):
+        """阶段完成：把 PHASE_WEIGHTS 全部累加进去（busy 阶段用这个比较稳）。"""
+        if phase_key in self._phases_started:
+            return
+        self._phases_started.add(phase_key)
+        weight = int(self.PHASE_WEIGHTS.get(phase_key, 0))
+        self._cumulative_pct = min(self._cumulative_pct + weight, 100)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(self._cumulative_pct)
+        self._percent_label.setText(f"{self._cumulative_pct}%")
+        name = self.STEP_LABELS.get(phase_key, phase_key)
+        self._log(f"[{name}] 完成", "success")
+
+    def set_phase_progress_ratio(self, phase_key: str, cur: int, total: int):
+        """可量化阶段（parse/enrich）：按 cur/total 分数推进 phase 内部分量。"""
+        if phase_key not in self._phases_started:
+            self.mark_phase_start(phase_key)
+        weight = int(self.PHASE_WEIGHTS.get(phase_key, 0))
+        phase_fraction = cur / max(total, 1)
+        # 算出在 phase_key 之前已经累计的权重总和（不含自己）
+        prior_total = 0
+        for s in self.STEPS:
+            if s == phase_key: break
+            prior_total += int(self.PHASE_WEIGHTS.get(s, 0))
+        target = min(prior_total + int(weight * phase_fraction), 100)
+        if target > self._cumulative_pct:
+            self._cumulative_pct = target
+            self._progress.setRange(0, 100)
+            self._progress.setValue(target)
+            self._percent_label.setText(f"{target}%")
+
+    def close_installer_splash(self, then_show_main=None):
+        """100% → log → 小延迟让用户看到完成 → close → （可选）show MainWindow。"""
+        try:
+            for s in self.STEPS:
+                self.mark_phase_complete(s)
+            self._progress.setRange(0, 100)
+            self._progress.setValue(100)
+            self._percent_label.setText("100%")
+            self._log("初始化完成，进入主界面…", "success")
+            self._detail_label.setText("初始化完成 · 正在进入主界面")
+        except Exception:
+            pass
+        QApplication.processEvents()
+        def _finish():
+            try:
+                if then_show_main is not None:
+                    try: then_show_main.show()
+                    except Exception: pass
+                self.close()
+                self.deleteLater()
+            except Exception:
+                pass
+        QTimer.singleShot(350, _finish)
+
+    def close_splash_early(self, reason: str = ""):
+        if reason:
+            self._log(reason, "error")
+        try:
+            self._detail_label.setText(reason or "已中止")
+        except Exception: pass
+        QApplication.processEvents()
+        QTimer.singleShot(1200, lambda: (self.close(), self.deleteLater() if False else None))
+
+    
     def update_progress(self, phase: str, busy: bool = True, cur: int = 0, total: int = 0, detail: str = ""):
         # 更新步骤
         step_idx = self._step_index(phase)

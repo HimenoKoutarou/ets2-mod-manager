@@ -144,8 +144,11 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage(_("ui.sb_ets2_doc_dir", dir=str(self.paths.documents_dir)))
 
-        # 启动后扫描
-        QTimer.singleShot(50, self._bootstrap)
+        # 启动后扫描：默认仍用 single-shot 50ms（直接 run 源码、不经过 installer main() 时）。
+        # 打包模式下 main() 已经显示 installer splash 并在 60ms 后手动调 _bootstrap：
+        # _bootstrap 自己会检查 self._bootstrap_after_installer_splash 决定最终 show 时机。
+        if not getattr(self, "_bootstrap_after_installer_splash", False):
+            QTimer.singleShot(50, self._bootstrap)
 
         # 语言切换通知 → 刷新 UI（已在 _do_switch_language 中处理，保留用于外部触发）
         try:
@@ -172,10 +175,40 @@ def main():
     ThemeManager.instance().apply(app)
     # App 级图标
     icon_path = Path(__file__).resolve().parent.parent / "assets" / "app_icon.png"
+    logo_path = Path(__file__).resolve().parent.parent / "assets" / "logo.png"
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
+
+    # -----------------------------------------------------------------------
+    # 安装式启动：先展示 Splash（居中 + 有焦点 + 像安装进度条那样真的会动），
+    # 等 bootstrap 把所有阶段跑完再 MainWindow.show()。用户不会先看到一个灰禁用
+    # 空壳主窗口 + 一张被动小浮层；而是直接面对 "正在初始化 / 正在扫描 / 已完成"
+    # 的连续进度条。MainWindow 在后台建 UI 但保持 setVisible(False)。
+    # -----------------------------------------------------------------------
+    splash = SplashScreen(str(logo_path) if logo_path.exists() else "")
+    splash.show_installer_splash(center_on_primary=True)
+
     w = MainWindow()
-    w.show()
+    # 将 splash 句柄交给 MainWindow._bootstrap / finalize 使用；
+    # 如果 MainWindow 已经有 self._splash（_show_splash 会复用），那么先塞进去
+    # 可以让 _show_splash 不重复 new 一份，而是复用我们 installer splash。
+    w._splash = splash
+    # 注意：此处 NOT w.show()。必须等 _finalize_bootstrap 调 splash done 再 show。
+    w._bootstrap_after_installer_splash = True
+
+    def _bootstrap_and_show():
+        try:
+            w._bootstrap()
+        except Exception:
+            # 致命错误：还是 show 主窗让用户看 error bar + trace
+            try:
+                splash.close_splash_early("启动过程出现未处理异常")
+            except Exception:
+                pass
+            w.show()
+            raise
+
+    QTimer.singleShot(60, _bootstrap_and_show)
     sys.exit(app.exec())
 
 

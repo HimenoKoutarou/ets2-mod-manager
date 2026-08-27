@@ -530,28 +530,78 @@ class _SignalMixin:
         dlg.exec()
 
     def _finalize_bootstrap(self):
-        """统一收尾：停止UI刷新计时器、关闭Splash、恢复主窗口。"""
+        """统一收尾：停止UI刷新计时器、关闭Splash、恢复主窗口。
+
+        installer 模式：splash 先跑 100% + '初始化完成' → 350ms 后 MainWindow.show()。
+        普通源码模式：保持旧行为。
+        """
         self._stop_ui_refresh_timer()
-        self._close_splash()
-        self.setEnabled(True)
+        installer = getattr(self, "_bootstrap_after_installer_splash", False)
+        if installer and self._splash is not None:
+            try:
+                self._splash.mark_phase_complete("enrich")
+            except Exception:
+                pass
+            try:
+                self._splash.mark_phase_complete("done")
+            except Exception:
+                pass
+            self.setEnabled(True)
+            # 让 splash 播放 100% 完成提示后再 show main window
+            try:
+                self._splash.close_installer_splash(then_show_main=self)
+            except Exception:
+                self._close_splash()
+                self.show()
+            # 主窗口 show 完成之后，再在 ~800ms 之后（不再 race splash）调更新内容弹窗
+            def _after_entry_updates():
+                try: self._async_check_update()
+                except Exception: pass
+                try: self._show_update_notes_if_needed()
+                except Exception: pass
+            QTimer.singleShot(900, _after_entry_updates)
+        else:
+            self._close_splash()
+            self.setEnabled(True)
+            # 原逻辑：_async_check_update / notes 由 bootstrap 顶部的 singleshot 处理
 
     def _bootstrap(self):
         self._show_splash()
         self.setEnabled(False)
         self._start_ui_refresh_timer()
+        installer = getattr(self, "_bootstrap_after_installer_splash", False)
+        # --- installer 阶段 2：paths + link status ---
+        if installer and self._splash is not None:
+            try:
+                doc_dir = str(getattr(self.paths, "documents_dir", ""))
+                self._splash.mark_phase_start("paths", doc_dir or "检测 ETS2 文档目录")
+            except Exception: pass
         self._update_link_status()
-        # 异步检查更新（不阻塞UI）
-        QTimer.singleShot(1000, self._async_check_update)
-        # 版本更新后首次启动：弹窗告知新版本特性
-        QTimer.singleShot(1500, self._show_update_notes_if_needed)
+        # --- installer 阶段 3：扫描（quick_scan 权重 35%，由 worker 信号继续推进）---
+        if installer and self._splash is not None:
+            try:
+                self._splash.mark_phase_start("quick_scan", "读取模组目录签名…")
+            except Exception: pass
+        # 注意：installer 模式下 async check_update / 新版本 notes 不在此处打 singleshot，
+        # 统一移到 _finalize_bootstrap 末尾（splash 关完 main 显示之后），避免在 splash
+        # 还在上层时被模态更新内容对话框遮住进度条的 race。
+        if not installer:
+            # 异步检查更新（不阻塞UI）
+            QTimer.singleShot(1000, self._async_check_update)
+            # 版本更新后首次启动：弹窗告知新版本特性
+            QTimer.singleShot(1500, self._show_update_notes_if_needed)
         try:
             restored = self._scan_all_mods()
-            if not restored:
+            if not restored and self._splash is not None:
                 self._splash.set_first_scan(True)
         except Exception:
             self._finalize_bootstrap()
             raise
         finally:
+            if installer and self._splash is not None:
+                try:
+                    self._splash.mark_phase_start("enrich", "读取 profile 列表…")
+                except Exception: pass
             self._load_profiles()
         # 如果是缓存恢复（同步完成），此处直接收尾
         if restored:
@@ -574,7 +624,13 @@ class _SignalMixin:
             self._ui_refresh_timer.stop()
 
     def _show_splash(self):
+        # installer 模式：main() 已经 new + show_installer_splash()，
+        # 直接复用同一实例，不要再 new 一个（避免双 splash）。
         if self._splash is not None:
+            # 已在 installer 模式下显示过的 splash：保证阶段提示至少打一次路径检测
+            try:
+                QApplication.processEvents()
+            except Exception: pass
             return
         self._splash = SplashScreen(self._logo_path)
         screen = QApplication.primaryScreen()
@@ -624,6 +680,12 @@ class _SignalMixin:
     # ---------- 扫描：顶部主进度条控制 + 取消处理 ----------
     def _on_quick_scan_result(self, mods_list: list, new_ids: list):
         """快速扫描完成：填 all_mods → 刷新表格 → 立即保存会话 → 新模组弹窗 → 启动异步解析 + Steam 查询"""
+        # installer splash: quick_scan 阶段完成 → parse 阶段启动
+        if getattr(self, "_bootstrap_after_installer_splash", False) and self._splash is not None:
+            try:
+                self._splash.mark_phase_complete("quick_scan")
+                self._splash.mark_phase_start("parse", f"{len(mods_list)} 个模组待解析")
+            except Exception: pass
         self.all_mods = list(mods_list)
         self.all_mods_by_pkg = self._build_mod_index(self.all_mods)
         self._all_mods_by_id = {m.mod_id: m for m in self.all_mods}
@@ -700,6 +762,10 @@ class _SignalMixin:
     def _on_async_parse_progress(self, i: int, total: int, mod_id: str) -> None:
         if self._async_parse_progress is not None:
             self._async_parse_progress.setValue(i)
+        # installer splash parse 分量推进
+        if getattr(self, "_bootstrap_after_installer_splash", False) and self._splash is not None:
+            try: self._splash.set_phase_progress_ratio("parse", int(i), int(total))
+            except Exception: pass
         self.statusBar().showMessage(f"解析加密包 {i}/{total} - {mod_id}")
         # 同步顶部主进度条
         self._show_scan_progress(_("ui.sp_phase_parse"), busy=False, cur=i, total=total, fmt="%v / %m", detail=mod_id)
@@ -744,6 +810,9 @@ class _SignalMixin:
 
     def _on_async_parse_finished(self) -> None:
         """全部加密包解析完成"""
+        if getattr(self, "_bootstrap_after_installer_splash", False) and self._splash is not None:
+            try: self._splash.mark_phase_complete("parse")
+            except Exception: pass
         self._finalize_bootstrap()
         # 移除顶部主进度条
         self._hide_scan_progress()

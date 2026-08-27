@@ -185,6 +185,41 @@ def _save_cache() -> None:
             pass
 
 
+
+def _sp_run(cmd_args, /, *, capture_output=True, timeout=None, input=None, env=None, cwd=None,
+            shell=False, stdout=None, stderr=None):
+    """Hardened subprocess runner: on Windows always suppresses console window creation.
+
+    Rationale: PyInstaller console=False + subprocess.run([...console-mode binary...])
+    without CREATE_NO_WINDOW briefly allocates a per-child console -> black cmd flash.
+    Even if a future contributor adds new extractor calls and forgets per-call flags,
+    routing via this helper guarantees popups remain eliminated. Matches the flags used
+    in commit c29f330 at all 6 manual call sites.
+    """
+    kwargs: dict = {}
+    if _SP_HIDE:
+        kwargs["creationflags"] = _SP_HIDE
+    if _SP_STARTUPINFO is not None:
+        kwargs["startupinfo"] = _SP_STARTUPINFO
+    if capture_output is not None:
+        kwargs["capture_output"] = capture_output
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if input is not None:
+        kwargs["input"] = input
+    if env is not None:
+        kwargs["env"] = env
+    if cwd is not None:
+        kwargs["cwd"] = cwd
+    if shell:
+        kwargs["shell"] = True
+    if stdout is not None:
+        kwargs["stdout"] = stdout
+    if stderr is not None:
+        kwargs["stderr"] = stderr
+    return subprocess.run(list(cmd_args), **kwargs)
+
+
 def _run_extractor(scs_path: Path, dest: Path, partial: str = "/manifest.sii") -> bool:
     """用 extractor.exe 提取 SCS# 包内指定路径的文件。partial 用 / 开头的绝对路径。"""
     if not _EXTRACTOR.exists():
