@@ -577,12 +577,38 @@ class ThemeManager(QObject):
         return get_effective_theme(self._mode)
 
     def apply(self, app, mode: str = None):
-        """应用主题到 QApplication。mode=None 时用当前保存的 mode。"""
+        """应用主题到 QApplication。mode=None 时用当前保存的 mode。
+
+        Bug B 修复：setStyleSheet 前强制给 app 一个合法 pointSize 的默认字体。
+        Windows 上部分配置（含高 DPI、字体缩放）下 QApplication.font().pointSize() == -1
+        （走 pixelSize 模式），后续对 QTableWidgetItem 调用 setFont() 会触发
+        QFont::setPointSize(-1) 警告；在极快连续重排（如 missing mod toggle 的
+        递归场景）期间会导致界面死锁。"""
         if mode is not None:
             self._mode = mode
             self._save()
         qss = get_theme_qss(self._mode)
-        app.setStyleSheet(qss)
+        if app is not None:
+            try:
+                f = app.font()
+                ps = f.pointSize()
+                px = f.pixelSize()
+                if ps <= 0:
+                    # pointSize<=0 表示当前用 pixelSize 驱动；如果 pixelSize 也没给，就兜底
+                    if px > 0:
+                        est = max(9, round(px * 3.0 / 4))
+                        f.setPointSize(est)
+                    else:
+                        f.setPointSize(10)
+                # 最终 clamp，保证没有任何路径能带着 <=0 的 pointSize 赋值给 app
+                if f.pointSize() <= 0:
+                    f.setPointSize(10)
+                app.setFont(f)
+            except Exception:
+                pass
+            app.setStyleSheet(qss)
+        else:
+            app.setStyleSheet(qss)
         self.themeChanged.emit(self.effective_theme)
 
     def _load(self):

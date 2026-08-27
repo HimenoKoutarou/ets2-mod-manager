@@ -46,7 +46,21 @@ _test_*.py
 _dbg*.py
 _dump_*.py
 _*.txt
+# Generic underscore-prefixed Python scripts (matches bare top-level scripts like _foo.py)
 _*.py
+# Exclude production underscore-prefixed source files in the project tree from the rule above
+!src/ui/_*.py
+!src/ui/_mw_mixins/
+!src/ui/_mw_mixins/*.py
+!src/core/_*.py
+!src/services/_*.py
+!src/utils/_*.py
+!src/__init__.py
+!src/__main__.py
+!src/core/__init__.py
+!src/services/__init__.py
+!src/ui/__init__.py
+!src/utils/__init__.py
 
 # User config / runtime preferences
 config/

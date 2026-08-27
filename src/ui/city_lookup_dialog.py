@@ -287,8 +287,20 @@ class CityLookupDialog(QDialog):
         # ---- R7 opt: 批量填充期间禁用重绘，500 行场景减少布局抖动 ----
         self.tbl.setUpdatesEnabled(False)
         # 循环内重复构造的字体/颜色提到外部
-        from PySide6.QtGui import QFont as _QFont_R7, QColor as _QColor_R7
-        _bold_font = _QFont_R7(); _bold_font.setBold(True)
+        from PySide6.QtGui import QFont as _QFont_R7, QColor as _QColor_R7, QGuiApplication as _QGApp_R7
+        # Bug B 修复：默认 QFont() 在 Windows 高 DPI/部分字体配置下 pointSize == -1
+        # （默认走 pixelSize 逻辑），后续 setFont() 到表格 item 时触发
+        # QFont::setPointSize(-1) 警告甚至卡死。显式 clamp 到合法 pt。
+        _bold_font = _QGApp_R7.font()
+        try:
+            _ps = _bold_font.pointSize()
+            if _ps <= 0:
+                # pixelSize 模式：估一个等价值并显式转 pointSize
+                _px = _bold_font.pixelSize()
+                _bold_font.setPointSize(max(10, _px if _px > 0 else 10))
+        except Exception:
+            _bold_font.setPointSize(10)
+        _bold_font.setBold(True)
         _green = _QColor_R7("#1a7f37")
         _amber = _QColor_R7("#9a6700")
         try:
