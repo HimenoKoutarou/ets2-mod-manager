@@ -149,6 +149,7 @@ class _AsyncParseWorker(QThread):
         from core.mod_scanner import _build_mod_from_package, _enrich_nested_fallback
         from core.sii_parser import parse_mods_info
         from pathlib import Path as _P
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         # 复用已加载的 mi_index（避免重复读 mods_info.sii）
         mi_index = self._mi_index
         if not mi_index:
@@ -158,10 +159,8 @@ class _AsyncParseWorker(QThread):
             except Exception:
                 pass
         total = len(self._pending)
-        for i, m in enumerate(self._pending):
-            if self._stop:
-                break
-            # 逐个解析（从磁盘缓存走，避免重复解包）
+
+        def _parse_one(m):
             try:
                 pp = _P(m.package_path)
                 if pp.is_dir():
@@ -200,10 +199,29 @@ class _AsyncParseWorker(QThread):
                     m.icon = parsed.icon
                 if parsed.description and not m.description:
                     m.description = parsed.description
-                self.one_parsed.emit(m.mod_id)
             except Exception:
-                pass
-            self.progress.emit(i + 1, total, m.mod_id)
+                return m.mod_id
+            return m.mod_id
+
+        # Mod 包之间互不依赖；用少量工作线程并发读取，避免 500+ 个包
+        # 在单线程中串行打开。线程数受控，降低机械盘/杀毒软件争用。
+        workers = min(4, max(1, total))
+        completed = 0
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mod-meta") as pool:
+            futures = [pool.submit(_parse_one, m) for m in self._pending]
+            for fut in as_completed(futures):
+                if self._stop:
+                    for pending in futures:
+                        pending.cancel()
+                    break
+                try:
+                    mod_id = fut.result()
+                except Exception:
+                    mod_id = ""
+                completed += 1
+                if mod_id:
+                    self.one_parsed.emit(mod_id)
+                self.progress.emit(completed, total, mod_id)
 
 
 class _WorkshopFetchWorker(QThread):

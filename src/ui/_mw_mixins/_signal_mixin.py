@@ -762,9 +762,8 @@ class _SignalMixin:
                     self._splash.mark_phase_start("enrich", "读取 profile 列表…")
                 except Exception: pass
             self._load_profiles()
-        # 缓存恢复本身已经足够构建主界面；加密包补全在后台继续，
-        # 不要让几百个 Mod 的图标/描述解析阻塞用户进入主界面。
-        if restored:
+        # 初始化必须等待读取/补全完成后再进入主界面。
+        if restored and not getattr(self, "_async_parse_started", False):
             self._finalize_bootstrap()
 
     def _on_ui_refresh_timer(self):
@@ -912,8 +911,7 @@ class _SignalMixin:
             not m.manifest.display_name or not m.description
             for m in self.all_mods
         )
-        # 快速扫描完成即可进入主界面；manifest/icon/description 在后台补全。
-        if not getattr(self, "_async_parse_started", False):
+        if not need_parse and not getattr(self, "_async_parse_started", False):
             self._finalize_bootstrap()
 
     def _on_quick_scan_failed(self, err_msg: str):
