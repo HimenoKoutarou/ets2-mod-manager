@@ -217,6 +217,16 @@ def rewrite_active_mods_in_text(plain_text: str, new_mods: List[str]) -> str:
 
     # 2) 覆盖 / 插入 / 清空条目
     n_old, n_new = len(entry_positions), len(new_mods)
+    # 原 profile 没有任何 active_mods[] 条目时，不能访问 entry_positions[-1]。
+    # 将首条插入长度头之后；若连长度头也没有，则插入第一个 unit 的结束括号前。
+    if n_old == 0 and n_new > 0:
+        if len_position is not None:
+            insert_at = len_position + 1
+        else:
+            insert_at = next((i for i, ln in enumerate(result) if ln.strip() == "}"), len(result))
+        for j, value in enumerate(new_mods):
+            result.insert(insert_at + j, template.format(j, _escape_quote(value)))
+        return "\n".join(result)
     # 先处理 0..max-1 范围
     for j in range(max(n_old, n_new)):
         if j < n_old and j < n_new:
