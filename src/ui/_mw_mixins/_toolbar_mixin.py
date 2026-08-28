@@ -639,6 +639,16 @@ class _ToolbarMixin:
                     m.manifest.description_filename = md["description_filename"]
                 if md.get("description"):
                     m.description = md["description"]
+                # 直接恢复已下载的 Workshop 预览图，避免每次启动重新等待图片线程。
+                if m.package_type == "workshop":
+                    try:
+                        from services.steam_workshop_service import get_cached_preview_bytes
+                        from core.models import ModIcon
+                        cached_icon = get_cached_preview_bytes(m.mod_id)
+                        if cached_icon:
+                            m.icon = ModIcon(raw_bytes=cached_icon, format="jpg", source_path="workshop-cache")
+                    except Exception:
+                        pass
                 # Do not synchronously reopen every archive here. Preview bytes
                 # are restored by the async parser after the cache is loaded;
                 # keeping startup metadata-only makes the splash responsive.
@@ -706,7 +716,7 @@ class _ToolbarMixin:
         # 如果所有 mod 都已有 display_name，跳过异步解析（真正从缓存秒开）
         need_parse = any(
             not m.manifest.display_name or not m.description
-            or not m.manifest.compatible_versions or not m.icon.is_available
+            or (m.package_type != "workshop" and (not m.manifest.compatible_versions or not m.icon.is_available))
             for m in mods
         )
         if need_parse:
@@ -729,7 +739,9 @@ class _ToolbarMixin:
         pending = []
         for m in self.all_mods:
             # 三个关键字段都齐全才跳过；任一缺失都送入解析队列
-            if m.manifest.display_name and m.description:
+            if m.manifest.display_name and m.description and (
+                m.package_type == "workshop" or (m.manifest.compatible_versions and m.icon.is_available)
+            ):
                 continue
             pp = _P(m.package_path)
             need = False

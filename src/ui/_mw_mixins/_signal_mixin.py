@@ -909,6 +909,7 @@ class _SignalMixin:
         QTimer.singleShot(500, self._fetch_workshop_titles_async)
         need_parse = any(
             not m.manifest.display_name or not m.description
+            or (m.package_type != "workshop" and (not m.manifest.compatible_versions or not m.icon.is_available))
             for m in self.all_mods
         )
         if not need_parse and not getattr(self, "_async_parse_started", False):
