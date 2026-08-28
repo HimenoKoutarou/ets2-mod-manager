@@ -892,6 +892,7 @@ class _SignalMixin:
                 {},
                 mods_snapshot=snap,
                 dir_signatures=sigs,
+                metadata_ready=False,
             )
         except Exception:
             pass
@@ -1022,6 +1023,7 @@ class _SignalMixin:
                     "workshop_dir": _dir_signature(self.paths.workshop_content_dir),
                     "mods_info_path": _dir_signature(self.paths.mods_info_path),
                 },
+                metadata_ready=True,
             )
         except Exception:
             pass

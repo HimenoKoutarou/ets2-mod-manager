@@ -86,7 +86,7 @@ def _sig_equal(a: dict, b: dict) -> bool:
 
 _LOCK = threading.Lock()
 _CACHE: Optional[dict] = None
-FAST_RESTORE_WINDOW_SECONDS = 5 * 60
+FAST_RESTORE_WINDOW_SECONDS = 2 * 60 * 60
 
 
 def _base_dir() -> Path:
@@ -108,18 +108,24 @@ def save_session_state(
     profiles_state: Dict[str, Dict],
     mods_snapshot: Optional[List[dict]] = None,
     dir_signatures: Optional[Dict[str, dict]] = None,
+    metadata_ready: Optional[bool] = None,
 ) -> None:
     """退出时调用：保存当前会话状态 + 可选快速扫描快照（避免启动重扫）。"""
     global _CACHE
+    # 关闭窗口时通常只更新 profile 状态；必须保留此前完整扫描得到的
+    # 模组快照，否则下一次启动会无端退化成完整初始化。
+    previous = load_last_session() or {}
     data = {
-        "scan_time": datetime.now().isoformat(),
+        "scan_time": datetime.now().isoformat() if mods_snapshot is not None else previous.get("scan_time", datetime.now().isoformat()),
         "all_mod_ids": list(all_mod_ids),
         "profiles": profiles_state,
     }
-    if mods_snapshot is not None:
-        data["mods_snapshot"] = mods_snapshot
-    if dir_signatures is not None:
-        data["dir_signatures"] = dir_signatures
+    if mods_snapshot is not None or previous.get("mods_snapshot"):
+        data["mods_snapshot"] = mods_snapshot if mods_snapshot is not None else previous.get("mods_snapshot")
+    if dir_signatures is not None or previous.get("dir_signatures"):
+        data["dir_signatures"] = dir_signatures if dir_signatures is not None else previous.get("dir_signatures")
+    if metadata_ready is not None or "metadata_ready" in previous:
+        data["metadata_ready"] = bool(metadata_ready) if metadata_ready is not None else bool(previous.get("metadata_ready"))
     sp = _session_path()
     try:
         tmp = sp.with_suffix(".tmp")
@@ -203,7 +209,7 @@ def load_scan_snapshot(
             "workshop_dir": str(workshop_dir) if workshop_dir else "",
             "mods_info_path": str(mods_info_path) if mods_info_path else "",
         }
-        if all(str((saved_sigs.get(k) or {}).get("path", "")) == v for k, v in expected.items()):
+        if all(str((saved_sigs.get(k) or {}).get("path", "")) == v for k, v in expected.items()) and _snapshot_entries_unchanged(snap):
             return snap
     saved_sigs = data.get("dir_signatures") or {}
     if not saved_sigs:
@@ -223,6 +229,22 @@ def load_scan_snapshot(
         if not isinstance(m, dict) or not req_keys.issubset(m.keys()):
             return None
     return snap
+
+
+def _snapshot_entries_unchanged(snap: List[dict]) -> bool:
+    """快速逐条 stat 校验：不读压缩包内容，只确认已缓存的包没有被替换。"""
+    for item in snap:
+        try:
+            path = Path(str(item.get("package_path") or ""))
+            st = path.stat()
+            old_mtime = float(item.get("last_modified") or 0.0)
+            if abs(st.st_mtime - old_mtime) > 0.001:
+                return False
+            if path.is_file() and int(st.st_size) != int(item.get("file_size") or 0):
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def is_recent_scan_snapshot(data: Optional[dict] = None) -> bool:

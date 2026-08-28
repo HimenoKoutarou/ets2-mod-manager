@@ -593,6 +593,9 @@ class _ToolbarMixin:
             pass
         session_data = load_last_session()
         fast_restore = is_recent_scan_snapshot(session_data)
+        # 兼容旧版本没有 metadata_ready 字段的快照：短时内视为已完成，
+        # 避免升级后第一次启动又把全部 Mod 重解析一遍。
+        metadata_ready = bool((session_data or {}).get("metadata_ready", fast_restore))
         snap = load_scan_snapshot(
             self.paths.mod_dir,
             self.paths.workshop_content_dir,
@@ -716,7 +719,7 @@ class _ToolbarMixin:
             _("ui.sb_from_cache", n=len(mods), size=f"{total_size:.1f}")
         )
         # 如果所有 mod 都已有 display_name，跳过异步解析（真正从缓存秒开）
-        need_parse = (not fast_restore) and any(
+        need_parse = (not metadata_ready) and any(
             not m.manifest.display_name or not m.description
             or (m.package_type != "workshop" and (not m.manifest.compatible_versions or not m.icon.is_available))
             for m in mods
@@ -725,7 +728,7 @@ class _ToolbarMixin:
             self._start_async_parse()
         try:
             from PySide6.QtCore import QTimer
-            if not fast_restore:
+            if not metadata_ready:
                 QTimer.singleShot(500, self._fetch_workshop_titles_async)
         except Exception:
             pass
