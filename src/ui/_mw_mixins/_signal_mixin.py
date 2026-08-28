@@ -627,6 +627,11 @@ class _SignalMixin:
         installer 模式：splash 先跑 100% + '初始化完成' → 350ms 后 MainWindow.show()。
         普通源码模式：保持旧行为。
         """
+        # 扫描线程和后台元数据线程都可能触发收尾；只允许首次调用负责
+        # 关闭 splash / 恢复窗口，避免重复 show、重复弹窗或状态竞态。
+        if getattr(self, "_bootstrap_finalized", False):
+            return
+        self._bootstrap_finalized = True
         self._stop_ui_refresh_timer()
         installer = getattr(self, "_bootstrap_after_installer_splash", False)
         if installer and self._splash is not None:
@@ -757,11 +762,9 @@ class _SignalMixin:
                     self._splash.mark_phase_start("enrich", "读取 profile 列表…")
                 except Exception: pass
             self._load_profiles()
-        # 如果是缓存恢复（同步完成），此处直接收尾
-        # Cached startup also launches the parse/decrypt worker. Keep the
-        # splash/main transition pending until that worker has finished so no
-        # extractor process runs after the main window is usable.
-        if restored and not getattr(self, "_async_parse_started", False):
+        # 缓存恢复本身已经足够构建主界面；加密包补全在后台继续，
+        # 不要让几百个 Mod 的图标/描述解析阻塞用户进入主界面。
+        if restored:
             self._finalize_bootstrap()
 
     def _on_ui_refresh_timer(self):
@@ -909,7 +912,8 @@ class _SignalMixin:
             not m.manifest.display_name or not m.description
             for m in self.all_mods
         )
-        if not need_parse and not getattr(self, "_async_parse_started", False):
+        # 快速扫描完成即可进入主界面；manifest/icon/description 在后台补全。
+        if not getattr(self, "_async_parse_started", False):
             self._finalize_bootstrap()
 
     def _on_quick_scan_failed(self, err_msg: str):
