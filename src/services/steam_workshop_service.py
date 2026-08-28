@@ -30,6 +30,7 @@ _lock = threading.Lock()
 _cache: Optional[Dict[str, Dict]] = None   # {workshop_id: {"title": str, "ts": int}}
 _cache_dirty: bool = False
 _opener: Optional[object] = None
+_PREVIEW_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "cache" / "workshop_previews"
 
 
 def _get_opener():
@@ -191,6 +192,27 @@ def get_cached_preview_url(workshop_id: str) -> Optional[str]:
     entry = _load_cache().get(str(workshop_id)) or {}
     url = str(entry.get("preview_url") or "").strip()
     return url or None
+
+def get_cached_preview_bytes(workshop_id: str) -> Optional[bytes]:
+    if not workshop_id or not str(workshop_id).isdigit():
+        return None
+    for ext in ("jpg", "png", "webp"):
+        fp = _PREVIEW_DIR / f"{workshop_id}.{ext}"
+        try:
+            if fp.exists():
+                data = fp.read_bytes()
+                if data: return data
+        except OSError: pass
+    return None
+
+def save_preview_bytes(workshop_id: str, data: bytes, content_type: str = "") -> None:
+    if not workshop_id or not str(workshop_id).isdigit() or not data:
+        return
+    ext = "png" if "png" in content_type.lower() else ("webp" if "webp" in content_type.lower() else "jpg")
+    try:
+        _PREVIEW_DIR.mkdir(parents=True, exist_ok=True)
+        (_PREVIEW_DIR / f"{workshop_id}.{ext}").write_bytes(data)
+    except OSError: pass
 
 
 def fetch_titles(ids: Iterable[str],

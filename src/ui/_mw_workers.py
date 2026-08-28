@@ -243,7 +243,7 @@ class _WorkshopFetchWorker(QThread):
 
     def run(self):
         try:
-            from services.steam_workshop_service import fetch_and_fill_mods, get_cached_preview_url
+            from services.steam_workshop_service import fetch_and_fill_mods, get_cached_preview_url, get_cached_preview_bytes, save_preview_bytes
             from core.models import ModIcon
             import urllib.request
             fetch_and_fill_mods(self._mods, save_cache=self._save_cache)
@@ -253,6 +253,10 @@ class _WorkshopFetchWorker(QThread):
                     continue
                 if m.icon.is_available:
                     continue
+                cached_bytes = get_cached_preview_bytes(str(getattr(m, "mod_id", "")))
+                if cached_bytes:
+                    m.icon = ModIcon(raw_bytes=cached_bytes, format="jpg", source_path="workshop-cache")
+                    continue
                 url = get_cached_preview_url(str(getattr(m, "mod_id", "")))
                 if not url:
                     continue
@@ -261,7 +265,9 @@ class _WorkshopFetchWorker(QThread):
                     with urllib.request.urlopen(req, timeout=8) as resp:
                         data = resp.read()
                     if data:
-                        ext = ".png" if "png" in (resp.headers.get("Content-Type", "").lower()) else ".jpg"
+                        content_type = resp.headers.get("Content-Type", "")
+                        save_preview_bytes(str(getattr(m, "mod_id", "")), data, content_type)
+                        ext = ".png" if "png" in content_type.lower() else ".jpg"
                         m.icon = ModIcon(raw_bytes=data, format=ext[1:], source_path=url)
                 except Exception:
                     continue

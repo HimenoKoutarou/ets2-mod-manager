@@ -82,6 +82,17 @@ class _DialogMixin:
                 img = QImage.fromData(mod.icon.raw_bytes)
                 if not img.isNull():
                     pix = QPixmap.fromImage(img)
+            # Workshop 页面预览图不一定存在于本地内容目录；优先读取已缓存的
+            # Steam 预览图，避免等待后台标题/图片线程完成后详情仍显示空白。
+            if not pix and mod.package_type == "workshop":
+                try:
+                    from services.steam_workshop_service import get_cached_preview_bytes
+                    cached = get_cached_preview_bytes(str(mod.mod_id))
+                    if cached:
+                        img = QImage.fromData(QByteArray(cached))
+                        if not img.isNull(): pix = QPixmap.fromImage(img)
+                except Exception:
+                    pass
             if not pix:
                 # 尝试 .scs / .zip / 目录内打开（含子 .scs 嵌套兜底）
                 candidates_rdr: List = []
