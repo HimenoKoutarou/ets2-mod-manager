@@ -605,7 +605,10 @@ class ModTable(QTableWidget):
             selected_state = {self._row_enabled(i.row()) for i in selected}
             target_row = self.indexAt(event.position().toPoint()).row()
             if target_row < 0:
-                target_row = self.rowCount() - 1
+                # 已启用页会隐藏禁用行，落在列表底部时不能把底层最后一行
+                # 误当成拖放目标；改取最后一个可见行。
+                visible_rows = [r for r in range(self.rowCount()) if not self.isRowHidden(r)]
+                target_row = visible_rows[-1] if visible_rows else -1
             if len(selected_state) > 1 or (0 <= target_row < self.rowCount() and self._row_enabled(target_row) not in selected_state):
                 event.ignore()
                 return
