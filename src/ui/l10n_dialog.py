@@ -30,10 +30,14 @@ class _ExtractThread(QThread):
         from core.game_data import extract_game_data_for_active_mods
         total = len(self._active_mods)
         self.progress.emit(0, total, "扫描中...")
+        error_text = ""
         try:
             game_data = extract_game_data_for_active_mods(self._active_mods, self._target_locale)
-        except Exception:
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}"
             game_data = GameDataResult()
+        if error_text:
+            game_data._extract_error = error_text
         self.progress.emit(total, total, "")
         self.finished.emit(game_data)
 
@@ -189,6 +193,11 @@ class L10nDialog(QDialog):
         n_co = len(game_data.countries)
         n_f = len(game_data.ferries)
         n_loc = len(game_data.native_locale_dict)
+        extract_error = getattr(game_data, "_extract_error", "")
+        if extract_error:
+            self.status_label.setText(f"提取失败：{extract_error}")
+            QMessageBox.warning(self, "汉化数据提取失败", extract_error)
+            return
         self.status_label.setText(
             f"提取完成: {n_c}个城市, {n_co}个国家, {n_f}个港口"
             + (f", {n_loc}条原生翻译" if n_loc else "")

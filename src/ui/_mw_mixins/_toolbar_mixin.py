@@ -415,16 +415,65 @@ class _ToolbarMixin:
 
         # 构建 (mod_path, display_name) 列表
         mod_list = []
-        for mod_path in active_mods:
-            # 从 all_mods_by_pkg 查找mod信息
-            mod_info = None
-            pkg_name = Path(mod_path).stem
-            if pkg_name in self.all_mods_by_pkg:
-                mod = self.all_mods_by_pkg[pkg_name]
-                mod_info = (str(getattr(mod, 'package_path', mod_path)), getattr(mod, 'display_title', pkg_name))
+        for active_entry in active_mods:
+            # profile.sii may store entries as `package_name|display_name`.
+            # Only the package portion maps to an on-disk .scs file.
+            raw_entry = str(active_entry or "")
+            pkg_name, sep, saved_title = raw_entry.partition("|")
+            pkg_name = pkg_name.strip() if sep else Path(raw_entry).stem
+            display_name = saved_title.strip() if sep else pkg_name
+            if not pkg_name:
+                continue
+            # 复用主界面的多级索引，兼容 package_name、mod_id、Workshop 后缀及 `pkg|title`。
+            mod = None
+            try:
+                mod = self._lookup_mod(pkg_name)
+            except Exception:
+                mod = self.all_mods_by_pkg.get(pkg_name)
+            if mod is None:
+                # 最后按 mod_id / manifest 名称 / 文件名做大小写不敏感匹配，
+                # 兼容旧 profile 与扫描缓存之间的命名差异。
+                needle = pkg_name.casefold()
+                for candidate_mod in (getattr(self, "all_mods", []) or []):
+                    names = {
+                        str(getattr(candidate_mod, "mod_id", "") or ""),
+                        str(getattr(getattr(candidate_mod, "manifest", None), "package_name", "") or "").split("|", 1)[0],
+                        Path(str(getattr(candidate_mod, "package_path", "") or "")).stem,
+                    }
+                    if any(n.casefold() == needle for n in names if n):
+                        mod = candidate_mod
+                        break
+            if mod is not None:
+                package_path = str(getattr(mod, 'package_path', '') or '')
+                if not Path(package_path).exists():
+                    # Workshop 模组可能把实际内容放在扫描器保留的备用路径中。
+                    package_path = str(getattr(mod, '_workshop_path', '') or package_path)
+                mod_info = (
+                    package_path or pkg_name,
+                    getattr(mod, 'display_title', display_name) or display_name,
+                )
             else:
-                mod_info = (str(Path(self.paths.mod_dir) / mod_path) if not Path(mod_path).is_absolute() else mod_path, pkg_name)
-            mod_list.append(mod_info)
+                candidate = Path(pkg_name)
+                if not candidate.is_absolute():
+                    candidate = Path(self.paths.mod_dir) / candidate
+                # Profiles often omit the extension; prefer the real SCS file.
+                if not candidate.exists() and not candidate.suffix:
+                    scs_candidate = candidate.with_suffix(".scs")
+                    if scs_candidate.exists():
+                        candidate = scs_candidate
+                mod_info = (str(candidate), display_name)
+            # 不把不存在的路径交给后台线程，否则异常会被跳过后显示“空汉化管理”。
+            if Path(mod_info[0]).exists():
+                mod_list.append(mod_info)
+
+        if not mod_list:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                _("ui.l10n_title"),
+                "当前启用的 Mod 没有找到可读取的本地文件。请先完成 Mod 扫描后再打开汉化管理。",
+            )
+            return
 
         dialog = L10nDialog(self._l10n_service, self)
         dialog.start_extract(mod_list, self.paths.mod_dir)

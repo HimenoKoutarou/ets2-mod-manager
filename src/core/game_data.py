@@ -355,7 +355,7 @@ def collect_all_def_files(
             fname_norm = fname.replace("\\", "/")
             lower = fname_norm.lower()
             if lower.startswith("def/") and (lower.endswith(".sii") or lower.endswith(".sui")):
-                if fname not in def_files_dict:
+                if fname_norm not in def_files_dict:
                     text = reader.read_text(fname_norm)
                     if text is not None:
                         def_files_dict[fname_norm] = FileWithPriority(
@@ -365,7 +365,7 @@ def collect_all_def_files(
                             priority=priority,
                         )
             else:
-                m = locale_pattern.match(fname)
+                m = locale_pattern.match(fname_norm)
                 if m:
                     lang = m.group(1).lower()
                     if lang not in native_locale_by_lang:
