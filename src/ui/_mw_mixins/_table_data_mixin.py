@@ -241,11 +241,17 @@ class _TableDataMixin:
             new_wl = []
             for i, pn in enumerate(enabled_pkgs):
                 w = dict(by_pkg.get(pn, {"package_name": pn}))
-                w["enabled"] = True; w["order"] = i
+                w["enabled"] = True
+                w["order"] = i
+                # 拖动后不仅更新显示顺序，还要更新真正用于保存和优先级
+                # 计算的字段；此前只改 order，导致视觉移动但优先级不变。
+                w["priority_index"] = i
                 new_wl.append(w)
             for pn in disabled_pkgs:
                 w = dict(by_pkg.get(pn, {"package_name": pn}))
-                w["enabled"] = False; w["order"] = -1
+                w["enabled"] = False
+                w["order"] = -1
+                w["priority_index"] = None
                 new_wl.append(w)
             self.current_worklist = new_wl
         finally:
