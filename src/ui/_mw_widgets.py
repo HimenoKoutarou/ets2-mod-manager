@@ -598,6 +598,17 @@ class ModTable(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(24)
 
     def dropEvent(self, event):
+        # 启用区与禁用区是两个独立排序空间，禁止跨区拖动，
+        # 否则 Qt 先移动视觉行、随后同步逻辑又会把它弹回原区。
+        selected = self.selectedRows()
+        if selected:
+            selected_state = {self._row_enabled(i.row()) for i in selected}
+            target_row = self.indexAt(event.position().toPoint()).row()
+            if target_row < 0:
+                target_row = self.rowCount() - 1
+            if len(selected_state) > 1 or (0 <= target_row < self.rowCount() and self._row_enabled(target_row) not in selected_state):
+                event.ignore()
+                return
         super().dropEvent(event)
         self._renumber_order()
         self.order_changed.emit()
@@ -678,6 +689,12 @@ class ModTable(QTableWidget):
         self.setItem(r, COL_ORDER, self._mk(str(order) if order >= 0 else "—", align=Qt.AlignCenter))
         # pkg (hidden)
         self.setItem(r, COL_PKG, self._mk(work_entry["package_name"]))
+        # 整行允许拖动；此前只有复选框设置了 ItemIsDragEnabled，
+        # 从名称/来源列开始拖动时 Qt 可能不会发出稳定的 dropEvent。
+        for c in range(self.columnCount()):
+            cell = self.item(r, c)
+            if cell is not None:
+                cell.setFlags(cell.flags() | Qt.ItemIsDragEnabled)
         # name column 缺失 mod 标红
         if work_entry.get("_missing_mod"):
             name_item = self.item(r, COL_NAME)
