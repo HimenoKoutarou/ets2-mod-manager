@@ -114,7 +114,11 @@ class _DialogMixin:
                         pass
                 for rdr in candidates_rdr:
                     try:
-                        for ic_name in ("mod_icon.jpg", "mod_icon.png", "icon.jpg", "icon.png", "preview.jpg"):
+                        icon_names = []
+                        if mod.manifest.icon_filename:
+                            icon_names.append(mod.manifest.icon_filename.replace("\\", "/"))
+                        icon_names += ["mod_icon.jpg", "mod_icon.png", "icon.jpg", "icon.png", "preview.jpg"]
+                        for ic_name in dict.fromkeys(icon_names):
                             icon_bytes = rdr.read_bytes(ic_name)
                             if icon_bytes and len(icon_bytes) > 100:
                                 img = QImage.fromData(QByteArray(icon_bytes))
@@ -145,7 +149,9 @@ class _DialogMixin:
                         if m_: return (1, -int(m_.group(1)), n.lower())
                         return (2, 0, n.lower())
                     sub_dirs_sorted = sorted(sub_dirs, key=_sd_key)[:20]
-                    icon_names = ("mod_icon.jpg", "mod_icon.png", "icon.jpg", "icon.png", "preview.jpg")
+                    icon_names = ["mod_icon.jpg", "mod_icon.png", "icon.jpg", "icon.png", "preview.jpg"]
+                    if mod.manifest.icon_filename:
+                        icon_names.insert(0, mod.manifest.icon_filename)
                     desc_names = ("mod_description.txt", "description.txt", "mod_info.txt", "mod.txt")
                     for sd in sub_dirs_sorted:
                         if not pix:

@@ -598,22 +598,45 @@ class ModTable(QTableWidget):
         self.verticalHeader().setDefaultSectionSize(24)
 
     def dropEvent(self, event):
-        # 启用区与禁用区是两个独立排序空间，禁止跨区拖动，
-        # 否则 Qt 先移动视觉行、随后同步逻辑又会把它弹回原区。
-        selected = self.selectedRows()
-        if selected:
-            selected_state = {self._row_enabled(i.row()) for i in selected}
-            target_row = self.indexAt(event.position().toPoint()).row()
-            if target_row < 0:
-                # 已启用页会隐藏禁用行，落在列表底部时不能把底层最后一行
-                # 误当成拖放目标；改取最后一个可见行。
-                visible_rows = [r for r in range(self.rowCount()) if not self.isRowHidden(r)]
-                target_row = visible_rows[-1] if visible_rows else -1
-            if len(selected_state) > 1 or (0 <= target_row < self.rowCount() and self._row_enabled(target_row) not in selected_state):
-                event.ignore()
-                return
-        super().dropEvent(event)
+        # 不使用 QTableWidget::InternalMove：已启用页包含被隐藏的禁用行，
+        # Qt 默认 drop 会按隐藏行索引移动，结果经常看似拖动但顺序不变。
+        selected_rows = sorted({i.row() for i in self.selectedRows()})
+        visible_rows = [r for r in range(self.rowCount()) if not self.isRowHidden(r)]
+        if not selected_rows or not visible_rows:
+            event.ignore(); return
+        selected_rows = [r for r in selected_rows if r in visible_rows and self._row_enabled(r)]
+        if not selected_rows:
+            event.ignore(); return
+        target_row = self.indexAt(event.position().toPoint()).row()
+        if target_row not in visible_rows:
+            target_row = visible_rows[-1]
+        if not self._row_enabled(target_row):
+            event.ignore(); return
+
+        # 按当前可见顺序移动选中包，保留多选块内部顺序。
+        visible_pkgs = [self.package_at(r) for r in visible_rows]
+        selected_pkgs = [self.package_at(r) for r in selected_rows]
+        moving = set(selected_pkgs)
+        remaining = [p for p in visible_pkgs if p not in moving]
+        target_pkg = self.package_at(target_row)
+        insert_at = remaining.index(target_pkg) if target_pkg in remaining else len(remaining)
+        visible_order = remaining[:insert_at] + selected_pkgs + remaining[insert_at:]
+
+        # 保存所有行内容，按“启用新顺序 + 禁用原顺序”重建表格。
+        disabled_order = [self.package_at(r) for r in range(self.rowCount()) if r not in visible_rows]
+        cells_by_pkg = {}
+        for r in range(self.rowCount()):
+            pkg = self.package_at(r)
+            cells_by_pkg[pkg] = [self.takeItem(r, c) for c in range(self.columnCount())]
+        self.setRowCount(0)
+        for pkg in visible_order + disabled_order:
+            cells = cells_by_pkg.get(pkg)
+            if not cells: continue
+            self.insertRow(self.rowCount())
+            for c, item in enumerate(cells):
+                if item is not None: self.setItem(self.rowCount() - 1, c, item)
         self._renumber_order()
+        event.accept()
         self.order_changed.emit()
 
     def _renumber_order(self):
