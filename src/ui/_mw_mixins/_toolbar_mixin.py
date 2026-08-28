@@ -759,7 +759,16 @@ class _ToolbarMixin:
         # 顶部大进度条
         self._show_scan_progress(_("ui.sp_phase_parse"), busy=False, cur=0, total=len(pending), fmt="%v / %m", detail="")
         # 启动 QThread 工作线程
-        worker = _AsyncParseWorker(pending, self.paths)
+        worker_count = 4
+        try:
+            if self._splash is not None:
+                worker_count = self._splash.worker_count()
+        except Exception:
+            pass
+        worker = _AsyncParseWorker(
+            pending, self.paths, max_workers=worker_count,
+            worker_count_getter=lambda: self._splash.worker_count() if self._splash is not None else worker_count,
+        )
         self._async_parse_worker = worker
         worker.progress.connect(self._on_async_parse_progress)
         worker.one_parsed.connect(self._on_mod_parsed)

@@ -135,12 +135,14 @@ class _AsyncParseWorker(QThread):
     progress = Signal(int, int, str)   # (current_idx, total, mod_id)
     one_parsed = Signal(str)          # (mod_id)
 
-    def __init__(self, pending_mods: list, paths, parent=None, mi_index: dict = None):
+    def __init__(self, pending_mods: list, paths, parent=None, mi_index: dict = None, max_workers: int = 4, worker_count_getter=None):
         super().__init__(parent)
         self._pending = pending_mods
         self._paths = paths
         self._mi_index = mi_index or {}
         self._stop = False
+        self._max_workers = max(1, int(max_workers or 1))
+        self._worker_count_getter = worker_count_getter
 
     def stop(self):
         self._stop = True
@@ -205,23 +207,28 @@ class _AsyncParseWorker(QThread):
 
         # Mod 包之间互不依赖；用少量工作线程并发读取，避免 500+ 个包
         # 在单线程中串行打开。线程数受控，降低机械盘/杀毒软件争用。
-        workers = min(4, max(1, total))
         completed = 0
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mod-meta") as pool:
-            futures = [pool.submit(_parse_one, m) for m in self._pending]
-            for fut in as_completed(futures):
-                if self._stop:
-                    for pending in futures:
-                        pending.cancel()
-                    break
-                try:
-                    mod_id = fut.result()
-                except Exception:
-                    mod_id = ""
-                completed += 1
-                if mod_id:
-                    self.one_parsed.emit(mod_id)
-                self.progress.emit(completed, total, mod_id)
+        # 分批建立线程池：用户在启动页切换性能档位后，下一批立即采用新线程数。
+        pos = 0
+        while pos < total and not self._stop:
+            try:
+                requested = int(self._worker_count_getter()) if self._worker_count_getter else self._max_workers
+            except Exception:
+                requested = self._max_workers
+            workers = min(max(1, requested), total - pos)
+            batch = self._pending[pos:pos + max(8, workers * 4)]
+            pos += len(batch)
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mod-meta") as pool:
+                futures = [pool.submit(_parse_one, m) for m in batch]
+                for fut in as_completed(futures):
+                    if self._stop:
+                        for pending in futures: pending.cancel()
+                        break
+                    try: mod_id = fut.result()
+                    except Exception: mod_id = ""
+                    completed += 1
+                    if mod_id: self.one_parsed.emit(mod_id)
+                    self.progress.emit(completed, total, mod_id)
 
 
 class _WorkshopFetchWorker(QThread):

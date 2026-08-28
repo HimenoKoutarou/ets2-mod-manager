@@ -81,6 +81,16 @@ class SplashScreen(QWidget):
         self._cumulative_pct = 0            # installer 累计权重
         self._phases_started: "set[str]" = set()
         self._installer_mode = False         # True → 关 splash 前 MainWindow 仍隐藏
+        # 读取性能档位：按逻辑线程数给出保守默认值，可在初始化期间切换。
+        import os, json
+        self._perf_levels = {"low": 1, "medium": max(1, min(4, (os.cpu_count() or 4) // 2)), "high": max(1, min(8, os.cpu_count() or 4))}
+        self._perf_mode = "medium"
+        try:
+            cfg = Path("config/performance.json")
+            if cfg.exists():
+                val = json.loads(cfg.read_text(encoding="utf-8")).get("mode", "medium")
+                if val in self._perf_levels: self._perf_mode = val
+        except Exception: pass
 
         # --- 现代深色主题样式 ---
         self.setStyleSheet("""
@@ -225,6 +235,16 @@ class SplashScreen(QWidget):
 
         layout.addLayout(progress_layout)
 
+        perf_layout = QHBoxLayout()
+        perf_layout.addWidget(QLabel("读取性能"))
+        self._perf_combo = QComboBox()
+        for key, label in (("low", "低性能"), ("medium", "中性能"), ("high", "高性能")):
+            self._perf_combo.addItem(f"{label}（{self._perf_levels[key]}线程）", key)
+        self._perf_combo.setCurrentIndex(("low", "medium", "high").index(self._perf_mode))
+        self._perf_combo.currentIndexChanged.connect(self._on_perf_changed)
+        perf_layout.addWidget(self._perf_combo, 1)
+        layout.addLayout(perf_layout)
+
         # --- 当前任务详情 ---
         detail_frame = QFrame()
         detail_frame.setStyleSheet("""
@@ -323,6 +343,16 @@ class SplashScreen(QWidget):
 
     def set_first_scan(self, is_first: bool):
         self._first_scan = is_first
+
+    def _on_perf_changed(self, index: int):
+        self._perf_mode = self._perf_combo.itemData(index)
+        try:
+            cfg = Path("config/performance.json"); cfg.parent.mkdir(parents=True, exist_ok=True)
+            cfg.write_text(__import__("json").dumps({"mode": self._perf_mode}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception: pass
+
+    def worker_count(self) -> int:
+        return int(self._perf_levels.get(self._perf_mode, self._perf_levels["medium"]))
         if is_first:
             self._warn_label.setText(chr(0x26a0) + "  " + _("splash.first_scan_warn"))
             self._warn_label.setVisible(True)
