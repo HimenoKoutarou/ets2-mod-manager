@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import re
+import tempfile
+import shutil
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from .sii_parser import parse_sii, SiiUnit
@@ -312,8 +315,22 @@ def collect_all_def_files(
             continue
 
         if reader._mode == "external":
-            reader.close()
-            continue
+            # Encrypted SCS# packages cannot enumerate entries directly. For
+            # localization, fully extract them on demand so def/locale files
+            # are discoverable instead of silently skipped.
+            try:
+                from services.external_extractor_service import extract_archive_to_directory
+                tmp_root = Path(tempfile.mkdtemp(prefix="ets2mm_l10n_"))
+                if extract_archive_to_directory(mod_path, tmp_root):
+                    reader.close()
+                    reader = ScsArchiveReader(tmp_root)
+                else:
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                    reader.close()
+                    continue
+            except Exception:
+                reader.close()
+                continue
 
         all_files: List[str] = []
         if reader._mode == "zip" and reader._zf:
@@ -333,13 +350,16 @@ def collect_all_def_files(
         locale_pattern = re.compile(r"^locale/([^/]+)/local_module\.[^/]+\.sii$", re.IGNORECASE)
 
         for fname in all_files:
-            lower = fname.lower()
+            # Extractor output on Windows uses backslashes; normalize before
+            # applying game-relative `def/` and `locale/` patterns.
+            fname_norm = fname.replace("\\", "/")
+            lower = fname_norm.lower()
             if lower.startswith("def/") and (lower.endswith(".sii") or lower.endswith(".sui")):
                 if fname not in def_files_dict:
-                    text = reader.read_text(fname)
+                    text = reader.read_text(fname_norm)
                     if text is not None:
-                        def_files_dict[fname] = FileWithPriority(
-                            file_path=fname,
+                        def_files_dict[fname_norm] = FileWithPriority(
+                            file_path=fname_norm,
                             file_text=text,
                             source_mod=source_mod,
                             priority=priority,
@@ -350,13 +370,16 @@ def collect_all_def_files(
                     lang = m.group(1).lower()
                     if lang not in native_locale_by_lang:
                         native_locale_by_lang[lang] = {}
-                    text = reader.read_text(fname)
+                    text = reader.read_text(fname_norm)
                     if text:
                         for k, v in _parse_localization_db(text):
                             if k and v and k not in native_locale_by_lang[lang]:
                                 native_locale_by_lang[lang][k] = v
 
         reader.close()
+        if 'tmp_root' in locals():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+            del tmp_root
 
     return def_files_dict, native_locale_by_lang
 
@@ -452,6 +475,32 @@ def parse_from_merged_files(
     _parse_sii_base_with_infix(merged_def_files, "city", city_units, country_units, ferry_units)
     _parse_sii_base_with_infix(merged_def_files, "country", city_units, country_units, ferry_units)
     _parse_sii_base_with_infix(merged_def_files, "ferry", city_units, country_units, ferry_units)
+
+    # Encrypted/custom maps often keep readable leaf definitions under
+    # def/city/*.sui, def/country/*.sui, etc., while their index .sii files are
+    # protected. Parse every remaining SII/SUI directly as a fallback.
+    parsed_paths = set()
+    for base in ("city", "country", "ferry"):
+        parsed_paths.add(f"def/{base}.sii")
+        parsed_paths.update(p for p in merged_def_files if p.startswith(f"def/{base}.") and "/" not in p[len("def/"):])
+    for path, fw in merged_def_files.items():
+        if path in parsed_paths or not path.lower().endswith((".sii", ".sui")):
+            continue
+        text = fw.file_text
+        if not text or text.startswith("3nK\x01"):
+            continue
+        try:
+            for c in _extract_cities_from_text(text, fw.source_mod):
+                if c.unit_name:
+                    city_units[c.unit_name] = c
+            for c in _extract_countries_from_text(text, fw.source_mod):
+                if c.unit_name:
+                    country_units[c.unit_name] = c
+            for f in _extract_ferries_from_text(text, fw.source_mod):
+                if f.unit_name:
+                    ferry_units[f.unit_name] = f
+        except Exception:
+            continue
 
     result = GameDataResult()
     result.native_locale_dict = dict(native_locale)

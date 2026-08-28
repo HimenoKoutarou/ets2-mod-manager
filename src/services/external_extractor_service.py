@@ -446,6 +446,28 @@ def extract_files_batch(archive_path, inner_names) -> dict:
     return result
 
 
+def extract_archive_to_directory(archive_path, destination) -> bool:
+    """Fully extract an external SCS# archive into destination.
+
+    This is intentionally opt-in for workflows such as localization that need
+    to discover many unknown def/locale files at once.
+    """
+    path = Path(archive_path)
+    dest = Path(destination)
+    if not path.is_file() or _detect_magic(path) != "scs_hashfs" or not _EXTRACTOR.exists():
+        return False
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            [str(_EXTRACTOR), str(path), "--deep", "-d", str(dest)],
+            capture_output=True, timeout=max(_TIMEOUT_SECONDS, 120),
+            creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
+        )
+        return proc.returncode == 0 and any(dest.rglob("*"))
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
 def supports_archive(archive_path) -> bool:
     """该文件是否可由本服务处理（SCS# / AEM! / 加密 ZIP / zipfile 打不开的 ZIP）。"""
     path = Path(archive_path)
