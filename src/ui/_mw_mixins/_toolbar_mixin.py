@@ -578,7 +578,7 @@ class _ToolbarMixin:
         返回 True=已恢复，False=需走真实扫描。
         """
         try:
-            from services.session_service import load_scan_snapshot
+            from services.session_service import load_scan_snapshot, load_last_session, is_recent_scan_snapshot
             from core.models import Mod
             from pathlib import Path as _P
         except Exception:
@@ -591,6 +591,8 @@ class _ToolbarMixin:
                 QApplication.processEvents()
         except Exception:
             pass
+        session_data = load_last_session()
+        fast_restore = is_recent_scan_snapshot(session_data)
         snap = load_scan_snapshot(
             self.paths.mod_dir,
             self.paths.workshop_content_dir,
@@ -714,7 +716,7 @@ class _ToolbarMixin:
             _("ui.sb_from_cache", n=len(mods), size=f"{total_size:.1f}")
         )
         # 如果所有 mod 都已有 display_name，跳过异步解析（真正从缓存秒开）
-        need_parse = any(
+        need_parse = (not fast_restore) and any(
             not m.manifest.display_name or not m.description
             or (m.package_type != "workshop" and (not m.manifest.compatible_versions or not m.icon.is_available))
             for m in mods
@@ -723,7 +725,8 @@ class _ToolbarMixin:
             self._start_async_parse()
         try:
             from PySide6.QtCore import QTimer
-            QTimer.singleShot(500, self._fetch_workshop_titles_async)
+            if not fast_restore:
+                QTimer.singleShot(500, self._fetch_workshop_titles_async)
         except Exception:
             pass
         return True

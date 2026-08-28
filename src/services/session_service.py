@@ -86,6 +86,7 @@ def _sig_equal(a: dict, b: dict) -> bool:
 
 _LOCK = threading.Lock()
 _CACHE: Optional[dict] = None
+FAST_RESTORE_WINDOW_SECONDS = 5 * 60
 
 
 def _base_dir() -> Path:
@@ -190,6 +191,20 @@ def load_scan_snapshot(
     data = load_last_session()
     if not data:
         return None
+    snap = data.get("mods_snapshot")
+    if not isinstance(snap, list) or len(snap) == 0:
+        return None
+    # 短时间内重复启动时直接复用刚刚完成的快照，避免再次遍历数百个
+    # Workshop 目录和计算目录签名。路径仍需一致，超过窗口则走严格校验。
+    if is_recent_scan_snapshot(data):
+        saved_sigs = data.get("dir_signatures") or {}
+        expected = {
+            "mod_dir": str(mod_dir) if mod_dir else "",
+            "workshop_dir": str(workshop_dir) if workshop_dir else "",
+            "mods_info_path": str(mods_info_path) if mods_info_path else "",
+        }
+        if all(str((saved_sigs.get(k) or {}).get("path", "")) == v for k, v in expected.items()):
+            return snap
     saved_sigs = data.get("dir_signatures") or {}
     if not saved_sigs:
         return None
@@ -202,15 +217,25 @@ def load_scan_snapshot(
     for k in cur.keys():
         if not _sig_equal(cur[k], saved_sigs.get(k) or {}):
             return None
-    snap = data.get("mods_snapshot")
-    if not isinstance(snap, list) or len(snap) == 0:
-        return None
     # 校验字段存在性（防御性）
     req_keys = {"mod_id", "package_path", "package_type", "file_size", "last_modified"}
     for m in snap:
         if not isinstance(m, dict) or not req_keys.issubset(m.keys()):
             return None
     return snap
+
+
+def is_recent_scan_snapshot(data: Optional[dict] = None) -> bool:
+    """判断扫描快照是否在短时快速恢复窗口内。"""
+    if data is None:
+        data = load_last_session()
+    if not isinstance(data, dict) or not data.get("mods_snapshot"):
+        return False
+    try:
+        ts = datetime.fromisoformat(str(data.get("scan_time", ""))).timestamp()
+        return 0 <= (datetime.now().timestamp() - ts) <= FAST_RESTORE_WINDOW_SECONDS
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def get_new_mod_ids_vs_last_session(current_all_ids: List[str]) -> List[str]:
