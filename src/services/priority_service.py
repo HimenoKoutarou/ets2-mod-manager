@@ -217,7 +217,22 @@ class PriorityService:
     # ---- 导出新的 active_mods 列表：按工作列表中"所有 enabled 条目"的当前顺序 ----
     @staticmethod
     def worklist_to_active(worklist: List[dict]) -> List[str]:
-        return [x["package_name"] for x in worklist if x.get("enabled")]
+        active = []
+        for x in worklist:
+            if not x.get("enabled"):
+                continue
+            package_name = str(x.get("package_name") or "").strip()
+            if not package_name:
+                continue
+            # ETS2 对 Workshop 条目使用 `package_name|display_name`，仅写
+            # 数字 Workshop ID 时游戏启动后会将该条目视为无效并丢弃。
+            mod = x.get("mod")
+            if mod is not None and getattr(mod, "package_type", "") == "workshop" and "|" not in package_name:
+                title = str(getattr(mod, "display_title", "") or "").strip()
+                if title and not title.isdigit():
+                    package_name = f"{package_name}|{title}"
+            active.append(package_name)
+        return active
 
     # ---- 批量：启用 / 禁用 / 反转 ----
     @staticmethod
