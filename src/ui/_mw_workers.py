@@ -243,8 +243,28 @@ class _WorkshopFetchWorker(QThread):
 
     def run(self):
         try:
-            from services.steam_workshop_service import fetch_and_fill_mods
+            from services.steam_workshop_service import fetch_and_fill_mods, get_cached_preview_url
+            from core.models import ModIcon
+            import urllib.request
             fetch_and_fill_mods(self._mods, save_cache=self._save_cache)
+            # Workshop 目录通常没有 Steam 页面预览图，补读 API 返回的 preview_url。
+            for m in self._mods:
+                if getattr(m, "package_type", "") != "workshop" or getattr(m, "icon", None) is None:
+                    continue
+                if m.icon.is_available:
+                    continue
+                url = get_cached_preview_url(str(getattr(m, "mod_id", "")))
+                if not url:
+                    continue
+                try:
+                    req = urllib.request.Request(url, headers={"User-Agent": "ETS2ModManager/1.0"})
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        data = resp.read()
+                    if data:
+                        ext = ".png" if "png" in (resp.headers.get("Content-Type", "").lower()) else ".jpg"
+                        m.icon = ModIcon(raw_bytes=data, format=ext[1:], source_path=url)
+                except Exception:
+                    continue
         except Exception:
             pass
         self.fetch_done.emit()

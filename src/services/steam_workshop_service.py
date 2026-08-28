@@ -178,9 +178,19 @@ def _post_batch(ids: List[str]) -> Dict[str, str]:
                 "title": title,
                 "ts": now,
                 "consumer_app_id": consumer,
+                "preview_url": str(it.get("preview_url") or "").strip(),
             }
             _cache_dirty = True
     return out
+
+
+def get_cached_preview_url(workshop_id: str) -> Optional[str]:
+    """读取 Workshop 页面预览图地址；图片本身由后台线程按需缓存。"""
+    if not workshop_id or not str(workshop_id).isdigit():
+        return None
+    entry = _load_cache().get(str(workshop_id)) or {}
+    url = str(entry.get("preview_url") or "").strip()
+    return url or None
 
 
 def fetch_titles(ids: Iterable[str],
@@ -217,8 +227,12 @@ def fetch_titles(ids: Iterable[str],
                 t = (entry.get("title") or "").strip()
                 if t:
                     out[mid] = t
-                # 负缓存也视为已处理（已知 result != 1）
-                continue
+                # 旧版本缓存没有 preview_url；允许本次补拉一次 API，
+                # 否则 Workshop Mod 永远只能显示占位图。
+                if t and entry.get("preview_url"):
+                    continue
+                if not t and entry.get("result"):
+                    continue
         pending.append(mid)
 
     # 分批回源（R5 opt: 合并 save_cache 调用，每批不再重复 json.dump + os.replace）
