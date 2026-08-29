@@ -3,7 +3,7 @@
 专为《欧洲卡车模拟 2》打造的 **第三方模组管理器桌面程序**。
 比游戏内 Mod Manager 更好用：批量启用/禁用、拖拽调优先级、
 模组预览图/描述/适合版本一目了然，还提供 **Mod 目录跨盘迁移（软链接）**、
-**崩溃排查（启动游戏监控 + crashlog 自动解析嫌疑 mod）** 等高级功能。
+**崩溃排查（启动游戏监控 + crashlog 自动解析嫌疑 mod）**，以及地图 Mod 汉化管理等高级功能。
 
 ## ✨ 功能
 
@@ -13,6 +13,7 @@
 - ✅ **批量启用/禁用**：一键全选 / 反选 / 按分类批量切换
 - 🎯 **拖拽优先级**：拖拽表格行调整顺序，顺序即游戏加载优先级（越靠上优先级越高）
 - 📁 **多 Profile 切换**：本地存档 / Steam Cloud 存档均可编辑 active_mods[]
+- 🗂️ **自定义文件夹**：将 Mod 拖入自定义文件夹，按文件夹批量启用、禁用和调整优先级
 - 💾 **预设方案**：保存「长途跑图」「短途卡车客运」等多套模组启用组合，一键切换
 - 🔗 **Mod 目录跨盘迁移**：一键把 `C:\...\mod` 搬到 F/D 盘，Junction 目录联接，游戏完全透明
 - 🛡️ **安全写入**：写入 profile.sii 前自动备份，最多保留 10 份历史版本
@@ -22,6 +23,8 @@
 - 🎮 **崩溃排查 — 启动监控**：从本工具启动游戏，游戏退出后自动检测是否崩溃；崩溃则自动解析 crashlog 定位嫌疑 mod
 - 📄 **崩溃排查 — Crashlog 解析**：读取 `game.crash.txt` + `game.log.txt`，6 步分析（异常定性 → 崩溃 session 定位 → 嫌疑 mod 反推），按 S/A/B 三级置信度展示
 - 🏙️ **城市反查**：输入城市名，反查哪些 mod 提供该城市定义
+- 🌐 **汉化管理**：扫描已启用地图 Mod 的城市、国家、港口和提示文本，支持词典导入、批量翻译和汉化 Mod 导出
+- 🔐 **加密 Mod 支持**：使用 Extractor / SXC 临时提取 `def` 和语言目录，支持扫描缓存与可取消后台任务
 - 💾 **存档编辑**：查看和编辑 ETS2 存档数据
 - 🔼 **自动更新**：检测 GitHub Release 新版本，一键下载安装
 
@@ -47,7 +50,7 @@ src/
 │   │                                     #   list_entries() + is_encrypted_or_external
 │   ├── mod_scanner.py                   # 扫描本地/mod + Workshop，构造 Mod 对象
 │   │                                     #   _build_mod_from_package + _try_nested_scs/_try_nested_subdir 共享兜底
-│   └── game_data.py                     # 游戏静态数据（城市/国家映射等）
+│   └── game_data.py                     # 游戏静态数据（城市/国家/港口/提示文本汉化数据）
 │
 ├── services/                            # 业务服务层
 │   ├── profile_service.py               # Profile 读写（调用 SII_Decrypt 解密/加密）
@@ -64,7 +67,7 @@ src/
 │   ├── game_launcher_service.py         # 游戏启动 + 退出监控（find_game_exe + launch_and_watch）
 │   ├── city_lookup_service.py           # 城市反查 mod
 │   ├── save_editor_service.py           # 存档编辑
-│   └── external_extractor_service.py    # 外部解包工具调用（Extractor / SXC）
+│   └── external_extractor_service.py    # 外部解包、临时扫描与加密包缓存（Extractor / SXC）
 │
 ├── ui/                                  # Qt UI 层
 │   ├── main_window.py                   # MainWindow（Mixin 组合入口）
@@ -82,13 +85,13 @@ src/
 │   │                                     #   3 Signal: locate_mod / disable_mods / move_to_bottom
 │   ├── city_lookup_dialog.py            # 城市反查对话框
 │   ├── save_editor_dialog.py            # 存档编辑对话框
-│   └── l10n_dialog.py                   # 语言切换对话框
+│   └── l10n_dialog.py                   # 汉化管理对话框（城市/国家/港口/提示文本）
 │
 ├── utils/
 │   ├── paths.py                         # ETS2 文档/Workshop/Cloud/Steam 路径检测
 │   └── symlink_manager.py               # Mod 目录跨盘迁移（Junction + Symlink 双实现）
 │
-└── version.py                            # 版本号（当前 v1.2.0）
+└── version.py                            # 版本号（当前 v1.2.2）
 ```
 
 ### 线程模型
@@ -100,6 +103,8 @@ src/
 | `_QuickScanWorker` | 快速扫描本地 + Workshop mod 列表 | progress / finished / failed |
 | `_AsyncParseWorker` | 异步解析加密包 manifest/icon/description | progress / finished |
 | `_WorkshopFetchWorker` | Workshop API 查询 mod 元数据 | progress / finished / failed |
+| `_ExtractThread` | 汉化数据提取、加密 Mod 临时扫描 | progress / result_ready / canceled |
+| `_TranslateThread` | 汉化词条批量翻译 | progress / result_ready |
 | `_GameLaunchWorker` | 启动游戏 + 等待退出 + 崩溃检测 | launched / finished / failed |
 | `_AnalyzeWorker` | crashlog 分析（6 步解析） | done / failed |
 
@@ -156,7 +161,13 @@ python build.py
 build.bat
 ```
 
-打包产物在 `dist/ETS2ModManager/` 下，可直接分发。
+构建脚本生成以下产物：
+
+- `dist/ETS2ModManager.exe`：Windows onefile 可执行文件
+- `dist/assets/`：外部解包工具、SII 解密工具、图标和语言资源
+- `dist/ETS2ModManager-win-x64.zip`：可直接分发的 Windows 压缩包
+
+运行缓存不会随发布包打包，首次运行时会在 `assets/cache/` 自动创建。
 
 ## 📁 目录结构
 
@@ -170,6 +181,8 @@ ETS2ModManager/
 ├── assets/                 # 资源文件
 │   ├── bin/                # 外部工具（SII_Decrypt.exe 等）
 │   ├── i18n/               # 国际化翻译（zh_CN / en_US / ru_RU）
+│   ├── tools/              # Extractor / SXC 加密 Mod 解包工具
+│   ├── cache/              # 运行时缓存（扫描、预览图、Workshop 数据，不进发布包）
 │   └── app_icon.png        # 应用图标
 ├── tests/                  # 测试
 ├── docs/                   # 文档（spec / plan）
@@ -187,6 +200,7 @@ ETS2ModManager/
 - **✅ Stage 4**：集成测试 + PyInstaller 打包
 - **✅ v1.1**：Workshop 元数据查询 / 分类管理 / 多语言 / 自动更新 / 城市反查 / 存档编辑
 - **✅ v1.2**：崩溃排查（启动监控 + crashlog 解析）/ MainWindow Mixin 重构 / R1-R8 优化
+- **✅ v1.2.2**：汉化管理器 / 加密 Mod 临时扫描与缓存 / 可取消扫描 / 多地图城市和提示文本提取
 
 ## 🙏 Credits / 致谢
 
@@ -207,6 +221,7 @@ ETS2ModManager/
 3. **写入存档前务必备份**：本程序已内置自动备份，但仍建议首次使用时手动复制一份 `profile.sii`。
 4. **崩溃排查功能**：需要游戏至少运行过一次（产生 game.log.txt），崩溃后需要游戏生成 game.crash.txt。
 5. **代理配置**：自动更新功能通过环境变量 `HTTP_PROXY` / `HTTPS_PROXY` 读取代理，不硬编码。
+6. **汉化扫描**：首次扫描加密 Mod 可能需要较长时间；程序会缓存目录列表和提取结果，后续启动会明显加快。扫描过程中可点击关闭按钮取消任务。
 
 ## 📜 License
 
