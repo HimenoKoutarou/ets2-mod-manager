@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 
 
 # ===== 配置 =====
@@ -217,7 +217,8 @@ def save_preview_bytes(workshop_id: str, data: bytes, content_type: str = "") ->
 
 def fetch_titles(ids: Iterable[str],
                  force_refresh: bool = False,
-                 save_cache: bool = True) -> Dict[str, str]:
+                 save_cache: bool = True,
+                 should_stop: Optional[Callable[[], bool]] = None) -> Dict[str, str]:
     """批量查询 Workshop 标题。失败不抛异常，返回已成功的条目（可能为空 dict）。
 
     - ids: 可迭代的 workshop_id 字符串（非数字会被自动过滤）
@@ -259,6 +260,8 @@ def fetch_titles(ids: Iterable[str],
 
     # 分批回源（R5 opt: 合并 save_cache 调用，每批不再重复 json.dump + os.replace）
     for i in range(0, len(pending), BATCH_SIZE):
+        if should_stop is not None and should_stop():
+            break
         batch = pending[i:i + BATCH_SIZE]
         batch_out = _post_batch(batch)
         out.update(batch_out)
@@ -270,11 +273,17 @@ def fetch_titles(ids: Iterable[str],
     return out
 
 
-def fetch_and_fill_mods(mods: Iterable[object], save_cache: bool = True) -> int:
+def fetch_and_fill_mods(
+    mods: Iterable[object],
+    save_cache: bool = True,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> int:
     """对一组 Mod 对象：筛选出 workshop 类型、标题仍为纯数字的，批量查询 Steam 并回填 display_name。
     返回实际被回填的数量。"""
     candidates: Dict[str, object] = {}
     for m in mods:
+        if should_stop is not None and should_stop():
+            break
         try:
             if getattr(m, "package_type", None) != "workshop":
                 continue
@@ -294,7 +303,9 @@ def fetch_and_fill_mods(mods: Iterable[object], save_cache: bool = True) -> int:
     if not candidates:
         return 0
 
-    titles = fetch_titles(candidates.keys(), save_cache=save_cache)
+    titles = fetch_titles(
+        candidates.keys(), save_cache=save_cache, should_stop=should_stop
+    )
     filled = 0
     for mid, t in titles.items():
         mod = candidates.get(mid)

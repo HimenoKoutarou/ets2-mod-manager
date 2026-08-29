@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QDialog, QVBoxLayout,
@@ -18,13 +18,22 @@ from services.l10n_service import L10nService, L10nResult, TranslationEntry
 
 class _ExtractThread(QThread):
     progress = Signal(int, int, str)
-    finished = Signal(object)
+    result_ready = Signal(object)
+    canceled = Signal()
 
-    def __init__(self, active_mods: list, mod_dir: str, target_locale: str = "zh_cn"):
-        super().__init__()
+    def __init__(self, active_mods: list, mod_dir: str, target_locale: str = "zh_cn", parent=None):
+        super().__init__(parent)
         self._active_mods = active_mods
         self._mod_dir = mod_dir
         self._target_locale = target_locale
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+        self.requestInterruption()
+
+    def should_stop(self) -> bool:
+        return self._stop_requested or self.isInterruptionRequested()
 
     def run(self):
         from core.game_data import extract_game_data_for_active_mods
@@ -32,30 +41,43 @@ class _ExtractThread(QThread):
         self.progress.emit(0, total, "扫描中...")
         error_text = ""
         try:
-            game_data = extract_game_data_for_active_mods(self._active_mods, self._target_locale)
+            def progress_cb(cur, count, name):
+                self.progress.emit(cur + 1, count, name)
+            game_data = extract_game_data_for_active_mods(
+                self._active_mods,
+                self._target_locale,
+                should_stop=self.should_stop,
+                progress=progress_cb,
+            )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
             game_data = GameDataResult()
+        if self.should_stop():
+            self.canceled.emit()
+            return
         if error_text:
             game_data._extract_error = error_text
         self.progress.emit(total, total, "")
-        self.finished.emit(game_data)
+        self.result_ready.emit(game_data)
 
 
 class _TranslateThread(QThread):
     progress = Signal(int, int, str)
-    finished = Signal()
+    result_ready = Signal(bool, str)
 
-    def __init__(self, l10n_service: L10nService, entries: List[TranslationEntry]):
-        super().__init__()
+    def __init__(self, l10n_service: L10nService, entries: List[TranslationEntry], parent=None):
+        super().__init__(parent)
         self._service = l10n_service
         self._entries = entries
 
     def run(self):
         def cb(cur, total, name):
             self.progress.emit(cur, total, name)
-        self._service.batch_translate(self._entries, cb)
-        self.finished.emit()
+        try:
+            self._service.batch_translate(self._entries, cb)
+            self.result_ready.emit(True, "")
+        except Exception as exc:
+            self.result_ready.emit(False, f"{type(exc).__name__}: {exc}")
 
 
 class L10nDialog(QDialog):
@@ -83,6 +105,7 @@ class L10nDialog(QDialog):
         self._entries: List[TranslationEntry] = []
         self._extract_thread: Optional[_ExtractThread] = None
         self._translate_thread: Optional[_TranslateThread] = None
+        self._closing_for_workers = False
         self.current_locale: str = l10n_service.get_target_locale()
 
         self.setWindowTitle("汉化管理")
@@ -118,6 +141,7 @@ class L10nDialog(QDialog):
         self.tab_cities = self._create_tab("城市")
         self.tab_countries = self._create_tab("国家")
         self.tab_ferries = self._create_tab("港口")
+        self.tab_hints = self._create_tab("提示文本")
 
         btn_layout = QHBoxLayout()
         self.btn_translate = QPushButton("翻译未翻译项")
@@ -134,7 +158,7 @@ class L10nDialog(QDialog):
 
         btn_layout.addStretch()
         self.btn_close = QPushButton("关闭")
-        self.btn_close.clicked.connect(self.accept)
+        self.btn_close.clicked.connect(self.close)
         btn_layout.addWidget(self.btn_close)
         layout.addLayout(btn_layout)
 
@@ -156,10 +180,23 @@ class L10nDialog(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, max(1, len(active_mods)))
         self.status_label.setText(f"正在提取已启用mod的数据 (0/{len(active_mods)})...")
-        self._extract_thread = _ExtractThread(active_mods, mod_dir, self.current_locale)
+        self.locale_combo.setEnabled(False)
+        self.btn_close.setEnabled(True)
+        self._extract_thread = _ExtractThread(
+            active_mods, mod_dir, self.current_locale, self
+        )
         self._extract_thread.progress.connect(self._on_extract_progress)
-        self._extract_thread.finished.connect(self._on_extract_done)
+        self._extract_thread.result_ready.connect(self._on_extract_done)
+        self._extract_thread.canceled.connect(self._on_extract_canceled)
+        self._extract_thread.finished.connect(self._on_extract_thread_finished)
         self._extract_thread.start()
+
+    def _on_extract_thread_finished(self):
+        worker = self._extract_thread
+        self._extract_thread = None
+        self.locale_combo.setEnabled(True)
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_locale_changed(self, idx: int):
         new_locale = self.locale_combo.itemData(idx)
@@ -175,9 +212,11 @@ class L10nDialog(QDialog):
         self.tab_cities.setRowCount(0)
         self.tab_countries.setRowCount(0)
         self.tab_ferries.setRowCount(0)
+        self.tab_hints.setRowCount(0)
         self.tabs.setTabText(0, "城市")
         self.tabs.setTabText(1, "国家")
         self.tabs.setTabText(2, "港口")
+        self.tabs.setTabText(3, "提示文本")
         self.btn_translate.setText("翻译未翻译项")
         self.btn_translate.setEnabled(False)
         display = L10nService.LOCALE_DISPLAY_NAMES.get(new_locale, new_locale)
@@ -192,6 +231,7 @@ class L10nDialog(QDialog):
         n_c = len(game_data.cities)
         n_co = len(game_data.countries)
         n_f = len(game_data.ferries)
+        n_h = len(game_data.hints)
         n_loc = len(game_data.native_locale_dict)
         extract_error = getattr(game_data, "_extract_error", "")
         if extract_error:
@@ -199,7 +239,7 @@ class L10nDialog(QDialog):
             QMessageBox.warning(self, "汉化数据提取失败", extract_error)
             return
         self.status_label.setText(
-            f"提取完成: {n_c}个城市, {n_co}个国家, {n_f}个港口"
+            f"提取完成: {n_c}个城市, {n_co}个国家, {n_f}个港口, {n_h}条提示文本"
             + (f", {n_loc}条原生翻译" if n_loc else "")
         )
 
@@ -218,18 +258,28 @@ class L10nDialog(QDialog):
             e = self.l10n.translate(f.ferry_name, "ferry", f.source_mod)
             self.result.ferries.append(e)
             self._entries.append(e)
+        for h in game_data.hints:
+            e = self.l10n.translate(h.text, "hint", h.source_mod)
+            self.result.hints.append(e)
+            self._entries.append(e)
 
         self._fill_table(self.tab_cities, self.result.cities)
         self._fill_table(self.tab_countries, self.result.countries)
         self._fill_table(self.tab_ferries, self.result.ferries)
+        self._fill_table(self.tab_hints, self.result.hints)
 
         self.tabs.setTabText(0, f"城市 ({n_c})")
         self.tabs.setTabText(1, f"国家 ({n_co})")
         self.tabs.setTabText(2, f"港口 ({n_f})")
+        self.tabs.setTabText(3, f"提示文本 ({len(game_data.hints)})")
 
         pending = self.result.pending_count
         self.btn_translate.setText(f"翻译未翻译项 ({pending})")
         self.btn_translate.setEnabled(pending > 0)
+
+    def _on_extract_canceled(self):
+        self.progress_bar.setVisible(False)
+        self.status_label.setText("扫描已取消")
 
     def _fill_table(self, table: QTableWidget, entries: List[TranslationEntry]):
         table.setRowCount(len(entries))
@@ -291,18 +341,29 @@ class L10nDialog(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, len(pending))
         self.status_label.setText(f"正在翻译 ({len(pending)}项)...")
-        self._translate_thread = _TranslateThread(self.l10n, pending)
+        self._translate_thread = _TranslateThread(self.l10n, pending, self)
         self._translate_thread.progress.connect(self._on_translate_progress)
-        self._translate_thread.finished.connect(self._on_translate_done)
+        self._translate_thread.result_ready.connect(self._on_translate_done)
+        self._translate_thread.finished.connect(self._on_translate_thread_finished)
         self._translate_thread.start()
+
+    def _on_translate_thread_finished(self):
+        worker = self._translate_thread
+        self._translate_thread = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_translate_progress(self, current, total, name):
         self.progress_bar.setValue(current)
         if name:
             self.status_label.setText(f"翻译中 ({current}/{total}): {name}")
 
-    def _on_translate_done(self):
+    def _on_translate_done(self, success=True, error_text=""):
         self.progress_bar.setVisible(False)
+        if not success:
+            self.status_label.setText(f"翻译失败: {error_text}")
+            self.btn_translate.setEnabled(True)
+            return
         translated = sum(1 for e in self._entries if e.status == "api")
         still_failed = sum(1 for e in self._entries if e.status == "failed")
         self.status_label.setText(
@@ -312,6 +373,7 @@ class L10nDialog(QDialog):
         self._fill_table(self.tab_cities, self.result.cities)
         self._fill_table(self.tab_countries, self.result.countries)
         self._fill_table(self.tab_ferries, self.result.ferries)
+        self._fill_table(self.tab_hints, self.result.hints)
         pending = self.result.pending_count
         self.btn_translate.setText(f"翻译未翻译项 ({pending})")
         self.btn_translate.setEnabled(pending > 0)
@@ -362,10 +424,12 @@ class L10nDialog(QDialog):
         refresh_list(self.result.cities)
         refresh_list(self.result.countries)
         refresh_list(self.result.ferries)
+        refresh_list(self.result.hints)
 
         self._fill_table(self.tab_cities, self.result.cities)
         self._fill_table(self.tab_countries, self.result.countries)
         self._fill_table(self.tab_ferries, self.result.ferries)
+        self._fill_table(self.tab_hints, self.result.hints)
 
         pending = self.result.pending_count
         self.btn_translate.setText(f"翻译未翻译项 ({pending})")
@@ -391,3 +455,33 @@ class L10nDialog(QDialog):
             self.status_label.setText(f"已导出 ({display_name_suffix}): {file_path}")
         except Exception as e:
             self.status_label.setText(f"导出失败: {e}")
+
+    def reject(self):
+        # Esc and the window close button must use the same safe shutdown path.
+        self.close()
+
+    def closeEvent(self, event):
+        workers = [self._extract_thread, self._translate_thread]
+        running = [w for w in workers if w is not None and w.isRunning()]
+        if running:
+            event.ignore()
+            if not self._closing_for_workers:
+                self._closing_for_workers = True
+                self.setEnabled(False)
+                self.status_label.setText("正在取消扫描，请稍候…")
+                for worker in running:
+                    stop = getattr(worker, "stop", None)
+                    if stop:
+                        stop()
+            QTimer.singleShot(100, self._retry_close_after_workers)
+            return
+        super().closeEvent(event)
+
+    def _retry_close_after_workers(self):
+        workers = [self._extract_thread, self._translate_thread]
+        if any(w is not None and w.isRunning() for w in workers):
+            QTimer.singleShot(100, self._retry_close_after_workers)
+            return
+        self._closing_for_workers = False
+        self.setEnabled(True)
+        super().accept()

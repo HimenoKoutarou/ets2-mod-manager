@@ -301,24 +301,28 @@ def name_hint_of(mod_id: str) -> str:
 
 def stats() -> Dict[str, int]:
     c = _load()
+    folders = set(_load_folders())
     out: Dict[str, int] = {UNCATEGORIZED_KEY: 0}
-    for fname in _load_folders():
+    for fname in folders:
         out[fname] = 0
     for rec in c.values():
         cat = (rec or {}).get("category", "") or ""
-        if cat in out:
-            out[cat] += 1
-        elif cat:
-            out[cat] = out.get(cat, 0) + 1
-        else:
+        if not cat or cat not in folders:
+            # A folder may have been removed by an older version, a test, or
+            # manual cache editing. Never let such records disappear from the
+            # UI count; treat them as uncategorized until reassigned.
             out[UNCATEGORIZED_KEY] += 1
+        elif cat in out:
+            out[cat] += 1
     return out
 
 
 def mods_in_category(category_key: str) -> Set[str]:
     c = _load()
+    folders = set(_load_folders())
     if category_key == UNCATEGORIZED_KEY:
         return {mid for mid, rec in c.items()
-                if not (rec or {}).get("category", "")}
+                if not (rec or {}).get("category", "")
+                or (rec or {}).get("category", "") not in folders}
     return {mid for mid, rec in c.items()
             if (rec or {}).get("category", "") == category_key}

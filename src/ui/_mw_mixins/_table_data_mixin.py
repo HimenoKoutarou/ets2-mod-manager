@@ -8,12 +8,16 @@ from services.priority_service import PriorityService
 from services.profile_service import ProfileService, ProfileInfo
 
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
-from .._mw_widgets import _LangSwitchDialog, SplashScreen, ModTable, COL_ENABLED, COL_NAME, COL_SOURCE, COL_SIZE, COL_VERSION, COL_ORDER, COL_PKG
+from .._mw_widgets import (
+    _LangSwitchDialog, SplashScreen, ModTable,
+    COL_ENABLED, COL_NAME, COL_SOURCE, COL_SIZE, COL_VERSION, COL_ORDER, COL_PKG,
+)
 
 
 import json
 import os
 import sys
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -57,54 +61,311 @@ class _TableDataMixin:
         return idx
 
     def _lookup_mod(self, pkg: str) -> Optional["Mod"]:
-        """按 pkg（可能含|，可能带_workshop后缀）从 all_mods_by_pkg 查 Mod 对象，4 层 fallback"""
-        if not pkg or not self.all_mods_by_pkg:
+        """Resolve a profile/package key to one scanned Mod object.
+
+        Profile entries are not guaranteed to use the same spelling as a
+        scanned archive: Workshop entries commonly contain ``|display_name``
+        and older profiles may carry ``_workshop``/``_copy`` suffixes.  Keep
+        the fast exact lookups, then use a canonical identity fallback over
+        ``all_mods`` so classification and enable/disable operations act on
+        the same object.
+        """
+        if not pkg:
             return None
         import re as _re_lu
-        if pkg in self.all_mods_by_pkg:
-            return self.all_mods_by_pkg[pkg]
+        index = getattr(self, "all_mods_by_pkg", None) or {}
+        if pkg in index:
+            return index[pkg]
         left = pkg.split("|", 1)[0].strip()
-        if left and left in self.all_mods_by_pkg:
-            return self.all_mods_by_pkg[left]
+        if left and left in index:
+            return index[left]
         s_left = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", left) if left else ""
-        if s_left and s_left != left and s_left in self.all_mods_by_pkg:
-            return self.all_mods_by_pkg[s_left]
+        if s_left and s_left != left and s_left in index:
+            return index[s_left]
         s_pkg = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", pkg)
-        if s_pkg and s_pkg != pkg and s_pkg in self.all_mods_by_pkg:
-            return self.all_mods_by_pkg[s_pkg]
+        if s_pkg and s_pkg != pkg and s_pkg in index:
+            return index[s_pkg]
         if (left.isdigit() or s_left.isdigit() or s_pkg.isdigit() or pkg.isdigit()):
             target_num = left if left.isdigit() else (s_left if s_left.isdigit() else (s_pkg if s_pkg.isdigit() else pkg))
-            for m_ in (self.all_mods_by_pkg or {}).values():
+            seen_mod_objects = set()
+            for m_ in index.values():
+                marker = id(m_)
+                if marker in seen_mod_objects:
+                    continue
+                seen_mod_objects.add(marker)
                 ms = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", m_.mod_id) if m_.mod_id else ""
                 mp = getattr(getattr(m_, "manifest", None), "package_name", "") or ""
                 mp_left = mp.split("|", 1)[0].strip()
                 if ms == target_num or mp_left == target_num:
                     return m_
+
+        # Last-resort canonical matching.  Do not add these aliases to
+        # all_mods_by_pkg (that mapping is also used to build table rows).
+        def _canon(value: object) -> str:
+            value = str(value or "").split("|", 1)[0].strip()
+            value = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", value,
+                               flags=_re_lu.IGNORECASE)
+            return value.casefold()
+
+        target = _canon(pkg)
+        if target:
+            candidates = getattr(self, "all_mods", None) or []
+            for m_ in candidates:
+                mf = getattr(m_, "manifest", None)
+                keys = (
+                    getattr(m_, "mod_id", ""),
+                    getattr(mf, "package_name", "") if mf else "",
+                    getattr(mf, "display_name", "") if mf else "",
+                    getattr(m_, "display_title", ""),
+                )
+                if any(_canon(key) == target for key in keys if key):
+                    return m_
         return None
 
+    def _render_current_worklist(self) -> None:
+        """Render the in-memory worklist without rereading profile.sii.
+
+        Category checkbox and block-priority actions are intentionally
+        memory-only until the user presses Save.  Reusing
+        ``_fill_table_for_profile`` here would rebuild the worklist from disk
+        and silently discard the just-applied operation.
+        """
+        if not getattr(self, "all_mods", None) or not getattr(self, "priority_svc", None):
+            self._profile_fill_pending = True
+            return
+        self._profile_fill_pending = False
+        self._sync_mod_runtime_state()
+        for t in (self.table_all, self.table_active):
+            t.blockSignals(True)
+            t.setUpdatesEnabled(False)
+            try:
+                t.setRowCount(0)
+                if t is self.table_active:
+                    self._render_active_grouped_table(t)
+                else:
+                    for entry in getattr(self, "current_worklist", []) or []:
+                        pkg = entry.get("package_name", "")
+                        m = self._lookup_mod(pkg) or (
+                            entry.get("mod") if isinstance(entry.get("mod"), Mod) else None
+                        )
+                        # Keep missing rows visible as well.  Dropping an entry
+                        # during a later sync would otherwise lose it permanently
+                        # from the in-memory worklist.
+                        row_entry = dict(entry)
+                        if m is None:
+                            row_entry["_missing_mod"] = True
+                        t.add_mod_row(row_entry, m)
+                    self._reorder_table_for(t)
+            finally:
+                t.setUpdatesEnabled(True)
+                t.blockSignals(False)
+        self._apply_filter_to_table()
+        self._refresh_status_after_change()
+
+    def _render_active_grouped_table(self, table: ModTable) -> None:
+        """Render enabled Mods with custom folders as expandable group rows."""
+        from services.category_service import all_folders
+
+        folders = set(all_folders())
+        worklist = list(getattr(self, "current_worklist", []) or [])
+        folder_entries: Dict[str, list] = {}
+        folder_order: list[str] = []
+        for entry in worklist:
+            pkg = str(entry.get("package_name") or "").strip()
+            if not pkg:
+                continue
+            mod = self._lookup_mod(pkg) or entry.get("mod")
+            cat = self._category_tag_for_entry({"package_name": pkg}, mod)
+            if cat and cat in folders:
+                if cat not in folder_entries:
+                    folder_entries[cat] = []
+                    folder_order.append(cat)
+                folder_entries[cat].append(entry)
+
+        rendered_folders: set[str] = set()
+        for entry in worklist:
+            pkg = str(entry.get("package_name") or "").strip()
+            if not pkg:
+                continue
+            mod = self._lookup_mod(pkg) or entry.get("mod")
+            cat = self._category_tag_for_entry({"package_name": pkg}, mod)
+            if cat and cat in folder_entries:
+                if cat in rendered_folders:
+                    continue
+                rendered_folders.add(cat)
+                members = folder_entries[cat]
+                enabled_count = sum(1 for e in members if e.get("enabled"))
+                if enabled_count <= 0:
+                    continue
+                first_order = next((int(e.get("order", -1)) for e in members if e.get("enabled")), -1)
+                table.add_folder_row(cat, enabled_count == len(members), len(members), enabled_count, first_order)
+                # Keep all children in the table so a folder can show both
+                # enabled and disabled members when expanded. The active-tab
+                # filter hides disabled children by default.
+                for child in members:
+                    child_pkg = str(child.get("package_name") or "").strip()
+                    child_mod = self._lookup_mod(child_pkg) or child.get("mod")
+                    child_entry = dict(child)
+                    if child_mod is None:
+                        child_entry["_missing_mod"] = True
+                    row = table.rowCount()
+                    table.add_mod_row(child_entry, child_mod)
+                    table.set_row_kind(row, "folder_child", cat)
+                    child_name = table.item(row, COL_NAME)
+                    if child_name is not None:
+                        # Visually separate nested folder members from
+                        # top-level Mods while keeping the same row controls.
+                        child_name.setText("    " + child_name.text())
+                continue
+            row_entry = dict(entry)
+            if mod is None:
+                row_entry["_missing_mod"] = True
+            table.add_mod_row(row_entry, mod)
+
+    def _selected_worklist_indices(self) -> list[int]:
+        """Expand selected folder rows into their member worklist indices."""
+        tbl = getattr(self, "table", None)
+        if tbl is None:
+            return []
+        selected = tbl.selected_rows()
+        if not selected:
+            return []
+        out: set[int] = set()
+        used_pkg: set[str] = set()
+        for row in selected:
+            if tbl.is_folder_row(row):
+                folder = tbl.row_folder(row)
+                for idx, entry in enumerate(getattr(self, "current_worklist", []) or []):
+                    pkg = str(entry.get("package_name") or "")
+                    mod = self._lookup_mod(pkg) or entry.get("mod")
+                    if self._category_tag_for_entry({"package_name": pkg}, mod) == folder:
+                        out.add(idx)
+                continue
+            pkg = tbl.package_at(row)
+            if not pkg or pkg.startswith("__folder__:"):
+                continue
+            # Prefer the row's exact package, then consume the first matching
+            # worklist occurrence so duplicate aliases remain independently
+            # selectable.
+            for idx, entry in enumerate(getattr(self, "current_worklist", []) or []):
+                if idx in out:
+                    continue
+                if str(entry.get("package_name") or "") == pkg:
+                    out.add(idx)
+                    used_pkg.add(pkg)
+                    break
+        return sorted(out)
+
+    def _selected_package_set(self) -> set[str]:
+        tbl = getattr(self, "table", None)
+        if tbl is None:
+            return set()
+        packages: set[str] = set()
+        for row in tbl.selected_rows():
+            if tbl.is_folder_row(row):
+                folder = tbl.row_folder(row)
+                for entry in getattr(self, "current_worklist", []) or []:
+                    pkg = str(entry.get("package_name") or "")
+                    mod = self._lookup_mod(pkg) or entry.get("mod")
+                    if self._category_tag_for_entry({"package_name": pkg}, mod) == folder:
+                        packages.add(pkg)
+            else:
+                pkg = tbl.package_at(row)
+                if pkg and not pkg.startswith("__folder__:"):
+                    packages.add(pkg)
+        return packages
+
+    def _sync_active_group_order_from_table(self) -> None:
+        """Translate a grouped active-table drag into real Mod order."""
+        table = getattr(self, "table_active", None)
+        if table is None or not any(table.is_folder_row(r) for r in range(table.rowCount())):
+            self._sync_worklist_from_table()
+            return
+        current_enabled = [
+            str(e.get("package_name") or "")
+            for e in getattr(self, "current_worklist", []) or []
+            if e.get("enabled") and e.get("package_name")
+        ]
+        desired: list[str] = []
+        seen: set[str] = set()
+        for row in range(table.rowCount()):
+            if table.is_folder_row(row):
+                folder = table.row_folder(row)
+                for entry in getattr(self, "current_worklist", []) or []:
+                    pkg = str(entry.get("package_name") or "")
+                    if not pkg or not entry.get("enabled") or pkg in seen:
+                        continue
+                    mod = self._lookup_mod(pkg) or entry.get("mod")
+                    if self._category_tag_for_entry({"package_name": pkg}, mod) == folder:
+                        desired.append(pkg)
+                        seen.add(pkg)
+                continue
+            if table.is_folder_child_row(row) or table.isRowHidden(row):
+                continue
+            pkg = table.package_at(row)
+            if pkg and not pkg.startswith("__folder__:") and pkg in current_enabled and pkg not in seen:
+                desired.append(pkg)
+                seen.add(pkg)
+        # Search/category filters can hide rows. Keep those entries at their
+        # previous relative position after the explicitly reordered tokens.
+        desired.extend(pkg for pkg in current_enabled if pkg not in seen)
+        self.current_worklist = self.priority_svc.rebuild_from_active(
+            self.priority_svc, self.current_worklist, desired
+        )
+
+    def _toggle_active_folder(self, row: int, column: int = 0) -> None:
+        table = getattr(self, "table_active", None)
+        if table is None or not table.is_folder_row(row) or column == COL_ENABLED:
+            return
+        folder = table.row_folder(row)
+        if folder in table._expanded_folders:
+            table._expanded_folders.remove(folder)
+        else:
+            table._expanded_folders.add(folder)
+        self._render_current_worklist()
+
+    def _on_active_table_cell_clicked(self, row: int, column: int) -> None:
+        self._toggle_active_folder(row, column)
+
     # ---------- UI 构建 ----------
-    def _fill_table_for_profile(self, prof: ProfileInfo):
+    @staticmethod
+    def _profile_worklist_key(prof: ProfileInfo):
+        """Stable identity for the profile whose in-memory worklist is shown."""
+        return (
+            str(getattr(prof, "location", "") or ""),
+            str(getattr(prof, "profile_id", "") or ""),
+            str(getattr(prof, "profile_sii", "") or ""),
+        )
+
+    def _fill_table_for_profile(self, prof: ProfileInfo, *, force: bool = False):
+        """Load a profile only when needed; otherwise render the live worklist.
+
+        Async metadata callbacks and tab changes can arrive after the user has
+        made unsaved changes. Re-reading ``profile.sii`` in that case silently
+        discards the edits, so the current in-memory worklist is authoritative
+        until a successful save or an explicit profile switch.
+        """
+        key = self._profile_worklist_key(prof)
+        same_profile = key == getattr(self, "_worklist_profile_key", None)
+        if not force and same_profile and getattr(self, "current_worklist", None):
+            self.current_profile = prof
+            self._render_current_worklist()
+            return
         for t in (self.table_all, self.table_active):
             t.setUpdatesEnabled(False)
         try:
-            self._fill_table_impl(prof)
+            self._fill_table_impl(prof, force=force)
         finally:
             for t in (self.table_all, self.table_active):
                 t.setUpdatesEnabled(True)
 
-    def _fill_table_impl(self, prof: ProfileInfo):
+    def _fill_table_impl(self, prof: ProfileInfo, *, force: bool = False):
         # 快速扫描未完成时（all_mods 为空 / priority_svc 未就绪），跳过填表格
         # 设置 _profile_fill_pending 标志，数据就绪后自动填充
         if not self.all_mods or not self.all_mods_by_pkg or self.priority_svc is None:
             self._profile_fill_pending = True
             return
         self._profile_fill_pending = False
-        # profile 成功加载后建立启用+优先级 hash 基线，后续改动据此判定 dirty
-        try:
-            if hasattr(self, "current_worklist") and hasattr(self, "_clear_priority_dirty"):
-                self._clear_priority_dirty()
-        except Exception:
-            pass
         try:
             active = self.profile_svc.get_active_mods(prof)
         except Exception as e:
@@ -113,26 +374,17 @@ class _TableDataMixin:
         self.current_worklist = self.priority_svc.build_worklist(
             active, list(self.all_mods_by_pkg.keys())
         )
+        self._worklist_profile_key = self._profile_worklist_key(prof)
+        # Record the baseline only after the new profile worklist exists.
+        # Hashing the previous profile here made dirty-state comparisons use
+        # the wrong profile after a switch.
+        try:
+            if hasattr(self, "_clear_priority_dirty"):
+                self._clear_priority_dirty()
+        except Exception:
+            pass
         # 两张表都用相同数据构建（active 表通过 _apply_filter_to_table 自动只显示 enabled）
-        for t in (self.table_all, self.table_active):
-            t.blockSignals(True)
-            t.setRowCount(0)
-            for entry in self.current_worklist:
-                m = self._lookup_mod(entry["package_name"]) or (entry.get("mod") if isinstance(entry.get("mod"), Mod) else None)
-                # ===== 新增：mod 丢失时的 2 种分支 =====
-                missing = (m is None)
-                if missing:
-                    if not bool(entry.get("enabled")):
-                        # 未启用 + 找不到 → 直接去掉
-                        continue
-                    # 已启用 + 找不到 → 打标记给 add_mod_row 改颜色
-                    entry = dict(entry)  # 复制一份避免污染原 worklist
-                    entry["_missing_mod"] = True
-                t.add_mod_row(entry, m)
-            self._reorder_table_for(t)
-            t.blockSignals(False)
-        self._apply_filter_to_table()
-        self._refresh_status_after_change()
+        self._render_current_worklist()
 
     def _reorder_table_for(self, tbl):
         """对指定 tbl 按 current_worklist 重排序并 renumber"""
@@ -208,6 +460,8 @@ class _TableDataMixin:
                 src_tbl.blockSignals(True)
                 try:
                     for r in range(src_tbl.rowCount()):
+                        if src_tbl.is_folder_row(r):
+                            continue
                         pi = src_tbl.item(r, COL_PKG)
                         if pi is None: continue
                         sync_map[pi.text()] = src_tbl._row_enabled(r)
@@ -217,6 +471,8 @@ class _TableDataMixin:
                 other_tbl.blockSignals(True)
                 try:
                     for r in range(other_tbl.rowCount()):
+                        if other_tbl.is_folder_row(r):
+                            continue
                         pi = other_tbl.item(r, COL_PKG)
                         if pi is None: continue
                         val = sync_map.get(pi.text())
@@ -230,17 +486,39 @@ class _TableDataMixin:
             enabled_pkgs = []
             disabled_pkgs = []
             pkg_enabled = {}
+            invalid_row = False
             for r in range(self.table.rowCount()):
+                if self.table.is_folder_row(r):
+                    continue
                 pkg = self.table.package_at(r)
+                if not pkg:
+                    # Do not rebuild from a half-constructed Qt row. Keeping
+                    # the existing worklist is safer than silently dropping a
+                    # package while drag/drop or a full refresh is in flight.
+                    invalid_row = True
+                    break
                 en = self.table._row_enabled(r)
                 pkg_enabled[pkg] = en
                 if en: enabled_pkgs.append(pkg)
                 else: disabled_pkgs.append(pkg)
-            # 保留 worklist 其他信息，只重排
-            by_pkg = {x["package_name"]: x for x in self.current_worklist}
+            if invalid_row:
+                return
+            # 保留 worklist 其他信息，只重排。一个 profile 可能暂时同时
+            # 包含同一 Mod 的别名行，不能用 package_name -> entry 的单值
+            # 字典，否则同步时会静默丢掉前面的行。
+            by_pkg: Dict[str, list] = {}
+            for x in self.current_worklist:
+                by_pkg.setdefault(str(x.get("package_name") or ""), []).append(x)
+
+            def take_work_entry(package_name: str) -> dict:
+                queue = by_pkg.get(package_name)
+                if queue:
+                    return dict(queue.pop(0))
+                return {"package_name": package_name}
+
             new_wl = []
             for i, pn in enumerate(enabled_pkgs):
-                w = dict(by_pkg.get(pn, {"package_name": pn}))
+                w = take_work_entry(pn)
                 w["enabled"] = True
                 w["order"] = i
                 # 拖动后不仅更新显示顺序，还要更新真正用于保存和优先级
@@ -248,14 +526,52 @@ class _TableDataMixin:
                 w["priority_index"] = i
                 new_wl.append(w)
             for pn in disabled_pkgs:
-                w = dict(by_pkg.get(pn, {"package_name": pn}))
+                w = take_work_entry(pn)
                 w["enabled"] = False
                 w["order"] = -1
                 w["priority_index"] = None
                 new_wl.append(w)
+            # Qt 重绘期间如果某行暂时没有出现在表格中，也不要把它从
+            # 内存工作列表删除；保留为禁用行，下一次渲染仍可见。
+            for queue in by_pkg.values():
+                for old in queue:
+                    w = dict(old)
+                    w["enabled"] = False
+                    w["order"] = -1
+                    w["priority_index"] = None
+                    new_wl.append(w)
             self.current_worklist = new_wl
+            self._sync_mod_runtime_state()
         finally:
             self._in_sync_worklist = False
+
+    def _sync_mod_runtime_state(self) -> None:
+        """Keep Mod runtime flags consistent with the in-memory worklist."""
+        mods = list(getattr(self, "all_mods", []) or [])
+        for mod in mods:
+            try:
+                mod.is_enabled = False
+                mod.priority_index = -1
+            except Exception:
+                continue
+        prio = 0
+        for entry in getattr(self, "current_worklist", []) or []:
+            if not entry.get("enabled"):
+                continue
+            mod = entry.get("mod")
+            if mod is None:
+                try:
+                    mod = self._lookup_mod(entry.get("package_name", ""))
+                except Exception:
+                    mod = None
+            if mod is None:
+                continue
+            try:
+                mod.is_enabled = True
+                mod.priority_index = prio
+                prio += 1
+            except Exception:
+                pass
 
     def _refresh_status_after_change(self):
         en = sum(1 for x in self.current_worklist if x.get("enabled"))
@@ -280,24 +596,54 @@ class _TableDataMixin:
         self.statusBar().showMessage(
             _("ui.sb_enabled_count", en=en, tot=tot, prof=prof_id) + suffix)
 
+    def _reindex_worklist(self):
+        """统一刷新批量启用/禁用后的保存顺序字段。"""
+        order = 0
+        for entry in self.current_worklist:
+            if entry.get("enabled"):
+                entry["order"] = order
+                entry["priority_index"] = order
+                order += 1
+            else:
+                entry["order"] = -1
+                entry["priority_index"] = None
+
     def _batch(self, action: str):
-        rows = self.table.selected_rows()
+        rows = self._selected_worklist_indices()
         if not rows:
             QMessageBox.information(self, _("dlg.hint_title"), _("dlg.hint_select_rows"))
             return
         self._sync_worklist_from_table()
         wl2 = PriorityService.batch_toggle(self.current_worklist, rows, action)
         self.current_worklist = wl2
+        self._sync_mod_runtime_state()
+        try:
+            self._mark_priority_dirty("启用状态已批量变更 · 请点工具栏「保存」写回 profile")
+        except Exception:
+            pass
         self._schedule_refresh(order=True, filter=True, counts=True, status=True)
 
     def _move(self, kind: str):
-        rows = self.table.selected_rows()
+        selected_rows = self.table.selected_rows()
+        rows = self._selected_worklist_indices()
         if not rows: return
         self._sync_worklist_from_table()
-        if kind == "up": self.current_worklist = self.priority_svc.move_up(self.current_worklist, rows)
+        has_folder = any(self.table.is_folder_row(r) for r in selected_rows)
+        if has_folder:
+            pkg_set = self._selected_package_set()
+            if kind == "up": self.current_worklist = self.priority_svc.move_up_by_package_set(self.current_worklist, pkg_set)
+            elif kind == "down": self.current_worklist = self.priority_svc.move_down_by_package_set(self.current_worklist, pkg_set)
+            elif kind == "top": self.current_worklist = self.priority_svc.move_top_by_package_set(self.current_worklist, pkg_set)
+            elif kind == "bottom": self.current_worklist = self.priority_svc.move_bottom_by_package_set(self.current_worklist, pkg_set)
+        elif kind == "up": self.current_worklist = self.priority_svc.move_up(self.current_worklist, rows)
         elif kind == "down": self.current_worklist = self.priority_svc.move_down(self.current_worklist, rows)
         elif kind == "top": self.current_worklist = self.priority_svc.move_top(self.current_worklist, rows)
         elif kind == "bottom": self.current_worklist = self.priority_svc.move_bottom(self.current_worklist, rows)
+        self._sync_mod_runtime_state()
+        try:
+            self._mark_priority_dirty("加载顺序已更改 · 请点工具栏「保存」写回 profile")
+        except Exception:
+            pass
         self._schedule_refresh(order=True, filter=True, counts=True, status=True)
 
     def _move_up(self): self._move("up")
@@ -312,20 +658,33 @@ class _TableDataMixin:
         """在启用列表中，将选中的行往前(-)/后(+)移动 delta 个优先级（单位是 enabled-list 的 index，而非表格行）。"""
         tbl = getattr(self, "table", None)
         if tbl is None: return
-        rows = tbl.selected_rows()
+        selected_rows = tbl.selected_rows()
+        rows = self._selected_worklist_indices()
         if not rows or not self.priority_svc or not self.current_profile:
             return
         self._sync_worklist_from_table()
-        # move_up 支持 steps 参数，move_down 同理
-        if delta < 0:
+        # Folder rows move as one package block; individual rows keep the
+        # existing index-based behavior.
+        if any(tbl.is_folder_row(r) for r in selected_rows):
+            pkg_set = self._selected_package_set()
+            if delta < 0:
+                self.current_worklist = self.priority_svc.move_up_by_package_set(self.current_worklist, pkg_set, steps=abs(delta))
+            else:
+                self.current_worklist = self.priority_svc.move_down_by_package_set(self.current_worklist, pkg_set, steps=delta)
+        elif delta < 0:
             self.current_worklist = self.priority_svc.move_up(self.current_worklist, rows, steps=abs(delta))
         else:
             self.current_worklist = self.priority_svc.move_down(self.current_worklist, rows, steps=delta)
+        self._sync_mod_runtime_state()
+        try:
+            self._mark_priority_dirty("加载顺序已更改 · 请点工具栏「保存」写回 profile")
+        except Exception:
+            pass
         # 先记下 pkg 以便恢复选中
         pkgs = []
-        for r in rows:
+        for r in selected_rows:
             it = tbl.item(r, COL_PKG)
-            if it: pkgs.append(it.text())
+            if it and not tbl.is_folder_row(r): pkgs.append(it.text())
         self._schedule_refresh(order=True, filter=True, counts=True, status=True)
         # 恢复选中（按 COL_PKG 查找）—— 延迟到下一轮事件循环以便表格刷新完成
         def _restore_sel(pkgs=pkgs):
@@ -340,16 +699,164 @@ class _TableDataMixin:
 
     # ---------- 分类整体操作 Helper ----------
     def _cat_key_to_pkg_set(self, cat_key: str) -> set:
-        """返回指定分类下所有 mod 的 package_name 集合。"""
-        pkgs = set()
+        """Return package keys in a category without counting index aliases.
+
+        ``all_mods_by_pkg`` is deliberately an alias index (a single Mod can
+        be reachable by mod_id, manifest package name and a Workshop form).
+        Treating its keys as rows made checkbox state and category operations
+        depend on how many aliases happened to be present.  Prefer the
+        current profile worklist, whose entries are the exact strings that
+        will be written back to ``active_mods``.
+        """
+        packages = self._category_worklist_packages(cat_key)
+        if packages:
+            return packages
+        # No profile/worklist yet: return one canonical key per scanned Mod.
+        seen = set()
+        out = set()
+        for mod in getattr(self, "all_mods", []) or []:
+            if (getattr(mod, "category_tag", "") or "") != cat_key:
+                continue
+            identity = str(getattr(mod, "mod_id", "") or "")
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            mf = getattr(mod, "manifest", None)
+            out.add(str(getattr(mf, "package_name", "") or identity))
+        return out
+
+    def _category_tag_for_entry(self, entry, mod) -> str:
+        """Resolve a Mod's folder tag across id/package/profile aliases.
+
+        Older scans could persist a Workshop category under the profile key
+        while newer scans identify the same object by its numeric directory id.
+        Looking up all known aliases keeps those records visible in the same
+        folder instead of silently treating them as uncategorized.
+        """
         try:
-            for pkg, mod in (self.all_mods_by_pkg or {}).items():
-                tag = getattr(mod, "category_tag", "") or ""
-                if tag == cat_key:
-                    pkgs.add(pkg)
+            tag = str(getattr(mod, "category_tag", "") or "") if mod is not None else ""
+        except Exception:
+            tag = ""
+        if tag:
+            # Category folders are user-owned state. If a stale cache record
+            # refers to a folder that no longer exists, expose the Mod as
+            # uncategorized instead of making it disappear from the tree.
+            try:
+                from services.category_service import all_folders
+                if tag not in set(all_folders()):
+                    try:
+                        mod._category_tag = ""
+                    except Exception:
+                        pass
+                    tag = ""
+            except Exception:
+                pass
+        if tag:
+            return tag
+        raw_entry = str((entry or {}).get("package_name", "") or "").strip()
+        entry_left = raw_entry.split("|", 1)[0].strip()
+        aliases = [raw_entry, entry_left]
+        if mod is not None:
+            aliases[:0] = [
+                getattr(mod, "mod_id", ""),
+                getattr(getattr(mod, "manifest", None), "package_name", ""),
+            ]
+        try:
+            import re as _re_cat_tag
+            from services import category_service as _cs
+            expanded_aliases = []
+            for alias in aliases:
+                alias = str(alias or "").strip()
+                if not alias:
+                    continue
+                expanded_aliases.append(alias)
+                left = alias.split("|", 1)[0].strip()
+                stripped = _re_cat_tag.sub(
+                    r"_(workshop|copy\d*|local)$", "", left,
+                    flags=_re_cat_tag.IGNORECASE,
+                )
+                if left and left not in expanded_aliases:
+                    expanded_aliases.append(left)
+                if stripped and stripped not in expanded_aliases:
+                    expanded_aliases.append(stripped)
+            for alias in expanded_aliases:
+                cached = str(_cs.get_category(alias) or "")
+                if cached:
+                    try:
+                        if cached not in set(_cs.all_folders()):
+                            cached = ""
+                    except Exception:
+                        pass
+                if cached:
+                    if mod is not None:
+                        try:
+                            mod._category_tag = cached
+                        except Exception:
+                            pass
+                    return cached
         except Exception:
             pass
-        return pkgs
+        return ""
+
+    def _category_worklist_entries(self, cat_key: str, *, dedupe: bool = True):
+        """Yield ``(entry, mod)`` pairs belonging to ``cat_key``.
+
+        For entries that cannot currently be resolved to a scanned Mod, use
+        the persisted category cache by canonical id.  This keeps Workshop
+        entries operable even while their package metadata is unavailable.
+        """
+        import re as _re_cat
+
+        def _canon(value: object) -> str:
+            value = str(value or "").split("|", 1)[0].strip()
+            value = _re_cat.sub(r"_(workshop|copy\d*|local)$", "", value,
+                                flags=_re_cat.IGNORECASE)
+            return value.casefold()
+
+        cached_ids = set()
+        try:
+            from services import category_service as _cs
+            cached_ids = {_canon(x) for x in _cs.mods_in_category(cat_key) if _canon(x)}
+        except Exception:
+            pass
+        seen = set()
+        for entry in getattr(self, "current_worklist", []) or []:
+            pkg = str(entry.get("package_name") or "").strip()
+            if not pkg:
+                continue
+            mod = self._lookup_mod(pkg)
+            if mod is not None:
+                tag = self._category_tag_for_entry(entry, mod)
+                if tag != cat_key:
+                    continue
+                identity = str(getattr(mod, "mod_id", "") or _canon(pkg))
+            else:
+                identity = _canon(pkg)
+                if not identity or identity not in cached_ids:
+                    continue
+            # Category operations should act once per real Mod. Statistics
+            # pass dedupe=False so the displayed row count remains additive
+            # even when a profile temporarily contains alias rows.
+            if dedupe:
+                dedupe_key = identity.casefold()
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+            yield entry, mod
+
+    def _category_worklist_count(self, cat_key: str) -> int:
+        """Count displayed rows without collapsing aliases."""
+        return sum(
+            1 for _entry, _mod in self._category_worklist_entries(cat_key, dedupe=False)
+        )
+
+    def _category_worklist_packages(self, cat_key: str) -> set:
+        """按当前 worklist 的真实 package_name 建立分类集合。"""
+        return {
+            str(entry.get("package_name"))
+            for entry, _mod in self._category_worklist_entries(cat_key)
+            if entry.get("package_name")
+        }
 
     def _cat_display_name(self, cat_key: str) -> str:
         if not cat_key:
@@ -360,11 +867,24 @@ class _TableDataMixin:
         return cat_key
 
     def _save_worklist_after_cat_op(self, cat_key: str, count: int):
-        """分类操作完成后统一收尾：重填表格、刷新状态、刷新计数。"""
-        if self.current_profile:
-            self._fill_table_for_profile(self.current_profile)
-        else:
+        """分类操作完成后刷新当前内存工作表，不从磁盘重新读取旧 profile。"""
+        # 分类批量操作是“先改内存、用户点击保存再写盘”。
+        # 这里若调用 _fill_table_for_profile 会从 profile.sii 读回旧顺序，
+        # 直接覆盖刚完成的启用/禁用/优先级变更。
+        try:
+            # Rebuild cell check states from the in-memory worklist.  Merely
+            # reordering existing rows leaves the old checkbox values visible
+            # after a category enable/disable operation.
+            self._render_current_worklist()
+        except Exception:
+            try:
+                self._reorder_table_according_to_worklist()
+            except Exception:
+                pass
+        try:
             self._apply_filter_to_table()
+        except Exception:
+            pass
         try:
             self._refresh_category_counts()
         except Exception:
@@ -381,17 +901,19 @@ class _TableDataMixin:
         if not self.current_profile:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         count = 0
         for e in self.current_worklist:
             if e.get("package_name") in pkg_set:
                 if not e.get("enabled"):
                     count += 1
                 e["enabled"] = True
+        self._reindex_worklist()
+        self._mark_priority_dirty("已启用整个分类 · 请点工具栏保存")
         self._save_worklist_after_cat_op(cat_key, count)
 
     def _disable_category(self, cat_key: str):
@@ -399,17 +921,19 @@ class _TableDataMixin:
         if not self.current_profile:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         count = 0
         for e in self.current_worklist:
             if e.get("package_name") in pkg_set:
                 if e.get("enabled"):
                     count += 1
                 e["enabled"] = False
+        self._reindex_worklist()
+        self._mark_priority_dirty("已禁用整个分类 · 请点工具栏保存")
         self._save_worklist_after_cat_op(cat_key, count)
 
     def _toggle_category(self, cat_key: str):
@@ -417,16 +941,18 @@ class _TableDataMixin:
         if not self.current_profile:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         count = 0
         for e in self.current_worklist:
             if e.get("package_name") in pkg_set:
                 e["enabled"] = not e.get("enabled", False)
                 count += 1
+        self._reindex_worklist()
+        self._mark_priority_dirty("已切换整个分类 · 请点工具栏保存")
         self._save_worklist_after_cat_op(cat_key, count)
 
     def _move_cat_up(self, cat_key: str, steps: int = 1):
@@ -434,11 +960,11 @@ class _TableDataMixin:
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         self.current_worklist = self.priority_svc.move_up_by_package_set(
             self.current_worklist, pkg_set, steps=steps
         )
@@ -454,11 +980,11 @@ class _TableDataMixin:
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         self.current_worklist = self.priority_svc.move_down_by_package_set(
             self.current_worklist, pkg_set, steps=steps
         )
@@ -474,11 +1000,11 @@ class _TableDataMixin:
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         self.current_worklist = self.priority_svc.move_top_by_package_set(
             self.current_worklist, pkg_set
         )
@@ -494,11 +1020,11 @@ class _TableDataMixin:
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
-        pkg_set = self._cat_key_to_pkg_set(cat_key)
+        self._sync_worklist_from_table()
+        pkg_set = self._category_worklist_packages(cat_key)
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self._sync_worklist_from_table()
         self.current_worklist = self.priority_svc.move_bottom_by_package_set(
             self.current_worklist, pkg_set
         )
@@ -699,9 +1225,38 @@ class _TableDataMixin:
         return False
 
     # ---------- 保存 profile ----------
+    def _is_game_running(self) -> bool:
+        """Return whether ETS2/ATS is currently running.
+
+        The game can rewrite profile.sii during shutdown, so profile changes
+        must never start while the game process is alive.
+        """
+        try:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            for name in ("eurotrucks2.exe", "amtrucks.exe"):
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+                    capture_output=True, text=True,
+                    creationflags=flags, timeout=3,
+                )
+                if name.lower() in result.stdout.lower():
+                    return True
+        except Exception:
+            # If process inspection is unavailable, keep the existing save flow
+            # rather than making the manager unusable on non-Windows systems.
+            return False
+        return False
+
     def _save_profile(self):
         if not self.current_profile:
             QMessageBox.warning(self, _("dlg.no_profile_title"), _("dlg.no_profile_save"))
+            return
+        if self._is_game_running():
+            QMessageBox.warning(
+                self, "无法保存存档",
+                "检测到 Euro Truck Simulator 2 仍在运行。\n\n"
+                "请先完全退出游戏，再保存 Mod 配置。",
+            )
             return
         self._sync_worklist_from_table()
         if not self._ensure_backup_before_save():
@@ -724,7 +1279,25 @@ class _TableDataMixin:
         progress.show(); QApplication.processEvents()
         try:
             label.setText("正在写入 profile…"); bar.setValue(45); QApplication.processEvents()
-            wrote = self.profile_svc.set_active_mods(self.current_profile, new_active)
+            # Saving is infrequent and profile corruption is costly. Verify
+            # the just-written active_mods instead of discovering a mismatch
+            # only after the game starts.
+            wrote = self.profile_svc.set_active_mods(
+                self.current_profile, new_active, verify=True
+            )
+            self.current_profile.mod_count = len(new_active)
+            try:
+                pid = getattr(self.current_profile, "profile_id", "")
+                name = (
+                    self.current_profile.display_name
+                    or self.current_profile.save_name
+                    or self.current_profile.company_name
+                    or pid
+                )
+                label_text = f"{name}（已启用 {len(new_active)} 个 Mod）"
+                self._update_profile_tree_label(pid, label_text, self.current_profile)
+            except Exception:
+                pass
             label.setText("正在刷新界面…"); bar.setValue(90); QApplication.processEvents()
             try: self._clear_priority_dirty()
             except Exception: pass
@@ -797,40 +1370,105 @@ class _TableDataMixin:
         from services.category_service import all_folders
         cur = self.tree_categories.currentItem()
         cur_role = cur.data(0, Qt.UserRole) if cur else None
-        for it in list(self._cat_items.values()):
-            idx = self.tree_categories.indexOfTopLevelItem(it)
-            if idx >= 0:
-                self.tree_categories.takeTopLevelItem(idx)
-        self._cat_items.clear()
-        for fname in all_folders():
-            it = QTreeWidgetItem([_("ui.cat_prefix", label=fname)])
-            it.setData(0, Qt.UserRole, ("__filter_cat__", fname))
-            self._cat_items[fname] = it
-            self.tree_categories.addTopLevelItem(it)
-        if cur_role:
-            key = cur_role[1] if cur_role[0] == "__filter_cat__" else None
-            if key is None:
-                self.tree_categories.setCurrentItem(self._cat_item_all)
-            elif key == "":
-                self.tree_categories.setCurrentItem(self._cat_item_uncategorized)
-            elif key in self._cat_items:
-                self.tree_categories.setCurrentItem(self._cat_items[key])
-            else:
-                self.tree_categories.setCurrentItem(self._cat_item_all)
-        self._refresh_category_counts()
+        # QTreeWidget.itemChanged fires for setText/setCheckState as well as
+        # for a user's click.  Rebuilding/counting the tree while the signal
+        # is live used to invoke _enable/_disable_category recursively and
+        # overwrite the just-applied operation.  Keep the guard active for
+        # the entire programmatic update, not only the final check-state pass.
+        was_updating = getattr(self, "_updating_category_checks", False)
+        self._updating_category_checks = True
+        try:
+            for it in list(self._cat_items.values()):
+                idx = self.tree_categories.indexOfTopLevelItem(it)
+                if idx >= 0:
+                    self.tree_categories.takeTopLevelItem(idx)
+            self._cat_items.clear()
+            for fname in all_folders():
+                it = QTreeWidgetItem([_("ui.cat_prefix", label=fname)])
+                it.setData(0, Qt.UserRole, ("__filter_cat__", fname))
+                self._make_category_item_checkable(it)
+                self._cat_items[fname] = it
+                self.tree_categories.addTopLevelItem(it)
+            if cur_role:
+                key = cur_role[1] if cur_role[0] == "__filter_cat__" else None
+                if key is None:
+                    self.tree_categories.setCurrentItem(self._cat_item_all)
+                elif key == "":
+                    self.tree_categories.setCurrentItem(self._cat_item_uncategorized)
+                elif key in self._cat_items:
+                    self.tree_categories.setCurrentItem(self._cat_items[key])
+                else:
+                    self.tree_categories.setCurrentItem(self._cat_item_all)
+            self._refresh_category_counts()
+        finally:
+            self._updating_category_checks = was_updating
 
     def _refresh_category_counts(self):
-        """把 services.category_service.stats() 的计数写到每个树节点后。"""
+        """Write counts for currently scanned/profile-visible Mods only."""
         try:
-            from services.category_service import stats
-            st = stats()
-            total = sum(st.values())
-            self._cat_item_all.setText(0, _("ui.cat_all") + f"  ({total})")
-            self._cat_item_uncategorized.setText(0, _("ui.cat_uncategorized") + f"  ({st.get('', 0)})")
-            for ck, it in self._cat_items.items():
-                it.setText(0, _("ui.cat_prefix", label=ck) + f"  ({st.get(ck, 0)})")
+            categories = [""] + list(self._cat_items.keys())
+            st = {
+                category: self._category_worklist_count(category)
+                for category in categories
+            }
+            was_updating = getattr(self, "_updating_category_checks", False)
+            self._updating_category_checks = True
+            try:
+                total = len(getattr(self, "current_worklist", []) or [])
+                if not total:
+                    total = len(getattr(self, "all_mods", []) or [])
+                self._cat_item_all.setText(0, _("ui.cat_all") + f"  ({total})")
+                self._cat_item_uncategorized.setText(0, _("ui.cat_uncategorized") + f"  ({st.get('', 0)})")
+                for ck, it in self._cat_items.items():
+                    it.setText(0, _("ui.cat_prefix", label=ck) + f"  ({st.get(ck, 0)})")
+                # checkbox 状态反映当前 profile 中该分类的启用情况
+                for ck, it in self._cat_items.items():
+                    self._set_category_check_state(it, ck)
+                self._set_category_check_state(self._cat_item_uncategorized, "")
+            finally:
+                self._updating_category_checks = was_updating
         except Exception:
             pass
+
+    def _set_category_check_state(self, item: QTreeWidgetItem, cat_key: str):
+        # Uncategorized has no enable/disable semantics. Keep it a plain
+        # filter node and never assign a check state (assigning one can make
+        # Qt render an indicator even when the user-checkable flag is absent).
+        if not cat_key:
+            return
+        # 以实际 worklist 条目为唯一事实来源，避免 package index 中的
+        # Workshop/本地别名重复计数，或与 profile 使用的键不一致。
+        members = list(self._category_worklist_entries(cat_key))
+        enabled = sum(1 for entry, _mod in members if entry.get("enabled"))
+        total = len(members)
+        # 分类 checkbox 只使用二态：全部启用才勾选，否则未勾选。
+        state = Qt.Checked if total > 0 and enabled == total else Qt.Unchecked
+        item.setCheckState(0, state)
+
+    def _on_category_item_changed(self, item: QTreeWidgetItem, column: int):
+        if column != 0 or getattr(self, "_updating_category_checks", False):
+            return
+        # 初始化建树阶段或尚未选择存档时，不执行批量启用/禁用。
+        if not getattr(self, "current_profile", None):
+            return
+        role = item.data(0, Qt.UserRole)
+        if not role or role[0] != "__filter_cat__":
+            return
+        cat_key = role[1] or ""
+        # 未分类只能筛选/分配，禁止通过 checkbox 批量启用或禁用。
+        if not cat_key:
+            self._updating_category_checks = True
+            try:
+                item.setCheckState(0, Qt.Unchecked)
+            finally:
+                self._updating_category_checks = False
+            self.statusBar().showMessage("未分类仅支持筛选和分配到文件夹", 3000)
+            return
+        # 部分勾选/勾选均视为启用；取消勾选视为禁用
+        if item.checkState(0) == Qt.Unchecked:
+            self._disable_category(cat_key)
+        else:
+            self._enable_category(cat_key)
 
     def _apply_filter_to_table(self):
         cat = getattr(self, "_current_filter_cat", None)
@@ -852,6 +1490,31 @@ class _TableDataMixin:
                 src_item = tbl.item(row, COL_SOURCE)
                 name_text = name_item.text() if name_item is not None else ""
                 src_text = src_item.text() if src_item is not None else ""
+                if tbl.is_folder_row(row):
+                    folder = tbl.row_folder(row)
+                    # Folder rows are group headers, not profile entries. They
+                    # stay visible in the active tab when at least one member
+                    # is enabled; their children are filtered independently.
+                    if tab_key == "active":
+                        has_enabled = any(
+                            str(e.get("package_name") or "") and e.get("enabled")
+                            and self._category_tag_for_entry(
+                                {"package_name": e.get("package_name")},
+                                self._lookup_mod(str(e.get("package_name") or "")) or e.get("mod"),
+                            ) == folder
+                            for e in getattr(self, "current_worklist", []) or []
+                        )
+                        hide = not has_enabled
+                    if kw_low:
+                        joined = f"{folder.lower()} 自定义文件夹"
+                        hide = hide or any(tok not in joined for tok in kw_low.split() if tok)
+                    if cat is not None:
+                        hide = hide or (cat not in (None, folder))
+                    tbl.setRowHidden(row, hide)
+                    continue
+                if tbl.is_folder_child_row(row) and tbl.row_folder(row) not in tbl._expanded_folders:
+                    tbl.setRowHidden(row, True)
+                    continue
                 mod = self._lookup_mod(pkg) if pkg else None
                 # (A) Tab 过滤：active 表只显示 enabled 的条目（根据 tbl.check 状态判断以兼容实时勾选）
                 if tab_key == "active":
@@ -877,10 +1540,11 @@ class _TableDataMixin:
                     for tok in tokens:
                         if tok not in joined:
                             hide = True; break
-                # (C) 分类文件夹过滤
-                if not hide and mod is not None:
+                # (C) 分类文件夹过滤。即使扫描阶段尚未解析出 Mod 对象，
+                # 也要根据 profile package key 的分类缓存进行过滤。
+                if not hide and cat is not None:
                     try:
-                        mcat = getattr(mod, "category_tag", "") or ""
+                        mcat = self._category_tag_for_entry({"package_name": pkg}, mod)
                     except Exception:
                         mcat = ""
                     if cat == "":
@@ -891,40 +1555,20 @@ class _TableDataMixin:
         self._refresh_category_counts()
 
     def _assign_checked_rows_to_category(self, cat_key: str):
-        n = 0
-        for row in range(self.table.rowCount()):
-            if self.table.isRowHidden(row): continue
-            if not self.table._row_enabled(row):  # 用"启用勾选"作为批量归类选择？——用户说的"勾选"其实是表格的启用复选框（唯一勾选）
-                pass
-            # 要求：表格里"勾选的条目"——本表只有启用复选框是勾选，就用它
-            # 但启用复选框不是"选择条目"的语义，改：用"选中的行（高亮）"作为归类目标，更符合资源管理器直觉
-        # 重新统计：选高亮行（selected_rows）
         rows = self.table.selected_rows()
         if not rows:
             QMessageBox.information(self, _("dlg.assign_hint_title"), _("dlg.assign_hint_msg"))
             return
+        packages = []
         for r in rows:
-            if self.table.isRowHidden(r): continue
+            if self.table.isRowHidden(r):
+                continue
             pkg_item = self.table.item(r, COL_PKG)
-            pkg = pkg_item.text() if pkg_item is not None else None
-            mod = self._lookup_mod(pkg) if pkg else None
-            if mod is None: continue
-            try:
-                mod.category_tag = cat_key or ""
-                n += 1
-            except Exception:
-                pass
-        try:
-            from services import category_service as _cs
-            _cs.save()
-        except Exception:
-            pass
-        self._apply_filter_to_table()
-        cat_label = _("cat.uncategorized") if cat_key == "" else cat_key
-        self.statusBar().showMessage(
-            _("ui.sb_assigned", n=n, cat=cat_label), 5000
-        )
-        self._refresh_category_counts()
+            if pkg_item is not None and pkg_item.text():
+                packages.append(pkg_item.text())
+        # Tree context-menu assignment and drag/drop now share one path,
+        # including unresolved Workshop/profile aliases and immediate refresh.
+        self._assign_packages_to_category(packages, cat_key)
 
     # ---------- 加载顺序弹窗 ----------
     def _show_load_order_dialog(self):
@@ -946,27 +1590,51 @@ class _TableDataMixin:
                 _("dlg.lo_empty", prof=str(prof))
             )
             return
-        lines = [
-            _("dlg.lo_html_profile", prof=str(prof)),
-            _("dlg.lo_html_count", n=len(active)),
-            "<ol style='margin:8px 0 8px 28px; line-height:1.75'>",
-        ]
-        for i, pn in enumerate(active, start=1):
-            mod = self._lookup_mod(pn)
-            if mod is None:
-                lines.append(_("dlg.lo_missing", pn=f"{pn!r}"))
-                continue
-            title = mod.display_title
-            ver = mod.display_version
-            lines.append(f"<li>{title}  <span style='color:#666;font-size:12px'>({ver})</span></li>")
-        lines.append("</ol>")
-        html = "<style>body{font-family:'Microsoft YaHei','PingFang SC',sans-serif;}</style>" + "".join(lines)
         dlg = QDialog(self)
         dlg.setWindowTitle(_("dlg.lo_dlg_title", prof=str(prof)))
         dlg.resize(580, 620)
         lv = QVBoxLayout(dlg)
-        tb = QTextBrowser(dlg); tb.setHtml(html)
+        lv.addWidget(QLabel(_("ui.gb_categories")))
+        cat_cb = QComboBox(dlg)
+        cat_cb.addItem(_("ui.cat_all"), None)
+        try:
+            from services.category_service import all_folders
+            categories = list(all_folders())
+        except Exception:
+            categories = []
+        if "" in [getattr(self._lookup_mod(pn), "category_tag", "") or "" for pn in active]:
+            cat_cb.addItem(_("ui.cat_uncategorized"), "")
+        for cat in categories:
+            cat_cb.addItem(cat, cat)
+        lv.addWidget(cat_cb)
+        tb = QTextBrowser(dlg)
         lv.addWidget(tb)
+
+        def _render_category(cat_key=None):
+            selected = []
+            for pn in active:
+                mod = self._lookup_mod(pn)
+                mod_cat = (getattr(mod, "category_tag", "") or "") if mod else None
+                if cat_key is not None and mod_cat != cat_key:
+                    continue
+                selected.append((pn, mod))
+            lines = [
+                _("dlg.lo_html_profile", prof=str(prof)),
+                _("dlg.lo_html_count", n=len(selected)),
+                "<ol style='margin:8px 0 8px 28px; line-height:1.75'>",
+            ]
+            for pn, mod in selected:
+                if mod is None:
+                    lines.append(_("dlg.lo_missing", pn=f"{pn!r}"))
+                    continue
+                title = mod.display_title
+                ver = mod.display_version
+                lines.append(f"<li>{title}  <span style='color:#666;font-size:12px'>({ver})</span></li>")
+            lines.append("</ol>")
+            tb.setHtml("<style>body{font-family:'Microsoft YaHei','PingFang SC',sans-serif;}</style>" + "".join(lines))
+
+        cat_cb.currentIndexChanged.connect(lambda _i: _render_category(cat_cb.currentData()))
+        _render_category(None)
         bb = QDialogButtonBox(QDialogButtonBox.Ok)
         bb.accepted.connect(dlg.accept)
         lv.addWidget(bb)

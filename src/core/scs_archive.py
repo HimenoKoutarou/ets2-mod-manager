@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import mmap
 import os
+import re
 import zipfile
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -359,6 +360,22 @@ class ScsArchiveReader:
             if ext:
                 for suffix in _ICON_EXTENSIONS:
                     add(stem + suffix)
+        # A number of legacy HashFS mods omit the icon field and name the
+        # image after the archive itself (e.g. sibirmap*.jpg). Try the package
+        # stem and its common separator variants before invoking any expensive
+        # external archive scan.
+        try:
+            stem = Path(self.path).stem
+            if stem:
+                add(stem)
+                for suffix in _ICON_EXTENSIONS:
+                    add(stem + suffix)
+                compact = re.sub(r"[_\-]+(?:v?\d.*)$", "", stem, flags=re.IGNORECASE)
+                if compact and compact != stem:
+                    for suffix in _ICON_EXTENSIONS:
+                        add(compact + suffix)
+        except Exception:
+            pass
         for name in (
             "mod_icon.jpg", "icon.jpg", "preview.jpg", "thumbnail.jpg",
             "mod_icon.png", "icon.png", "preview.png", "thumbnail.png",
@@ -482,6 +499,17 @@ class ScsArchiveReader:
                             raw = b
                             used = c
                             break
+            except Exception:
+                pass
+        # Legacy encrypted packages may have no icon field and use an
+        # arbitrary image filename. Ask SXC for the first image as a final
+        # fallback instead of requiring a manifest declaration.
+        if raw is None and self._mode == "external":
+            try:
+                from services.external_extractor_service import extract_first_image_bytes
+                found = extract_first_image_bytes(self.path)
+                if found:
+                    raw, used = found
             except Exception:
                 pass
         if raw is None:

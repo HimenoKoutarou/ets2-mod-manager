@@ -38,13 +38,21 @@ class FerryData:
 
 
 @dataclass
+class HintTextData:
+    text: str = ""
+    source_mod: str = ""
+
+
+@dataclass
 class GameDataResult:
     cities: List[CityData] = field(default_factory=list)
     countries: List[CountryData] = field(default_factory=list)
     ferries: List[FerryData] = field(default_factory=list)
+    hints: List[HintTextData] = field(default_factory=list)
     city_names: List[str] = field(default_factory=list)
     country_names: List[str] = field(default_factory=list)
     ferry_names: List[str] = field(default_factory=list)
+    hint_texts: List[str] = field(default_factory=list)
     native_locale_dict: Dict[str, str] = field(default_factory=dict)
 
 
@@ -54,6 +62,50 @@ class FileWithPriority:
     file_text: str
     source_mod: str
     priority: int
+
+
+def _is_l10n_def_path(path: str) -> bool:
+    """Whether a logical archive path can contain city/country/ferry data.
+
+    Localization does not need every file under ``def``. Restricting reads to
+    these roots avoids opening thousands of unrelated vehicle/company/material
+    definitions in large map packages.
+    """
+    value = str(path or "").replace("\\", "/").lstrip("/").lower()
+    if not value.startswith("def/") or not value.endswith((".sii", ".sui")):
+        return False
+    rel = value[4:]
+    return rel == "city.sii" or rel.startswith((
+        "city.", "city/", "country.sii", "country.", "country/",
+        "ferry.sii", "ferry.", "ferry/", "sign/",
+    ))
+
+
+def _extract_hint_texts_from_text(text: str, source_mod: str) -> List[HintTextData]:
+    """Extract user-facing sign/quick-prompt strings from def/sign files."""
+    try:
+        units = parse_sii(text)
+    except Exception:
+        return []
+    result: List[HintTextData] = []
+    seen: set[str] = set()
+    for unit in units:
+        values: List[str] = []
+        if unit.unit_type == "sign_template_text":
+            values.append(str(unit.get("text", "") or ""))
+        elif unit.unit_type == "sign_editor_project":
+            values.extend(str(v or "") for v in unit.get_list("quick_texts"))
+        for value in values:
+            value = value.strip()
+            if not value or value in seen or len(value) > 160:
+                continue
+            if value.startswith(("/", "@", "<")) or value.isdigit():
+                continue
+            if not any(ch.isalpha() for ch in value):
+                continue
+            seen.add(value)
+            result.append(HintTextData(text=value, source_mod=source_mod))
+    return result
 
 
 def _parse_include_paths(text: str) -> List[str]:
@@ -292,7 +344,10 @@ def merge_game_data(
 
 
 def collect_all_def_files(
-    active_mods: List[Tuple[str, str]]
+    active_mods: List[Tuple[str, str]],
+    target_locale: str = "zh_cn",
+    should_stop=None,
+    progress=None,
 ) -> Tuple[Dict[str, FileWithPriority], Dict[str, Dict[str, str]]]:
     """
     扫描所有已启用mod，收集def文件和locale翻译文件，路径冲突时保留最高优先级mod的版本
@@ -308,20 +363,33 @@ def collect_all_def_files(
     native_locale_by_lang: Dict[str, Dict[str, str]] = {}
 
     for priority, (mod_path, display_name) in enumerate(active_mods):
+        if should_stop and should_stop():
+            break
+        if progress:
+            progress(priority, len(active_mods), display_name or mod_path)
         source_mod = display_name or mod_path
+        tmp_root = None
         try:
             reader = ScsArchiveReader(mod_path)
         except Exception:
             continue
 
         if reader._mode == "external":
-            # Encrypted SCS# packages cannot enumerate entries directly. For
-            # localization, fully extract them on demand so def/locale files
-            # are discoverable instead of silently skipped.
+            # Encrypted packages cannot be enumerated by ScsArchiveReader.
+            # SCS# can be fully extracted, but encrypted ZIP/AEM packages
+            # (such as RhinelandMap) must be listed with SXC and read one file
+            # at a time. The old code attempted only full SCS# extraction and
+            # silently dropped encrypted ZIP maps, which left localization
+            # with cities from just one selected map.
             try:
-                from services.external_extractor_service import extract_archive_to_directory
+                from services.external_extractor_service import (
+                    extract_l10n_tree_to_directory,
+                )
                 tmp_root = Path(tempfile.mkdtemp(prefix="ets2mm_l10n_"))
-                if extract_archive_to_directory(mod_path, tmp_root):
+                if extract_l10n_tree_to_directory(
+                    mod_path, tmp_root, target_locale=target_locale,
+                    should_stop=should_stop,
+                ):
                     reader.close()
                     reader = ScsArchiveReader(tmp_root)
                 else:
@@ -350,11 +418,16 @@ def collect_all_def_files(
         locale_pattern = re.compile(r"^locale/([^/]+)/local_module\.[^/]+\.sii$", re.IGNORECASE)
 
         for fname in all_files:
+            if should_stop and should_stop():
+                reader.close()
+                if tmp_root is not None:
+                    shutil.rmtree(tmp_root, ignore_errors=True)
+                return def_files_dict, native_locale_by_lang
             # Extractor output on Windows uses backslashes; normalize before
             # applying game-relative `def/` and `locale/` patterns.
             fname_norm = fname.replace("\\", "/")
             lower = fname_norm.lower()
-            if lower.startswith("def/") and (lower.endswith(".sii") or lower.endswith(".sui")):
+            if _is_l10n_def_path(fname_norm):
                 if fname_norm not in def_files_dict:
                     text = reader.read_text(fname_norm)
                     if text is not None:
@@ -377,9 +450,8 @@ def collect_all_def_files(
                                 native_locale_by_lang[lang][k] = v
 
         reader.close()
-        if 'tmp_root' in locals():
+        if tmp_root is not None:
             shutil.rmtree(tmp_root, ignore_errors=True)
-            del tmp_root
 
     return def_files_dict, native_locale_by_lang
 
@@ -471,6 +543,7 @@ def parse_from_merged_files(
     city_units: Dict[str, CityData] = {}
     country_units: Dict[str, CountryData] = {}
     ferry_units: Dict[str, FerryData] = {}
+    hint_units: Dict[str, HintTextData] = {}
 
     _parse_sii_base_with_infix(merged_def_files, "city", city_units, country_units, ferry_units)
     _parse_sii_base_with_infix(merged_def_files, "country", city_units, country_units, ferry_units)
@@ -499,6 +572,8 @@ def parse_from_merged_files(
             for f in _extract_ferries_from_text(text, fw.source_mod):
                 if f.unit_name:
                     ferry_units[f.unit_name] = f
+            for hint in _extract_hint_texts_from_text(text, fw.source_mod):
+                hint_units.setdefault(hint.text, hint)
         except Exception:
             continue
 
@@ -514,6 +589,9 @@ def parse_from_merged_files(
     for f in ferry_units.values():
         result.ferries.append(f)
         result.ferry_names.append(f.ferry_name)
+    for hint in hint_units.values():
+        result.hints.append(hint)
+        result.hint_texts.append(hint.text)
 
     return result
 
@@ -521,12 +599,21 @@ def parse_from_merged_files(
 def extract_game_data_for_active_mods(
     active_mods: List[Tuple[str, str]],
     target_locale: str = "zh_cn",
+    should_stop=None,
+    progress=None,
 ) -> GameDataResult:
     """
     生产环境主入口
     流程：按优先级扫描所有mod -> 路径冲突时高优先级覆盖 -> 解析def -> 最终按unit_name去重
     """
-    def_files, locales_by_lang = collect_all_def_files(active_mods)
+    def_files, locales_by_lang = collect_all_def_files(
+        active_mods,
+        target_locale=target_locale,
+        should_stop=should_stop,
+        progress=progress,
+    )
+    if should_stop and should_stop():
+        return GameDataResult()
     native_locale = locales_by_lang.get(target_locale, {})
     result = parse_from_merged_files(def_files, native_locale)
     return result

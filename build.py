@@ -100,7 +100,12 @@ def _copy_assets() -> None:
         shutil.rmtree(str(dest_assets), ignore_errors=True)
 
     print(f"[copy] {_ASSETS_DIR} -> {dest_assets}")
-    shutil.copytree(str(_ASSETS_DIR), str(dest_assets))
+    # Runtime cache is machine-specific and can exceed 100 MB; keep it out of
+    # release archives. The application creates the directory on first run.
+    shutil.copytree(
+        str(_ASSETS_DIR), str(dest_assets),
+        ignore=shutil.ignore_patterns("cache"),
+    )
 
 
 def _create_version_json() -> None:
@@ -200,8 +205,10 @@ def main() -> bool:
         _create_version_json()
     elif exe_path.exists():
         _OUTPUT_DIR = _DIST_DIR
-        # onefile 模式下 assets 需要打包到 exe 旁边
-        print("[info] onefile 模式：assets 已通过 PyInstaller datas 打包")
+        # onefile 模式仍需要把外部工具、图标、汉化资源和运行缓存目录
+        # 放在 exe 旁边；这些资源不能依赖 PyInstaller 临时解压目录。
+        _copy_assets()
+        _create_version_json()
     else:
         print("[warn] 未找到输出产物，跳过资源复制")
 

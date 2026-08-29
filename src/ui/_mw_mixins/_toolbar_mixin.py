@@ -14,8 +14,8 @@ from ..theme import ThemeManager, THEME_DARK, THEME_LIGHT, THEME_AUTO, QTB_DEFAU
 
 
 # 从 main_window.py 复制的工具栏样式常量（避免循环导入）
-QTB_DEFAULT = "QToolButton{padding:4px 10px;border:1px solid #d0d7de;border-radius:4px;background:#fff;}QToolButton:hover{background:#f3f4f6;}QToolButton::menu-indicator{width:0px;}"
-QTB_PRIMARY = "QToolButton{padding:4px 12px;border:1px solid #1a7f37;border-radius:4px;background:#2da44e;color:#fff;font-weight:700;}QToolButton:hover{background:#2c974b;}QToolButton::menu-indicator{image:none;width:4px;}"
+QTB_DEFAULT = ""
+QTB_PRIMARY = ""
 
 
 import json
@@ -47,18 +47,21 @@ import weakref
 class _ToolbarMixin:
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
-        root = QVBoxLayout(central); root.setContentsMargins(4, 0, 4, 4)
+        root = QVBoxLayout(central); root.setContentsMargins(8, 4, 8, 8); root.setSpacing(8)
 
         splitter = QSplitter(Qt.Horizontal)
         # --- 左：Profiles 树 + 分类文件夹树（资源管理器风格） + 软链接状态 ---
-        left = QFrame(); left.setFrameShape(QFrame.StyledPanel)
-        lv = QVBoxLayout(left); lv.setContentsMargins(6, 6, 6, 6); lv.setSpacing(6)
+        left = QFrame(); left.setFrameShape(QFrame.StyledPanel); left.setObjectName("sidebarPanel")
+        lv = QVBoxLayout(left); lv.setContentsMargins(10, 10, 10, 10); lv.setSpacing(8)
 
         # (1) 🎮 存档 Profiles 树
         self.lbl_profiles_title = QLabel(_("ui.lbl_profiles"))
+        self.lbl_profiles_title.setObjectName("sectionLabel")
         lv.addWidget(self.lbl_profiles_title)
         self.tree_profiles = QTreeWidget()
         self.tree_profiles.setHeaderHidden(True)
+        self.tree_profiles.setRootIsDecorated(False)
+        self.tree_profiles.setItemsExpandable(False)
         self.tree_profiles.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree_profiles.setMinimumHeight(160)
         self.tree_profiles.itemSelectionChanged.connect(self._on_tree_profile_selected)
@@ -77,9 +80,20 @@ class _ToolbarMixin:
         vb_cat = QVBoxLayout(self.gb_categories)
         self.tree_categories = QTreeWidget()
         self.tree_categories.setHeaderHidden(True)
+        self.tree_categories.setRootIsDecorated(False)
+        self.tree_categories.setItemsExpandable(False)
         self.tree_categories.setSelectionMode(QAbstractItemView.SingleSelection)
         self.tree_categories.setMinimumHeight(220)
+        self.tree_categories.setAcceptDrops(True)
+        self.tree_categories.setDragDropMode(QAbstractItemView.DropOnly)
+        self.tree_categories.installEventFilter(self)
+        # QAbstractItemView receives drag/drop events on its viewport.  The
+        # filter on the tree alone never sees those events on Qt 6, so install
+        # it on the viewport as well.
+        self.tree_categories.viewport().setAcceptDrops(True)
+        self.tree_categories.viewport().installEventFilter(self)
         self.tree_categories.itemClicked.connect(self._on_tree_category_clicked)
+        self.tree_categories.itemChanged.connect(self._on_category_item_changed)
         self.tree_categories.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_categories.customContextMenuRequested.connect(self._on_tree_category_menu)
         from services.category_service import all_folders
@@ -88,11 +102,18 @@ class _ToolbarMixin:
         self.tree_categories.addTopLevelItem(self._cat_item_all)
         self._cat_item_uncategorized = QTreeWidgetItem([_("ui.cat_uncategorized")])
         self._cat_item_uncategorized.setData(0, Qt.UserRole, ("__filter_cat__", ""))
+        # Uncategorized is a filter/assignment target only. It must never be
+        # treated as a bulk enable/disable group, otherwise toggling it can
+        # rewrite the whole active worklist.
+        self._cat_item_uncategorized.setFlags(
+            self._cat_item_uncategorized.flags() & ~Qt.ItemIsUserCheckable
+        )
         self.tree_categories.addTopLevelItem(self._cat_item_uncategorized)
         self._cat_items: dict[str, QTreeWidgetItem] = {}
         for fname in all_folders():
             it = QTreeWidgetItem([_("ui.cat_prefix", label=fname)])
             it.setData(0, Qt.UserRole, ("__filter_cat__", fname))
+            self._make_category_item_checkable(it)
             self._cat_items[fname] = it
             self.tree_categories.addTopLevelItem(it)
         # 默认选中"全部模组"
@@ -129,21 +150,17 @@ class _ToolbarMixin:
         # 顶部"扫描进度条"容器（空闲隐藏，扫描/解析阶段 show）
         self._scan_progress_frame = QFrame()
         self._scan_progress_frame.setFrameShape(QFrame.StyledPanel)
-        self._scan_progress_frame.setStyleSheet("QFrame{background:#313244;border:1px solid #45475a;border-radius:6px;}")
+        self._scan_progress_frame.setObjectName("scanProgressPanel")
         spf_lay = QHBoxLayout(self._scan_progress_frame)
         spf_lay.setContentsMargins(8, 6, 8, 6); spf_lay.setSpacing(8)
         self._scan_progress_label = QLabel(_("ui.sp_idle"))
-        self._scan_progress_label.setStyleSheet("color:#cdd6f4;font-weight:500;")
+        self._scan_progress_label.setObjectName("dimLabel")
         self._scan_progress_bar = QProgressBar()
         self._scan_progress_bar.setFixedHeight(18)
         self._scan_progress_bar.setTextVisible(True)
         self._scan_progress_bar.setFormat("")
         self._scan_progress_bar.setRange(0, 100)
         self._scan_progress_bar.setValue(0)
-        self._scan_progress_bar.setStyleSheet(
-            "QProgressBar{border:1px solid #45475a;border-radius:4px;text-align:center;background:#181825;color:#cdd6f4;}"
-            "QProgressBar::chunk{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #89b4fa,stop:1 #b4befe);border-radius:3px;}"
-        )
         btn_cancel = QPushButton(_("ui.sp_cancel"))
         btn_cancel.setCursor(Qt.PointingHandCursor)
         # btn_cancel 样式由全局主题覆盖
@@ -173,6 +190,7 @@ class _ToolbarMixin:
         self.table_active.order_changed.connect(self._on_table_order_changed)
         self.table_active.itemSelectionChanged.connect(lambda: self._on_selection_changed(self.table_active))
         self.table_active.itemChanged.connect(self._on_check_changed)
+        self.table_active.cellClicked.connect(self._on_active_table_cell_clicked)
         self.table_active.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_active.customContextMenuRequested.connect(lambda p: self._on_mod_context_menu(self.table_active, p))
         lay_act.addWidget(self.table_active)
@@ -184,8 +202,8 @@ class _ToolbarMixin:
         middle_splitter.addWidget(self.tab_mods)
 
         # --- 下：详情面板（横排，左=预览图，右=标题+作者+版本+描述） ---
-        detail = QFrame(); detail.setFrameShape(QFrame.StyledPanel)
-        det_h = QHBoxLayout(detail); det_h.setContentsMargins(6, 6, 6, 6)
+        detail = QFrame(); detail.setFrameShape(QFrame.StyledPanel); detail.setObjectName("detailPanel")
+        det_h = QHBoxLayout(detail); det_h.setContentsMargins(10, 10, 10, 10); det_h.setSpacing(12)
         self.preview = QLabel(_("ui.preview_empty"))
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setFixedSize(320, 188)   # 276x162 + padding
@@ -195,7 +213,7 @@ class _ToolbarMixin:
         self.lbl_title = QLabel(_("ui.lbl_no_mod"))
         f = QFont(); f.setPointSize(12); f.setBold(True); self.lbl_title.setFont(f)
         self.lbl_meta = QLabel(_("ui.lbl_meta_dash"))
-        self.lbl_meta.setStyleSheet("color:#a6adc8;")
+        self.lbl_meta.setObjectName("dimLabel")
         self.txt_desc = QPlainTextEdit(); self.txt_desc.setReadOnly(True)
         self.txt_desc.setPlaceholderText(_("ui.ph_desc"))
         info_box.addWidget(self.lbl_title); info_box.addWidget(self.lbl_meta); info_box.addWidget(self.txt_desc, 1)
@@ -274,7 +292,7 @@ class _ToolbarMixin:
         btn_save = QToolButton(); btn_save.setText(_("ui.tb_drop_save")); btn_save.setProperty("i18n_key", "ui.tb_drop_save")
         btn_save.setPopupMode(QToolButton.MenuButtonPopup); btn_save.setCursor(Qt.PointingHandCursor)
         f = QFont(); f.setBold(True); btn_save.setFont(f)
-        btn_save.setToolButtonStyle(Qt.ToolButtonTextOnly); btn_save.setStyleSheet(QTB_PRIMARY)
+        btn_save.setObjectName("primaryButton"); btn_save.setToolButtonStyle(Qt.ToolButtonTextOnly); btn_save.setStyleSheet("")
         btn_save.clicked.connect(self._save_profile)
         m_save = QMenu(btn_save)
         a_save = m_save.addAction(_("ui.tb_save")); a_save.setProperty("i18n_key", "ui.tb_save"); a_save.triggered.connect(self._save_profile)
@@ -320,10 +338,10 @@ class _ToolbarMixin:
         btn_theme.setMenu(m_theme)
         btn_theme.setPopupMode(QToolButton.InstantPopup)
         tb.addWidget(btn_theme)
-        tb.addSeparator()
         # ---- 搜索框（右对齐）----
-        tb.addSeparator()
-        spacer = QWidget(); spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        spacer = QWidget(); spacer.setObjectName("toolbarSpacer")
+        spacer.setStyleSheet("#toolbarSpacer { background: transparent; border: none; }")
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
         self.search_input = QLineEdit()
         self.search_input.setClearButtonEnabled(True)
@@ -337,6 +355,12 @@ class _ToolbarMixin:
         self.search_input.textChanged.connect(self._on_search_changed)
         self.search_input.returnPressed.connect(self._apply_search_now)
         tb.addWidget(self.search_input)
+
+    @staticmethod
+    def _make_category_item_checkable(item: QTreeWidgetItem):
+        """让分类节点像 Mod 行一样支持勾选，并允许显示部分勾选状态。"""
+        item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        item.setCheckState(0, Qt.Unchecked)
 
 
     def _open_city_lookup(self):
@@ -595,7 +619,10 @@ class _ToolbarMixin:
         fast_restore = is_recent_scan_snapshot(session_data)
         # 兼容旧版本没有 metadata_ready 字段的快照：短时内视为已完成，
         # 避免升级后第一次启动又把全部 Mod 重解析一遍。
-        metadata_ready = bool((session_data or {}).get("metadata_ready", fast_restore))
+        # A recent, signature-matching snapshot is safe to restore even when
+        # the previous process was interrupted before it flipped the flag to
+        # True. Do not make a crashed/aborted startup re-parse every archive.
+        metadata_ready = bool((session_data or {}).get("metadata_ready", False) or fast_restore)
         snap = load_scan_snapshot(
             self.paths.mod_dir,
             self.paths.workshop_content_dir,
@@ -654,9 +681,23 @@ class _ToolbarMixin:
                             m.icon = ModIcon(raw_bytes=cached_icon, format="jpg", source_path="workshop-cache")
                     except Exception:
                         pass
-                # Do not synchronously reopen every archive here. Preview bytes
-                # are restored by the async parser after the cache is loaded;
-                # keeping startup metadata-only makes the splash responsive.
+                else:
+                    try:
+                        from services.session_service import load_mod_icon_cache
+                        from core.models import ModIcon
+                        cached_icon = load_mod_icon_cache(m.mod_id, m.last_modified)
+                        if cached_icon:
+                            raw_icon, icon_fmt = cached_icon
+                            m.icon = ModIcon(
+                                raw_bytes=raw_icon,
+                                format=icon_fmt,
+                                source_path="local-icon-cache",
+                            )
+                    except Exception:
+                        pass
+                # Do not synchronously reopen every archive here. Cached
+                # preview bytes are restored above; only genuinely unresolved
+                # local icons are queued for the post-startup repair pass.
                 if md.get("category_tag"):
                     m.category_tag = md["category_tag"]
                 mods.append(m)
@@ -696,7 +737,10 @@ class _ToolbarMixin:
             pass
         self._profile_fill_pending = False
         if self.current_profile:
-            self._fill_table_for_profile(self.current_profile)
+            # Cache restore is the first data source for this profile, so build
+            # the worklist from profile.sii once before subsequent callbacks
+            # switch to render-only updates.
+            self._fill_table_for_profile(self.current_profile, force=True)
         # 算新 mod：和上次会话对比（逻辑与真实扫描时一致）
         new_ids: list = []
         try:
@@ -718,17 +762,39 @@ class _ToolbarMixin:
         self.statusBar().showMessage(
             _("ui.sb_from_cache", n=len(mods), size=f"{total_size:.1f}")
         )
-        # 如果所有 mod 都已有 display_name，跳过异步解析（真正从缓存秒开）
-        need_parse = (not metadata_ready) and any(
-            not m.manifest.display_name or not m.description
-            or (m.package_type != "workshop" and (not m.manifest.compatible_versions or not m.icon.is_available))
-            for m in mods
-        )
-        if need_parse:
+        # A completed snapshot is authoritative for startup. Empty optional
+        # fields (description/version) are common and must not trigger a full
+        # re-parse of hundreds of archives on every launch. Icons are repaired
+        # separately in the background, once per package revision.
+        if metadata_ready:
+            try:
+                from services.session_service import load_mod_icon_probe
+                icon_repair = [
+                    m for m in mods
+                    if m.package_type != "workshop"
+                    and not m.icon.is_available
+                    and load_mod_icon_probe(m.mod_id, m.last_modified) is not False
+                ]
+                if icon_repair:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(250, lambda pending=list(icon_repair): self._start_async_parse(pending_mods=pending, icon_only=True))
+            except Exception:
+                pass
+        else:
+            # Older/incomplete snapshots still need one enrichment pass, but
+            # this path is taken only when the snapshot was not marked ready.
             self._start_async_parse()
         try:
             from PySide6.QtCore import QTimer
-            if not metadata_ready:
+            # A ready snapshot can still have Workshop entries whose preview
+            # bytes were never downloaded (or whose old cache lacks a URL).
+            # Let the existing worker repair only those entries in the
+            # background; never block cache restore on Steam/network I/O.
+            workshop_needs_fetch = any(
+                m.package_type == "workshop" and not m.icon.is_available
+                for m in mods
+            )
+            if not metadata_ready or workshop_needs_fetch:
                 QTimer.singleShot(500, self._fetch_workshop_titles_async)
         except Exception:
             pass
@@ -736,16 +802,20 @@ class _ToolbarMixin:
 
 
 
-    def _start_async_parse(self) -> None:
+    def _start_async_parse(self, pending_mods=None, icon_only: bool = False) -> None:
         """启动后台异步解析：解析加密包 + 回填目录型/scs/zip 的 icon/description/display_name"""
         self._async_parse_started = False
         self._async_parse_batch_refresh = True
+        self._async_parse_icon_only = bool(icon_only)
         from services.external_extractor_service import supports_archive
         from pathlib import Path as _P
         pending = []
-        for m in self.all_mods:
+        source_mods = list(pending_mods) if pending_mods is not None else self.all_mods
+        for m in source_mods:
+            if icon_only and (m.package_type == "workshop" or m.icon.is_available):
+                continue
             # 三个关键字段都齐全才跳过；任一缺失都送入解析队列
-            if m.manifest.display_name and m.description and (
+            if not icon_only and m.manifest.display_name and m.description and (
                 m.package_type == "workshop" or (m.manifest.compatible_versions and m.icon.is_available)
             ):
                 continue
@@ -773,7 +843,7 @@ class _ToolbarMixin:
             self._async_parse_progress = pb
         self._async_parse_progress.setRange(0, len(pending))
         self._async_parse_progress.setValue(0)
-        self._async_parse_progress.setFormat("解析加密包 %v/%m")
+        self._async_parse_progress.setFormat("补全预览图 %v/%m" if icon_only else "解析加密包 %v/%m")
         # 顶部大进度条
         self._show_scan_progress(_("ui.sp_phase_parse"), busy=False, cur=0, total=len(pending), fmt="%v / %m", detail="")
         # 启动 QThread 工作线程
@@ -798,7 +868,7 @@ class _ToolbarMixin:
         """QThread 查询 Steam Workshop 标题，完成后刷新表格。"""
         def _refresh_table_after_fetch():
             if self.current_profile:
-                self._fill_table_for_profile(self.current_profile)
+                self._render_current_worklist()
             self._refresh_category_counts()
 
         self._refresh_table_after_fetch = _refresh_table_after_fetch
@@ -810,14 +880,22 @@ class _ToolbarMixin:
         # 性能优化：先用 quick=True 快速列出 profile 骨架（不解密不解 SII），
         # 立即更新 UI 显示 profile_id；再后台异步填充 display_name/company_name。
         # 原实现同步解密每个 profile.sii，数量多时启动明显卡顿。
-        self.profiles = self.profile_svc.list_profiles(quick=True)
+        # The game profile selector should manage local profiles only.
+        # Steam/Cloud profiles are a separate storage area and saving them can
+        # make the UI appear out of sync with the local 592-mod profile.
+        self.profiles = [
+            p for p in self.profile_svc.list_profiles(quick=True)
+            if getattr(p, "location", "") == "local"
+        ]
         for i in range(self.tree_profiles.topLevelItemCount() - 1, -1, -1):
             self.tree_profiles.takeTopLevelItem(i)
         self._profile_tree_items: dict[str, QTreeWidgetItem] = {}
         first_with_mods: object | None = None
         first_any: object | None = None
         for p in self.profiles:
-            label = str(p)
+            name = p.display_name or p.save_name or "正在读取存档名称…"
+            count = int(getattr(p, "mod_count", 0) or 0)
+            label = f"{name}（已启用 {count} 个 Mod）"
             it = QTreeWidgetItem([label])
             it.setData(0, Qt.UserRole, p)
             if getattr(p, "location", None) == "cloud":
@@ -986,7 +1064,7 @@ class _ToolbarMixin:
         try: self._mark_priority_dirty(f"检测到 {len(to_remove)} 个 RED 告警 mod 已建议禁用 · 请点「保存」写回 profile")
         except Exception: pass
         try:
-            self._fill_table_for_profile(self.current_profile)
+            self._render_current_worklist()
         except Exception:
             pass
         QMessageBox.information(
@@ -1033,7 +1111,7 @@ class _ToolbarMixin:
         try: self._mark_priority_dirty("已将崩溃嫌疑 mod 移到加载最末尾 · 请点工具栏「保存」写回 profile")
         except Exception: pass
         try:
-            self._fill_table_for_profile(self.current_profile)
+            self._render_current_worklist()
         except Exception:
             pass
         QMessageBox.information(

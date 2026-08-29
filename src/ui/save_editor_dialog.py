@@ -41,10 +41,10 @@ from services.i18n_service import _
 
 class _ReadStatsWorker(QThread):
     """后台读取当前金钱/经验/等级。"""
-    finished = Signal(object, object, object)  # money, xp, level
+    result_ready = Signal(object, object, object)  # money, xp, level
 
-    def __init__(self, svc: SaveEditorService, slot: SaveSlotInfo):
-        super().__init__()
+    def __init__(self, svc: SaveEditorService, slot: SaveSlotInfo, parent=None):
+        super().__init__(parent)
         self._svc = svc
         self._slot = slot
 
@@ -53,17 +53,17 @@ class _ReadStatsWorker(QThread):
             money = self._svc.read_current_money(self._slot)
             xp = self._svc.read_current_xp(self._slot)
             level = self._svc.read_current_level(self._slot)
-            self.finished.emit(money, xp, level)
+            self.result_ready.emit(money, xp, level)
         except Exception:
-            self.finished.emit(None, None, None)
+            self.result_ready.emit(None, None, None)
 
 
 class _ApplyWorker(QThread):
     """后台执行修改操作。"""
-    finished = Signal(bool, str)  # success, message
+    result_ready = Signal(bool, str)  # success, message
 
-    def __init__(self, fn, *args, **kwargs):
-        super().__init__()
+    def __init__(self, fn, *args, parent=None, **kwargs):
+        super().__init__(parent)
         self._fn = fn
         self._args = args
         self._kwargs = kwargs
@@ -80,9 +80,9 @@ class _ApplyWorker(QThread):
                 success, msg = (result > 0), str(result)
             else:
                 success, msg = True, str(result) if result is not None else ""
-            self.finished.emit(success, msg)
+            self.result_ready.emit(success, msg)
         except Exception as e:
-            self.finished.emit(False, str(e))
+            self.result_ready.emit(False, str(e))
 
 
 # =========================================================================
@@ -102,6 +102,9 @@ class SaveEditorDialog(QDialog):
         self._current_slot: Optional[SaveSlotInfo] = None
         self._worker: Optional[QThread] = None
         self._apply_worker: Optional[QThread] = None
+        self._stats_generation = 0
+        self._live_workers = set()
+        self._closing_for_workers = False
 
         self.setWindowTitle(_("se.title"))
         self.resize(680, 560)
@@ -111,7 +114,7 @@ class SaveEditorDialog(QDialog):
 
         # 填充 profile 下拉
         for prof in profiles:
-            label = prof.company_name or prof.display_name or prof.profile_id
+            label = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
             self.cb_profile.addItem(label, userData=prof)
         if initial_profile is not None:
             for i in range(self.cb_profile.count()):
@@ -420,7 +423,7 @@ class SaveEditorDialog(QDialog):
 
         # 填充 profile 列表
         for prof in self.profiles:
-            label = prof.company_name or prof.display_name or prof.profile_id
+            label = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
             self.cb_copy_src.addItem(label, userData=prof)
             self.cb_copy_dst.addItem(label, userData=prof)
         return w
@@ -576,16 +579,33 @@ class SaveEditorDialog(QDialog):
         self._set_apply_buttons_enabled(False)
         self.progress.show()
         self.lbl_status.setText(_("se.status_reading"))
-        # 启动后台线程
-        if self._worker is not None:
-            try:
-                self._worker.quit()
-                self._worker.wait(500)
-            except Exception:
-                pass
-        self._worker = _ReadStatsWorker(self.svc, self._current_slot)
-        self._worker.finished.connect(self._on_stats_read)
-        self._worker.start()
+        # Do not overwrite/destroy a previous QThread while it is still
+        # running. Results carry a generation so a slow old slot cannot update
+        # the newly selected slot after the user switches quickly.
+        self._stats_generation += 1
+        generation = self._stats_generation
+        worker = _ReadStatsWorker(self.svc, self._current_slot, self)
+        self._worker = worker
+        self._live_workers.add(worker)
+        worker.result_ready.connect(
+            lambda money, xp, level, g=generation, w=worker:
+            self._on_stats_worker_result(g, w, money, xp, level)
+        )
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
+        worker.start()
+
+    def _on_worker_finished(self, worker):
+        self._live_workers.discard(worker)
+        if self._worker is worker:
+            self._worker = None
+        if self._apply_worker is worker:
+            self._apply_worker = None
+        worker.deleteLater()
+
+    def _on_stats_worker_result(self, generation, worker, money, xp, level):
+        if self._closing_for_workers or generation != self._stats_generation:
+            return
+        self._on_stats_read(money, xp, level)
 
     def _on_stats_read(self, money, xp, level):
         self.progress.hide()
@@ -870,15 +890,14 @@ class SaveEditorDialog(QDialog):
         self._set_apply_buttons_enabled(False)
         self.progress.show()
         self.lbl_status.setText(status_msg)
-        if self._apply_worker is not None:
-            try:
-                self._apply_worker.quit()
-                self._apply_worker.wait(500)
-            except Exception:
-                pass
-        worker = _ApplyWorker(fn, *args)
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            return
+        worker = _ApplyWorker(fn, *args, parent=self)
+        self._live_workers.add(worker)
         # 用闭包保存 post_callback
         def _on_done(success, msg):
+            if self._closing_for_workers:
+                return
             self.progress.hide()
             self._set_apply_buttons_enabled(True)
             if success:
@@ -897,7 +916,8 @@ class SaveEditorDialog(QDialog):
             # 自动刷新统计
             if self._current_slot is not None:
                 self._refresh_stats()
-        worker.finished.connect(_on_done)
+        worker.result_ready.connect(_on_done)
+        worker.finished.connect(lambda w=worker: self._on_worker_finished(w))
         worker.start()
         self._apply_worker = worker
 
@@ -906,13 +926,22 @@ class SaveEditorDialog(QDialog):
     # =========================================================================
 
     def closeEvent(self, event):
-        # 等待后台线程结束
-        for w_attr in ("_worker", "_apply_worker"):
-            w = getattr(self, w_attr, None)
-            if w is not None:
-                try:
-                    w.quit()
-                    w.wait(1000)
-                except Exception:
-                    pass
+        running = [w for w in self._live_workers if w.isRunning()]
+        if running:
+            event.ignore()
+            self._closing_for_workers = True
+            self.setEnabled(False)
+            self.lbl_status.setText("正在安全结束后台任务…")
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._retry_close_after_workers)
+            return
         super().closeEvent(event)
+
+    def _retry_close_after_workers(self):
+        if any(w.isRunning() for w in self._live_workers):
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._retry_close_after_workers)
+            return
+        self._closing_for_workers = False
+        self.setEnabled(True)
+        self.close()

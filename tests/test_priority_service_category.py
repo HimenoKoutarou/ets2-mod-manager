@@ -2,6 +2,7 @@
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from core.models import Mod, ModManifest
 from services.priority_service import PriorityService
 
 
@@ -70,6 +71,34 @@ def test_empty_pkg_set_does_not_mutate_worklist():
     assert before == [dict(e) for e in wl], "empty set should not mutate"
 
 
+def test_batch_toggle_clears_disabled_priority_index():
+    svc = PriorityService([])
+    wl = svc.build_worklist(["A", "B"], ["A", "B", "C"])
+    changed = svc.batch_toggle(wl, [0], action="disable")
+    disabled = next(e for e in changed if e["package_name"] == "A")
+    enabled = next(e for e in changed if e["package_name"] == "B")
+    assert disabled["order"] == -1
+    assert disabled["priority_index"] is None
+    assert enabled["order"] == 0
+    assert enabled["priority_index"] == 0
+
+
+def test_rebuild_from_active_uses_known_mods_and_sets_order_fields():
+    mod = Mod(
+        mod_id="A",
+        package_path="A",
+        package_type="directory",
+        manifest=ModManifest(package_name="A", display_name="A"),
+    )
+    svc = PriorityService([mod])
+    rebuilt = svc.rebuild_from_active(svc, [], ["A"])
+    assert len(rebuilt) == 1
+    assert rebuilt[0]["mod"] is mod
+    assert rebuilt[0]["enabled"] is True
+    assert rebuilt[0]["order"] == 0
+    assert rebuilt[0]["priority_index"] == 0
+
+
 if __name__ == "__main__":
     import traceback
     failed = 0
@@ -79,6 +108,8 @@ if __name__ == "__main__":
         test_move_up_by_package_set_boundary_and_relative_order,
         test_move_top_bottom_by_package_set,
         test_empty_pkg_set_does_not_mutate_worklist,
+        test_batch_toggle_clears_disabled_priority_index,
+        test_rebuild_from_active_uses_known_mods_and_sets_order_fields,
     ]
     for t in tests:
         try:

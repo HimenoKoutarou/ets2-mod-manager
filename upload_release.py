@@ -17,7 +17,7 @@ from pathlib import Path
 
 REPO_OWNER = "HimenoKoutarou"
 REPO_NAME = "ets2-mod-manager"
-VERSION = "v1.0.1"
+VERSION = "v1.2.2"
 RELEASE_NAME = f"ETS2 Mod Manager {VERSION}"
 RELEASE_NOTES = """## 更新内容
 

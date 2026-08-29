@@ -334,7 +334,8 @@ class ProfileInfo:
     mod_count: int = 0
 
     def __str__(self) -> str:
-        label = self.company_name or self.display_name or self.save_name or self.profile_id
+        # profile_name is the custom profile/save name shown by the game.
+        label = self.display_name or self.save_name or self.company_name or self.profile_id
         return f"{label} [{self.location}] mods={self.mod_count}"
 
 
@@ -368,12 +369,16 @@ class ProfileService:
           - quick=False（默认）：保持原行为，立即 _enrich。
         """
         out: List[ProfileInfo] = []
+        # Steam Cloud is the copy the game actually reads when Cloud is enabled.
+        # Keep it ahead of local profiles so the UI's initial selection matches
+        # the in-game profile.  A steam pointer and its cloud target can resolve
+        # to the same profile.sii; de-duplicate those entries by real path.
         locations: List[Tuple[str, Optional[Path]]] = [
-            ("local", self.paths.profiles_dir),
-            ("steam", self.paths.steam_profiles_dir),
             ("cloud", self.paths.steam_cloud_dir),
+            ("steam", self.paths.steam_profiles_dir),
+            ("local", self.paths.profiles_dir),
         ]
-        seen: set = set()
+        seen_paths: set = set()
         for loc, folder in locations:
             if folder is None or not folder.exists():
                 continue
@@ -388,10 +393,13 @@ class ProfileService:
                         psii = cloud_path
                 if not psii.exists():
                     continue
-                key = (loc, d.name)
-                if key in seen:
+                try:
+                    key = str(psii.resolve()).lower()
+                except OSError:
+                    key = str(psii).lower()
+                if key in seen_paths:
                     continue
-                seen.add(key)
+                seen_paths.add(key)
                 info = ProfileInfo(profile_id=d.name, location=loc, folder=d, profile_sii=psii)
                 if not quick:
                     self._enrich(info)

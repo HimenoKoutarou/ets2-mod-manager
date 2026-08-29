@@ -240,15 +240,25 @@ class _WorkshopFetchWorker(QThread):
         super().__init__(parent)
         self._mods = list(all_mods)   # 快照：避免主线程列表变动导致迭代异常
         self._save_cache = save_cache
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
 
     def run(self):
         try:
             from services.steam_workshop_service import fetch_and_fill_mods, get_cached_preview_url, get_cached_preview_bytes, save_preview_bytes
             from core.models import ModIcon
             import urllib.request
-            fetch_and_fill_mods(self._mods, save_cache=self._save_cache)
+            fetch_and_fill_mods(
+                self._mods,
+                save_cache=self._save_cache,
+                should_stop=lambda: self._stop,
+            )
             # Workshop 目录通常没有 Steam 页面预览图，补读 API 返回的 preview_url。
             for m in self._mods:
+                if self._stop:
+                    break
                 if getattr(m, "package_type", "") != "workshop" or getattr(m, "icon", None) is None:
                     continue
                 if m.icon.is_available:
@@ -285,16 +295,29 @@ class _EnrichProfilesWorker(QThread):
         super().__init__(parent)
         self._svc = profile_svc
         self._profiles = list(profiles)      # 快照
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
 
     def run(self):
         for p in self._profiles:
+            if self._stop:
+                break
             try:
                 ok = self._svc.enrich_profile(p)
             except Exception:
                 ok = False
             if ok:
                 pid = getattr(p, "profile_id", str(id(p)))
-                label = str(p)
+                # Keep the profile tree label identical to the game's custom
+                # profile name; storage location and mod count belong in status text.
+                name = (getattr(p, "display_name", "") or
+                        getattr(p, "save_name", "") or
+                        getattr(p, "company_name", "") or
+                        getattr(p, "profile_id", "正在读取存档名称…"))
+                count = int(getattr(p, "mod_count", 0) or 0)
+                label = f"{name}（已启用 {count} 个 Mod）"
                 self.one_enriched.emit(pid, label, p)
 
 

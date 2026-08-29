@@ -69,14 +69,15 @@ class PriorityService:
     """
 
     def __init__(self, known_mods: Iterable[Mod]):
+        self.known_mods: List[Mod] = list(known_mods)
         self.by_name: Dict[str, Mod] = {}
         # 性能优化：worklist 反向索引缓存，避免 indices_for_category 每次线性扫描
         # 结构：{ id(worklist_tuple): { frozenset(pkg_set): List[int] } }
         # worklist 是 list[dict]，不可哈希，用元组化签名做 key
-        self._worklist_sig: Optional[int] = None
+        self._worklist_sig = None
         self._pkg_index: Optional[Dict[str, List[int]]] = None
         import re as _re_pn
-        for m in known_mods:
+        for m in self.known_mods:
             # manifest.package_name（unit_name 主索引）与 mod_id（文件名索引）同级 setdefault
             # 先 manifest.package_name 左段
             pkg_name = getattr(getattr(m, "manifest", None), "package_name", None) or ""
@@ -93,6 +94,65 @@ class PriorityService:
             if stripped and stripped != m.mod_id and stripped.isdigit():
                 self.by_name.setdefault(stripped, m)
 
+    @staticmethod
+    def _canonical_key(value: object) -> str:
+        """Normalize a profile/package key for duplicate detection only."""
+        import re
+        text = str(value or "").split("|", 1)[0].strip()
+        return re.sub(
+            r"_(workshop|copy\d*|local)$", "", text, flags=re.IGNORECASE
+        ).casefold()
+
+    @staticmethod
+    def _canonical_package_for_mod(mod: Optional[Mod]) -> str:
+        if mod is None:
+            return ""
+        mf = getattr(mod, "manifest", None)
+        package = str(getattr(mf, "package_name", "") or "").strip() if mf else ""
+        mod_id = str(getattr(mod, "mod_id", "") or "").strip()
+        if getattr(mod, "package_type", "") == "workshop" and mod_id:
+            return mod_id
+        return package or mod_id
+
+    def _resolve_mod(self, package_name: str) -> Optional[Mod]:
+        """Resolve profile/package aliases to one scanned Mod object."""
+        if not package_name:
+            return None
+        import re
+        pn = str(package_name).strip()
+        left = pn.split("|", 1)[0].strip()
+        suffix_left = re.sub(r"_(workshop|copy\d*|local)$", "", left, flags=re.IGNORECASE)
+        suffix_full = re.sub(r"_(workshop|copy\d*|local)$", "", pn, flags=re.IGNORECASE)
+        for key in (pn, left, suffix_left, suffix_full):
+            if key and key in self.by_name:
+                return self.by_name[key]
+        if left.isdigit() or suffix_left.isdigit() or pn.isdigit():
+            target = left if left.isdigit() else (suffix_left if suffix_left.isdigit() else pn)
+            for mod in self.known_mods:
+                mid = re.sub(
+                    r"_(workshop|copy\d*|local)$", "",
+                    str(getattr(mod, "mod_id", "") or ""),
+                    flags=re.IGNORECASE,
+                )
+                mf_pkg = str(
+                    getattr(getattr(mod, "manifest", None), "package_name", "") or ""
+                ).split("|", 1)[0].strip()
+                if mid == target or mf_pkg == target:
+                    return mod
+        target = self._canonical_key(pn)
+        if target:
+            for mod in self.known_mods:
+                mf = getattr(mod, "manifest", None)
+                keys = (
+                    getattr(mod, "mod_id", ""),
+                    getattr(mf, "package_name", "") if mf else "",
+                    getattr(mf, "display_name", "") if mf else "",
+                    getattr(mod, "display_title", ""),
+                )
+                if any(self._canonical_key(key) == target for key in keys if key):
+                    return mod
+        return None
+
     # ---- 分类反向索引（性能优化） ----
     def _build_pkg_index(self, worklist: List[dict]) -> Dict[str, List[int]]:
         """构建 { package_name: [idx,...] } 反向索引，缓存到 self._pkg_index。
@@ -101,7 +161,12 @@ class PriorityService:
         当连续调用 move_up/down/top/bottom 时会重复扫描。本方法按 worklist 内容签名
         缓存，签名变化时重建（worklist 是新对象或内容变了）。
         """
-        sig = id(worklist)
+        # Category enable/disable mutates the list in place.  Caching by
+        # ``id(worklist)`` would keep stale enabled indexes after that change.
+        sig = tuple(
+            (str(e.get("package_name") or ""), bool(e.get("enabled")))
+            for e in worklist
+        )
         if self._worklist_sig == sig and self._pkg_index is not None:
             return self._pkg_index
         idx_map: Dict[str, List[int]] = {}
@@ -140,14 +205,20 @@ class PriorityService:
             pkg = str(r2.get("package_name") or "").strip()
             if pkg and pkg in active_rank:
                 r2["enabled"] = True
+                r2["order"] = active_rank[pkg]
                 r2["priority_index"] = active_rank[pkg]
             else:
                 r2["enabled"] = False
+                r2["order"] = -1
                 r2["priority_index"] = None
             new_wl.append(r2)
         seen = {str(r.get("package_name") or "").strip() for r in new_wl}
         mod_index = {}
-        mods_src = getattr(current_svc, "mods", None) or []
+        mods_src = (
+            getattr(current_svc, "known_mods", None)
+            or getattr(current_svc, "mods", None)
+            or []
+        )
         for m in mods_src:
             for key in (getattr(m, "package_name", None), getattr(m, "mod_id", None)):
                 if key:
@@ -160,6 +231,7 @@ class PriorityService:
                     "package_name": k,
                     "display_title": (getattr(m, "display_title", None) or k) if m else k,
                     "enabled": True,
+                    "order": active_rank[k],
                     "priority_index": active_rank[k],
                     "source": "",
                     "size_mb": None,
@@ -185,33 +257,49 @@ class PriorityService:
         排列规则：先 active_mods 原顺序，然后是"未启用的已知模组"（按 package_name 排）。
         """
         result: List[dict] = []
-        active_set = set(active_mods)
-        import re as _re_bw
-        for i, pn in enumerate(active_mods):
-            pn_left = pn.split("|", 1)[0].strip()
-            # 4 层 fallback：原 pn → |左段 → |左段剥后缀 → 纯数字反向查（by_name 里已经建了 digit_keys）
-            m = self.by_name.get(pn) or self.by_name.get(pn_left)
-            if m is None:
-                s_left = _re_bw.sub(r"_(workshop|copy\d*|local)$", "", pn_left)
-                if s_left and s_left != pn_left:
-                    m = self.by_name.get(s_left)
+        represented_mods: set[int] = set()
+        represented_keys: set[str] = set()
+        enabled_count = 0
+
+        def add_entry(package_name: str, enabled: bool, mod: Optional[Mod]) -> bool:
+            nonlocal enabled_count
+            pn = str(package_name or "").strip()
+            if not pn:
+                return False
+            key = self._canonical_key(pn)
+            identity = id(mod) if mod is not None else None
+            # A single scanned Mod can have several aliases (manifest name,
+            # filename, Workshop id).  Keep one worklist row per real Mod,
+            # while preserving the exact active profile spelling when enabled.
+            if identity is not None and identity in represented_mods:
+                return False
+            if key and key in represented_keys:
+                return False
+            if identity is not None:
+                represented_mods.add(identity)
+            if key:
+                represented_keys.add(key)
             result.append({
                 "package_name": pn,
-                "enabled": True,
-                "order": i,
-                "mod": m,
+                "enabled": bool(enabled),
+                "order": enabled_count if enabled else -1,
+                "priority_index": enabled_count if enabled else None,
+                "mod": mod,
             })
-        # 未启用的（不重复）
-        known_pns = [p for p in all_package_names if p not in active_set]
-        for pn in sorted(known_pns):
-            pn_lookup = pn.split("|", 1)[0].strip()
-            m = self.by_name.get(pn) or self.by_name.get(pn_lookup)
-            result.append({
-                "package_name": pn,
-                "enabled": False,
-                "order": -1,
-                "mod": m,
-            })
+            if enabled:
+                enabled_count += 1
+            return True
+
+        # First retain the profile's exact active_mods order and spelling.
+        for pn in active_mods:
+            add_entry(pn, True, self._resolve_mod(pn))
+
+        # Then add each inactive scanned Mod once.  ``all_package_names`` is
+        # an alias index in the UI, so resolve and deduplicate by object identity.
+        for pn in sorted({str(p).strip() for p in all_package_names if str(p).strip()}):
+            mod = self._resolve_mod(pn)
+            canonical = self._canonical_package_for_mod(mod) if mod is not None else pn
+            add_entry(canonical or pn, False, mod)
         return result
 
     # ---- 导出新的 active_mods 列表：按工作列表中"所有 enabled 条目"的当前顺序 ----
@@ -262,8 +350,10 @@ class PriorityService:
         # 重算 order
         for i, x in enumerate(enabled_part):
             x["order"] = i
+            x["priority_index"] = i
         for x in disabled_part:
             x["order"] = -1
+            x["priority_index"] = None
         return enabled_part + disabled_part
 
     # ---- 拖拽重排（把若干 index 移到某个目标位置之前） ----
@@ -317,9 +407,12 @@ class PriorityService:
             o = 0
             for x in new:
                 if x["enabled"]:
-                    x["order"] = o; o += 1
+                    x["order"] = o
+                    x["priority_index"] = o
+                    o += 1
                 else:
                     x["order"] = -1
+                    x["priority_index"] = None
             return new
         # 非 enabled-only 模式：直接把 merged 替换掉对应位置
         # 把 disabled 保留并放最后
@@ -329,9 +422,9 @@ class PriorityService:
         # 重新编号 enabled
         result = []
         for i, x in enumerate(merged):
-            y = dict(x); y["order"] = i; result.append(y)
+            y = dict(x); y["order"] = i; y["priority_index"] = i; result.append(y)
         for x in disabled:
-            y = dict(x); y["order"] = -1; result.append(y)
+            y = dict(x); y["order"] = -1; y["priority_index"] = None; result.append(y)
         return result
 
     # ---- 批量上移 / 下移 / 置顶 / 置底 ----
@@ -402,9 +495,12 @@ class PriorityService:
         o = 0
         for x in out:
             if x["enabled"]:
-                x["order"] = o; o += 1
+                x["order"] = o
+                x["priority_index"] = o
+                o += 1
             else:
                 x["order"] = -1
+                x["priority_index"] = None
         return out
 
     # ---- 预设优先级（地图底 / 素材中 / 功能上） ----
@@ -442,8 +538,10 @@ class PriorityService:
         new_enabled = bottom + middle + top
         for i, x in enumerate(new_enabled):
             x["order"] = i
+            x["priority_index"] = i
         for x in disabled:
             x["order"] = -1
+            x["priority_index"] = None
         return new_enabled + disabled
 
 

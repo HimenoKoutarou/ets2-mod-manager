@@ -28,10 +28,11 @@ class L10nResult:
     cities: List[TranslationEntry] = field(default_factory=list)
     countries: List[TranslationEntry] = field(default_factory=list)
     ferries: List[TranslationEntry] = field(default_factory=list)
+    hints: List[TranslationEntry] = field(default_factory=list)
 
     @property
     def total(self) -> int:
-        return len(self.cities) + len(self.countries) + len(self.ferries)
+        return len(self.cities) + len(self.countries) + len(self.ferries) + len(self.hints)
 
     @property
     def translated_count(self) -> int:
@@ -43,7 +44,7 @@ class L10nResult:
 
     @property
     def all_entries(self) -> List[TranslationEntry]:
-        return self.cities + self.countries + self.ferries
+        return self.cities + self.countries + self.ferries + self.hints
 
 
 class L10nService:
@@ -468,6 +469,12 @@ class L10nService:
 
         lines.append('\t# Ferries')
         for e in result.ferries:
+            if e.translated:
+                lines.append(f'\tkey[]: "{e.source}"')
+                lines.append(f'\tval[]: "{e.translated}"')
+
+        lines.append('\t# Sign and prompt texts')
+        for e in result.hints:
             if e.translated:
                 lines.append(f'\tkey[]: "{e.source}"')
                 lines.append(f'\tval[]: "{e.translated}"')

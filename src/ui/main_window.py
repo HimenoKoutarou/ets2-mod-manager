@@ -102,6 +102,10 @@ from .theme import ThemeManager, THEME_DARK, THEME_LIGHT, THEME_AUTO, QTB_DEFAUL
 # 全局深色主题从 theme.py 加载，旧的 _QTB_STYLE 常量已迁移
 
 class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMixin):
+    def eventFilter(self, watched, event):
+        # QMainWindow 位于 MRO 前方，显式转发给信号混入类的分类拖放处理。
+        return _SignalMixin.eventFilter(self, watched, event)
+
     def __init__(self):
         super().__init__()
         self._base_window_title = f"{_('app.title')}  v{__version__}"
@@ -130,6 +134,7 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self.priority_svc = PriorityService([])
         self.current_worklist: List[dict] = []
         self.current_profile: Optional[ProfileInfo] = None
+        self._worklist_profile_key = None
         self.profiles: List[ProfileInfo] = []
         self._current_filter_cat: str | None = None
         self._profile_fill_pending: bool = False
@@ -142,6 +147,9 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         # 异步扫描与加密包解析
         self._quick_scan_worker: Optional["_QuickScanWorker"] = None
         self._async_parse_worker: Optional["_AsyncParseWorker"] = None
+        self._ws_fetch_worker: Optional["_WorkshopFetchWorker"] = None
+        self._enrich_profiles_worker: Optional["_EnrichProfilesWorker"] = None
+        self._deferred_close_requested = False
         self._async_parse_progress: Optional[QProgressBar] = None
         # 顶部主进度条（显眼位置，扫描时显示，空闲隐藏）
         self._scan_progress_bar: Optional[QProgressBar] = None
@@ -272,13 +280,10 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
             except Exception:
                 pass
     def closeEvent(self, event):
-        """窗口关闭时清理后台线程。"""
-        for attr in ("_quick_scan_worker", "_async_parse_worker", "_workshop_fetch_worker"):
-            w = getattr(self, attr, None)
-            if w is not None and w.isRunning():
-                w.quit()
-                w.wait(3000)
-        super().closeEvent(event)
+        # _SignalMixin owns the complete shutdown path (session snapshot,
+        # signal disconnection and worker stop flags).  Calling it explicitly
+        # is necessary because QMainWindow appears first in this class's MRO.
+        return _SignalMixin.closeEvent(self, event)
 
 
 def _relaunch_without_console():

@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import Qt, QSize, QMimeData, QByteArray, Signal, QTimer, QObject, QThread
+from PySide6.QtCore import Qt, QSize, QMimeData, QByteArray, Signal, QTimer, QObject, QThread, QEvent
 from PySide6.QtGui import QAction, QIcon, QPixmap, QImage, QBrush, QColor, QFont, QDrag
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QFrame,
@@ -53,6 +53,138 @@ class _UpdateInstallWorker(QThread):
 
 
 class _SignalMixin:
+    def _background_workers(self):
+        """Return live main-window workers without duplicate objects."""
+        attrs = (
+            "_quick_scan_worker",
+            "_async_parse_worker",
+            "_ws_fetch_worker",
+            "_enrich_profiles_worker",
+        )
+        seen = set()
+        workers = []
+        for attr in attrs:
+            worker = getattr(self, attr, None)
+            if worker is None or id(worker) in seen:
+                continue
+            seen.add(id(worker))
+            workers.append(worker)
+        return workers
+
+    def _finish_deferred_close(self):
+        running = [w for w in self._background_workers() if w.isRunning()]
+        if running:
+            QTimer.singleShot(150, self._finish_deferred_close)
+            return
+        self._deferred_close_requested = False
+        self.setEnabled(True)
+        self.close()
+
+    def eventFilter(self, watched, event):
+        """把表格中选中的 Mod 拖到左侧分类节点即可完成归类。"""
+        tree = getattr(self, "tree_categories", None)
+        if watched is tree or (tree is not None and watched is tree.viewport()):
+            if event.type() == QEvent.DragEnter:
+                if event.mimeData().hasFormat("application/x-ets2-mods"):
+                    event.acceptProposedAction()
+                    return True
+                event.ignore()
+                return True
+            if event.type() == QEvent.DragMove:
+                if event.mimeData().hasFormat("application/x-ets2-mods"):
+                    event.acceptProposedAction()
+                    return True
+                event.ignore()
+                return True
+            if event.type() == QEvent.Drop:
+                pos = event.position().toPoint()
+                # QTreeWidget.itemAt() expects viewport coordinates.  Events
+                # filtered on the wrapper itself are offset by its frame.
+                if watched is tree:
+                    pos = tree.viewport().mapFrom(tree, pos)
+                item = tree.itemAt(pos)
+                role = item.data(0, Qt.UserRole) if item else None
+                if role and role[0] == "__filter_cat__":
+                    cat_key = role[1] or ""
+                    raw = event.mimeData().data("application/x-ets2-mods")
+                    packages = [p.strip() for p in bytes(raw).decode("utf-8", "ignore").splitlines() if p.strip()]
+                    if packages:
+                        self._assign_packages_to_category(packages, cat_key)
+                        event.acceptProposedAction()
+                        return True
+                event.ignore()
+                return True
+        return QMainWindow.eventFilter(self, watched, event)
+
+    def _assign_table_rows_to_category(self, table, rows, cat_key: str):
+        """将指定表格行的 Mod 归入分类，并持久化分类信息。"""
+        packages = []
+        for row in rows:
+            pkg_item = table.item(row, COL_PKG)
+            if pkg_item and pkg_item.text():
+                packages.append(pkg_item.text())
+        self._assign_packages_to_category(packages, cat_key)
+
+    def _assign_packages_to_category(self, packages, cat_key: str):
+        # A drag can contain multiple cells for one row; dedupe before
+        # mutating the persistent category cache.
+        unique_packages = []
+        seen_packages = set()
+        for raw_pkg in packages or []:
+            pkg = str(raw_pkg or "").strip()
+            if pkg and pkg not in seen_packages:
+                seen_packages.add(pkg)
+                unique_packages.append(pkg)
+        n = 0
+        category_updates = {}
+        from services import category_service as _cs
+        for pkg in unique_packages:
+            mod = self._lookup_mod(pkg)
+            if mod is None:
+                # Workshop/旧存档条目可能不是 all_mods_by_pkg 的完全同名键。
+                key = str(pkg).split("|", 1)[0].strip()
+                for candidate in getattr(self, "all_mods", []) or []:
+                    ids = {
+                        str(getattr(candidate, "mod_id", "") or ""),
+                        str(getattr(candidate, "package_name", "") or ""),
+                    }
+                    if key in ids or str(pkg) in ids:
+                        mod = candidate
+                        break
+            if mod is None:
+                # Keep Workshop/profile entries assignable while the scanner
+                # is still waiting for Steam content or metadata.
+                key = str(pkg).split("|", 1)[0].strip()
+                if not key:
+                    continue
+                category_updates[key] = cat_key or ""
+            else:
+                # Update the object immediately, then persist all ids in one
+                # cache write instead of saving once per dragged row.
+                mod._category_tag = cat_key or ""
+                category_updates[str(getattr(mod, "mod_id", "") or pkg)] = cat_key or ""
+            n += 1
+        if n:
+            try:
+                _cs.set_categories_bulk(category_updates)
+                _cs.save()
+            except Exception:
+                pass
+            # 重新读取分类计数和节点状态，确保目标文件夹立即可见。
+            try:
+                self._rebuild_category_tree()
+            except Exception:
+                pass
+            # 拖放后直接切换到目标分类，用户可以立即确认结果。
+            self._current_filter_cat = cat_key
+            target_item = self._cat_item_uncategorized if not cat_key else self._cat_items.get(cat_key)
+            if target_item is not None:
+                self.tree_categories.setCurrentItem(target_item)
+            self._apply_filter_to_table()
+            self._refresh_category_counts()
+            label = cat_key or _("cat.uncategorized")
+            self.statusBar().showMessage(f"已将 {n} 个 Mod 分配到「{label}」", 4000)
+
     def _on_mod_context_menu(self, table, pos):
         """Context actions for copying a mod's name or metadata."""
         from PySide6.QtGui import QAction
@@ -71,6 +203,16 @@ class _SignalMixin:
         menu = QMenu(table)
         a_name = menu.addAction("复制 Mod 名称")
         a_info = menu.addAction("复制 Mod 信息")
+        menu.addSeparator()
+        assign_menu = menu.addMenu("分配到分类")
+        try:
+            from services.category_service import all_folders
+            category_items = [("未分类", "")] + [(str(x), str(x)) for x in all_folders()]
+        except Exception:
+            category_items = [("未分类", "")]
+        assign_actions = {}
+        for label, key in category_items:
+            assign_actions[key] = assign_menu.addAction(label)
         chosen = menu.exec(table.viewport().mapToGlobal(pos))
         if chosen is a_name:
             QApplication.clipboard().setText(name)
@@ -91,6 +233,12 @@ class _SignalMixin:
                 info = f"名称: {name}\nPackage: {pkg}"
             QApplication.clipboard().setText(info)
             self.statusBar().showMessage("已复制 Mod 信息", 2000)
+        elif chosen in assign_actions.values():
+            selected_rows = table.selected_rows()
+            if row not in selected_rows:
+                selected_rows.append(row)
+            key = next(k for k, action in assign_actions.items() if action is chosen)
+            self._assign_table_rows_to_category(table, selected_rows, key)
 
     def _schedule_refresh(self, *, order=False, filter=False, counts=False, status=False):
         self._need_refresh_order = self._need_refresh_order or order
@@ -857,7 +1005,9 @@ class _SignalMixin:
             pass
         self._profile_fill_pending = False
         if self.current_profile:
-            self._fill_table_for_profile(self.current_profile)
+            # A fresh scan must re-read the profile once; later async metadata
+            # callbacks use the in-memory render path and preserve edits.
+            self._fill_table_for_profile(self.current_profile, force=True)
         # 立即保存会话 + 快速扫描快照（下次启动直接恢复不用扫）
         try:
             from services.session_service import save_session_state, _dir_signature
@@ -997,7 +1147,28 @@ class _SignalMixin:
         try:
             from services.session_service import save_session_state, _dir_signature
             snapshot = []
+            from services.session_service import save_mod_icon_probe
             for m in self.all_mods:
+                try:
+                    if getattr(m, "icon", None) is not None and m.icon.is_available:
+                        from services.session_service import save_mod_icon_cache
+                        save_mod_icon_cache(
+                            m.mod_id,
+                            m.last_modified,
+                            m.icon.raw_bytes or b"",
+                            m.icon.format,
+                        )
+                    # Persist both positive and negative probe results. A
+                    # package with no preview must not trigger another costly
+                    # deep extractor scan on every subsequent startup.
+                    if getattr(m, "package_type", "") != "workshop":
+                        save_mod_icon_probe(
+                            m.mod_id,
+                            m.last_modified,
+                            bool(getattr(m, "icon", None) and m.icon.is_available),
+                        )
+                except Exception:
+                    pass
                 snapshot.append({
                     "mod_id": m.mod_id,
                     "package_path": m.package_path,
@@ -1035,17 +1206,61 @@ class _SignalMixin:
             self._refresh_category_counts()
         except Exception:
             pass
-        # Only reveal the main window after the enriched snapshot is safely
-        # persisted; writing a large metadata cache must remain part of startup.
-        self._finalize_bootstrap()
+        # Full startup parsing owns splash completion. Icon-only repair runs
+        # after the main window is already visible and must not re-enter the
+        # bootstrap finalizer or toggle the window enabled state again.
+        if not getattr(self, "_async_parse_icon_only", False):
+            self._finalize_bootstrap()
         self._async_parse_worker = None
         self._async_parse_started = False
+        self._async_parse_icon_only = False
+        self._icon_close_notice_shown = False
 
     def closeEvent(self, event):
         update_worker = getattr(self, "_update_install_thread", None)
         if update_worker is not None and update_worker.isRunning():
             QMessageBox.warning(self, _("update.title"), _("update.close_blocked"))
             event.ignore()
+            return
+        # Icon repair is deliberately non-cancellable: the extractor may be
+        # inside a deep encrypted-archive traversal, and closing here could
+        # leave the icon/session caches half-written. Keep the window open
+        # until the repair worker emits finished.
+        icon_worker = getattr(self, "_async_parse_worker", None)
+        if getattr(self, "_async_parse_icon_only", False) and icon_worker is not None and icon_worker.isRunning():
+            event.ignore()
+            if not getattr(self, "_icon_close_notice_shown", False):
+                self._icon_close_notice_shown = True
+                QMessageBox.information(
+                    self,
+                    "预览图补全中",
+                    "正在补全加密 Mod 的预览图，完成前暂时不能关闭窗口。\n"
+                    "你可以继续使用主界面，完成后即可正常退出。",
+                )
+            try:
+                self.statusBar().showMessage("预览图补全进行中，完成后才能关闭窗口…", 4000)
+            except Exception:
+                pass
+            return
+        # QThread objects must outlive their running thread. Destroying the
+        # window immediately after only setting a stop flag can abort Python
+        # with "QThread: Destroyed while thread is still running". Ask every
+        # cooperative worker to stop, keep the event loop alive, and retry the
+        # close after they have actually finished.
+        workers = self._background_workers()
+        for worker in workers:
+            if worker.isRunning() and hasattr(worker, "stop"):
+                try:
+                    worker.stop()
+                except Exception:
+                    pass
+        if any(worker.isRunning() for worker in workers):
+            event.ignore()
+            if not getattr(self, "_deferred_close_requested", False):
+                self._deferred_close_requested = True
+                self.setEnabled(False)
+                self.statusBar().showMessage("正在安全结束后台任务…")
+                QTimer.singleShot(150, self._finish_deferred_close)
             return
         # 退出时保存当前会话状态
         try:
@@ -1078,12 +1293,6 @@ class _SignalMixin:
                 except (RuntimeError, TypeError, AttributeError): pass
                 try: self.update_svc.progress.disconnect(self._on_update_progress)
                 except (RuntimeError, TypeError, AttributeError): pass
-            # 收尾扫描/解析 worker
-            for attr in ("_quick_scan_worker", "_async_parse_worker"):
-                w = getattr(self, attr, None)
-                if w is not None and hasattr(w, "stop"):
-                    try: w.stop()
-                    except Exception: pass
         except Exception as _e:
             import sys as _sys
             print(f"[main_window] closeEvent error: {_e}", file=_sys.stderr)
@@ -1150,7 +1359,7 @@ class _SignalMixin:
             except Exception as e:
                 QMessageBox.warning(self, _("dlg.backup_fail_title"), str(e))
         elif act == a_cp:
-            prof_name = prof.company_name or prof.display_name or prof.profile_id
+            prof_name = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
             default_name = f"{prof_name} 的副本"
             new_name, ok = QInputDialog.getText(self, _("dlg.copy_profile_title"),
                                                 _("dlg.copy_profile_name_prompt"), text=default_name)
@@ -1171,7 +1380,7 @@ class _SignalMixin:
             except Exception as e:
                 QMessageBox.warning(self, _("dlg.copy_profile_title"), str(e))
         elif act == a_del:
-            prof_name = prof.company_name or prof.display_name or prof.profile_id
+            prof_name = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
             n = getattr(prof, "mod_count", 0)
             ans1 = QMessageBox.question(self, _("dlg.delete_profile_title"),
                                         _("dlg.delete_profile_warn1", prof=prof_name, n=n),
@@ -1200,7 +1409,10 @@ class _SignalMixin:
         pass
 
     def _on_table_order_changed(self):
-        self._sync_worklist_from_table()
+        if getattr(self, "table", None) is getattr(self, "table_active", None):
+            self._sync_active_group_order_from_table()
+        else:
+            self._sync_worklist_from_table()
         self._refresh_status_after_change()
         try: self._mark_priority_dirty("加载顺序已更改 · 请点工具栏「保存」写回 profile")
         except Exception: pass
@@ -1224,6 +1436,15 @@ class _SignalMixin:
             if owner_tbl not in (self.table_all, self.table_active):
                 return
             if item.row() >= owner_tbl.rowCount():
+                return
+            # A folder row is a UI group header. Its checkbox controls every
+            # member Mod and never enters the profile as a synthetic package.
+            if owner_tbl.is_folder_row(item.row()):
+                folder = owner_tbl.row_folder(item.row())
+                if item.checkState() == Qt.Checked:
+                    self._enable_category(folder)
+                else:
+                    self._disable_category(folder)
                 return
             self._sync_worklist_from_table()
             # Checkbox changes only need state/filter/count updates. Defer the
@@ -1250,9 +1471,10 @@ class _SignalMixin:
     def _on_mod_tab_changed(self, idx: int):
         self._current_mod_tab = "active" if idx == 1 else "all"
         self.table = self.table_active if idx == 1 else self.table_all
-        # 切换 Tab 时重新构建对应当前 profile 的表格
+        # 两个 Tab 共享同一份内存工作列表；切换时只重绘，绝不能重新
+        # 从 profile.sii 读取旧状态覆盖尚未保存的拖动/勾选结果。
         if self.current_profile:
-            self._fill_table_for_profile(self.current_profile)
+            self._render_current_worklist()
 
     # ---------- 搜索 ----------
     def _on_search_changed(self, text: str):
@@ -1277,7 +1499,7 @@ class _SignalMixin:
         self.current_worklist = self.priority_svc.apply_preset(self.current_worklist)
         try: self._mark_priority_dirty("已按预设重排优先级 · 请点工具栏「保存」写回 profile")
         except Exception: pass
-        if self.current_profile: self._fill_table_for_profile(self.current_profile)
+        if self.current_profile: self._render_current_worklist()
         QMessageBox.information(self, _("dlg.preset_title"), _("dlg.preset_msg"))
 
     def _on_tree_category_clicked(self, item, column=0):
@@ -1305,6 +1527,14 @@ class _SignalMixin:
             role = it.data(0, Qt.UserRole)
             if role and role[0] == "__filter_cat__":
                 cat_key = role[1]
+                # Actions for folder-only commands are absent on the
+                # Uncategorized node; initialize them so cancelling the menu
+                # cannot raise UnboundLocalError while comparing ``act``.
+                a_rename = a_delete = None
+                a_cat_en = a_cat_dis = a_cat_tog = None
+                a_up1 = a_up10 = a_up50 = a_up100 = None
+                a_down1 = a_down10 = a_down50 = a_down100 = None
+                a_cat_top = a_cat_bot = None
                 a_assign = menu.addAction(_("menu.assign_category"))
                 menu.addSeparator()
                 if cat_key:
@@ -1334,9 +1564,9 @@ class _SignalMixin:
                 act = menu.exec(self.tree_categories.mapToGlobal(pos))
                 if act == a_assign:
                     self._assign_checked_rows_to_category(cat_key)
-                elif act == a_rename:
+                elif a_rename is not None and act == a_rename:
                     self._rename_folder(cat_key)
-                elif act == a_delete:
+                elif a_delete is not None and act == a_delete:
                     self._delete_folder(cat_key)
                 elif cat_key:
                     # 分类批量操作
@@ -1441,6 +1671,13 @@ class _SignalMixin:
         rows = tbl.selected_rows()
         if not rows: return
         r = rows[-1]
+        if tbl.is_folder_row(r):
+            folder = tbl.row_folder(r)
+            # Keyboard navigation can emit several selection changes in one
+            # event burst. Defer detail rendering so stale rows do not trigger
+            # repeated archive/image work on the GUI thread.
+            QTimer.singleShot(60, lambda t=tbl, f=folder: self._render_deferred_folder_detail(t, f))
+            return
         pkg = tbl.package_at(r)
         display = tbl.item(r, COL_NAME)
         version = tbl.item(r, COL_VERSION)
@@ -1454,5 +1691,29 @@ class _SignalMixin:
             "row": r,
         }
         mod = self._lookup_mod(pkg)
-        self._show_mod_detail(pkg, mod, hint)
+        QTimer.singleShot(
+            60,
+            lambda t=tbl, p=pkg, m=mod, h=hint: self._render_deferred_mod_detail(t, p, m, h),
+        )
+
+    def _render_deferred_folder_detail(self, table_widget, folder: str) -> None:
+        """Render folder details only if it is still the current selection."""
+        try:
+            rows = table_widget.selected_rows()
+            if rows and table_widget.is_folder_row(rows[-1]) and table_widget.row_folder(rows[-1]) == folder:
+                self._show_folder_detail(folder)
+        except Exception:
+            pass
+
+    def _render_deferred_mod_detail(self, table_widget, pkg: str, mod, hint: dict) -> None:
+        """Drop stale keyboard-navigation callbacks before doing any detail I/O."""
+        try:
+            rows = table_widget.selected_rows()
+            if not rows or table_widget.is_folder_row(rows[-1]):
+                return
+            current_pkg = table_widget.package_at(rows[-1])
+            if current_pkg == pkg:
+                self._show_mod_detail(pkg, mod, hint)
+        except Exception:
+            pass
 

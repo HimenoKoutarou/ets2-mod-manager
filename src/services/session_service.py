@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -101,6 +102,107 @@ def _session_path() -> Path:
     except OSError:
         pass
     return folder / "last_session.json"
+
+
+def _icon_cache_dir() -> Path:
+    folder = _base_dir() / "mod_icons"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return folder
+
+
+def _icon_cache_stem(mod_id: str, last_modified: float) -> str:
+    raw = f"{mod_id}\0{float(last_modified or 0.0):.6f}".encode("utf-8", "ignore")
+    return hashlib.sha1(raw).hexdigest()
+
+
+def save_mod_icon_cache(mod_id: str, last_modified: float, raw_bytes: bytes, fmt: str = "jpg") -> Optional[Path]:
+    """Persist a parsed local icon keyed by mod identity and file mtime."""
+    if not mod_id or not raw_bytes:
+        return None
+    ext = str(fmt or "jpg").lower().lstrip(".")
+    if ext not in {"jpg", "jpeg", "png", "webp", "bmp", "gif"}:
+        ext = "jpg"
+    target = _icon_cache_dir() / f"{_icon_cache_stem(mod_id, last_modified)}.{ext}"
+    try:
+        if not target.exists() or target.stat().st_size != len(raw_bytes):
+            tmp = target.with_suffix(target.suffix + ".tmp")
+            tmp.write_bytes(raw_bytes)
+            os.replace(tmp, target)
+        return target
+    except OSError:
+        return None
+
+
+def load_mod_icon_cache(mod_id: str, last_modified: float) -> Optional[Tuple[bytes, str]]:
+    """Load an icon only when it belongs to the current package mtime."""
+    if not mod_id:
+        return None
+    stem = _icon_cache_stem(mod_id, last_modified)
+    for ext in ("jpg", "jpeg", "png", "webp", "bmp", "gif"):
+        path = _icon_cache_dir() / f"{stem}.{ext}"
+        try:
+            if path.is_file():
+                data = path.read_bytes()
+                if data:
+                    return data, ext
+        except OSError:
+            continue
+    return None
+
+
+def _icon_probe_path() -> Path:
+    """Persistent icon probe state, keyed by mod id + package mtime."""
+    folder = _base_dir()
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return folder / "mod_icon_probes.json"
+
+
+def _icon_probe_key(mod_id: str, last_modified: float) -> str:
+    return _icon_cache_stem(mod_id, last_modified)
+
+
+def load_mod_icon_probe(mod_id: str, last_modified: float) -> Optional[bool]:
+    """Return the last persisted icon probe result, or None if never probed."""
+    if not mod_id:
+        return None
+    try:
+        with _icon_probe_path().open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        value = data.get(_icon_probe_key(mod_id, last_modified))
+        if isinstance(value, dict):
+            value = value.get("available")
+        return bool(value) if isinstance(value, bool) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def save_mod_icon_probe(mod_id: str, last_modified: float, available: bool) -> None:
+    """Persist whether an icon probe completed and found an icon."""
+    if not mod_id:
+        return
+    path = _icon_probe_path()
+    try:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data[_icon_probe_key(mod_id, last_modified)] = {
+            "available": bool(available),
+            "ts": datetime.now().isoformat(),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError, UnicodeEncodeError):
+        pass
 
 
 def save_session_state(

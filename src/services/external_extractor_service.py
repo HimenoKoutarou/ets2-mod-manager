@@ -56,19 +56,23 @@ _TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "tools"
 _EXTRACTOR = _TOOLS_DIR / "extractor.exe"
 _SXC = _TOOLS_DIR / "sxc64.exe"
 _CACHE_PATH = _TOOLS_DIR.parent / "cache" / "manifest_cache.json"
+_ENTRY_CACHE_PATH = _TOOLS_DIR.parent / "cache" / "external_entries_cache.json"
 
 _lock = threading.Lock()
 _cache: Optional[dict] = None
 _TTL_SECONDS = 30 * 86400
 _TIMEOUT_SECONDS = 15
+_ENTRY_CACHE_TTL_SECONDS = 90 * 86400
 
 # 进程内缓存：单文件字节缓存，避免同进程重复提取同一文件
 # key = (cache_key(path), inner_name)，value = bytes or None（None 表示确认不存在）
 _file_bytes_cache: dict = {}
 _file_bytes_lock = threading.Lock()
+_first_image_cache: dict = {}
 
 # 磁盘文件缓存目录：extracted/{cache_key}/{filename_hash} -> 实际文件内容
 _DISK_CACHE_DIR = _TOOLS_DIR.parent / "cache" / "extracted"
+_L10N_TREE_CACHE_DIR = _TOOLS_DIR.parent / "cache" / "l10n_tree"
 _disk_cache_lock = threading.Lock()
 
 
@@ -185,6 +189,26 @@ def _save_cache() -> None:
             pass
 
 
+def _load_entry_cache() -> dict:
+    try:
+        if _ENTRY_CACHE_PATH.exists():
+            value = json.loads(_ENTRY_CACHE_PATH.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_entry_cache(cache: dict) -> None:
+    try:
+        _ENTRY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ENTRY_CACHE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, _ENTRY_CACHE_PATH)
+    except OSError:
+        pass
+
+
 
 def _sp_run(cmd_args, /, *, capture_output=True, timeout=None, input=None, env=None, cwd=None,
             shell=False, stdout=None, stderr=None):
@@ -220,48 +244,81 @@ def _sp_run(cmd_args, /, *, capture_output=True, timeout=None, input=None, env=N
     return subprocess.run(list(cmd_args), **kwargs)
 
 
-def _run_extractor(scs_path: Path, dest: Path, partial: str = "/manifest.sii") -> bool:
+def _run_extractor(scs_path: Path, dest: Path, partial: str = "/manifest.sii", should_stop=None,
+                   timeout_seconds: float | None = None) -> bool:
     """用 extractor.exe 提取 SCS# 包内指定路径的文件。partial 用 / 开头的绝对路径。"""
     if not _EXTRACTOR.exists():
         return False
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             [str(_EXTRACTOR), str(scs_path), "--deep", f"--partial={partial}",
              "-d", str(dest), "-s"],
-            capture_output=True, timeout=_TIMEOUT_SECONDS,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
         )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
+        deadline = time.monotonic() + (timeout_seconds or _TIMEOUT_SECONDS)
+        while proc.poll() is None:
+            if should_stop and should_stop():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return False
+            if time.monotonic() >= deadline:
+                proc.kill()
+                return False
+            time.sleep(0.05)
+        return proc.returncode == 0
+    except OSError:
         return False
 
 
-def _run_sxc(archive_path: Path, dest: Path, filename: str = "manifest.sii") -> bool:
+def _run_sxc(archive_path: Path, dest: Path, filename: str = "manifest.sii", should_stop=None,
+             timeout_seconds: float | None = None) -> bool:
     """用 sxc64.exe 提取 AEM!/加密ZIP 包内指定文件名的文件。"""
     if not _SXC.exists():
         return False
     try:
-        result = subprocess.run(
+        # SXC treats -f as a path pattern. Passing only Path.name fails for
+        # nested files such as /def/city/rlp_germany/bacharach.sii.
+        filename = str(filename or "manifest.sii").replace("\\", "/")
+        if not filename.startswith("/"):
+            filename = "/" + filename
+        proc = subprocess.Popen(
             [str(_SXC), str(archive_path), "-o", str(dest), "-f", filename, "-q"],
-            capture_output=True, timeout=_TIMEOUT_SECONDS,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
         )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
+        deadline = time.monotonic() + (timeout_seconds or _TIMEOUT_SECONDS)
+        while proc.poll() is None:
+            if should_stop and should_stop():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return False
+            if time.monotonic() >= deadline:
+                proc.kill()
+                return False
+            time.sleep(0.05)
+        return proc.returncode == 0
+    except OSError:
         return False
 
 
-def _extract_single_file(path: Path, inner_name: str, dest: Path) -> bool:
+def _extract_single_file(path: Path, inner_name: str, dest: Path, should_stop=None) -> bool:
     """按 magic 选工具提取单个文件到 dest 目录。"""
     magic = _detect_magic(path)
     partial = inner_name if inner_name.startswith("/") else "/" + inner_name
     if magic == "scs_hashfs":
-        return _run_extractor(path, dest, partial=partial)
+        return _run_extractor(path, dest, partial=partial, should_stop=should_stop)
     if magic == "aem":
-        return _run_sxc(path, dest, filename=Path(inner_name).name)
+        return _run_sxc(path, dest, filename=inner_name, should_stop=should_stop)
     if magic == "zip":
         # 加密 ZIP 或 zipfile 打不开的 ZIP，交给 sxc
-        return _run_sxc(path, dest, filename=Path(inner_name).name)
+        return _run_sxc(path, dest, filename=inner_name, should_stop=should_stop)
     return False
 
 
@@ -300,7 +357,7 @@ def extract_manifest_text(archive_path) -> Optional[str]:
     return text
 
 
-def extract_file_bytes(archive_path, inner_name: str) -> Optional[bytes]:
+def extract_file_bytes(archive_path, inner_name: str, should_stop=None) -> Optional[bytes]:
     """提取单个文件字节（icon/description）。进程内缓存 + 磁盘文件缓存（30天 TTL）。"""
     path = Path(archive_path)
     if not path.is_file():
@@ -324,7 +381,10 @@ def extract_file_bytes(archive_path, inner_name: str) -> Optional[bytes]:
     tmp = Path(tempfile.mkdtemp(prefix="ets2mm_f_"))
 
     data: Optional[bytes] = None
-    if _extract_single_file(path, inner_name, tmp):
+    if should_stop and should_stop():
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    if _extract_single_file(path, inner_name, tmp, should_stop=should_stop):
         target = Path(inner_name).name
         for p in tmp.rglob(target):
             try:
@@ -345,7 +405,114 @@ def extract_file_bytes(archive_path, inner_name: str) -> Optional[bytes]:
     return data
 
 
-def extract_files_batch(archive_path, inner_names) -> dict:
+def extract_first_image_bytes(archive_path) -> Optional[tuple[bytes, str]]:
+    """Extract the first image from an encrypted archive when manifest.sii
+    does not declare an icon filename. This covers legacy packages whose
+    preview uses an arbitrary name (for example ``PR_models.jpg``)."""
+    path = Path(archive_path)
+    if not path.is_file():
+        return None
+    cache_key = _cache_key(path)
+    with _file_bytes_lock:
+        if cache_key in _first_image_cache:
+            return _first_image_cache[cache_key]
+    tmp = Path(tempfile.mkdtemp(prefix="ets2mm_img_"))
+    try:
+        magic = _detect_magic(path)
+        tool = _EXTRACTOR if magic == "scs_hashfs" else _SXC
+        if not tool.exists():
+            return None
+        if magic == "scs_hashfs":
+            # Encrypted HashFS packages frequently use an arbitrary preview
+            # filename (for example /volgamap.jpg). Find such names only in
+            # this background fallback; normal manifest candidates are tried
+            # by read_icon before reaching here.
+            import re as _re
+            try:
+                listed = subprocess.run(
+                    [str(tool), str(path), "--deep", "--list"],
+                    capture_output=True, text=True,
+                    timeout=max(_TIMEOUT_SECONDS * 4, 45),
+                    creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                listed = None
+            names = []
+            if listed is not None:
+                for match in _re.finditer(
+                    r"(?im)^\s*(/[^\r\n]*\.(?:jpg|jpeg|png|webp|bmp|gif))\s*$",
+                    listed.stdout or "",
+                ):
+                    name = match.group(1).strip().replace("\\", "/")
+                    if name not in names:
+                        names.append(name)
+            priority = ("icon", "preview", "thumb", "cover", "logo", "banner")
+            names.sort(key=lambda n: (0 if any(k in n.lower() for k in priority) else 1, len(n), n.lower()))
+            for image_name in names[:24]:
+                one_tmp = Path(tempfile.mkdtemp(prefix="ets2mm_img_one_"))
+                try:
+                    if _run_extractor(path, one_tmp, partial=image_name):
+                        for candidate in one_tmp.rglob("*"):
+                            if candidate.is_file() and candidate.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"):
+                                data = candidate.read_bytes()
+                                if len(data) > 100:
+                                    found = (data, image_name)
+                                    with _file_bytes_lock:
+                                        _first_image_cache[cache_key] = found
+                                    _disk_cache_put(cache_key, image_name, data)
+                                    return found
+                except OSError:
+                    pass
+                finally:
+                    shutil.rmtree(one_tmp, ignore_errors=True)
+            with _file_bytes_lock:
+                _first_image_cache[cache_key] = None
+            return None
+        else:
+            # List entries once, then extract only the first image path found.
+            # Never use a broad wildcard extraction: old map packages can
+            # contain thousands of textures and would otherwise exhaust memory.
+            listed = subprocess.run(
+                [str(tool), str(path), "-l"], capture_output=True, text=True,
+                timeout=min(_TIMEOUT_SECONDS, 8), creationflags=_SP_HIDE,
+                startupinfo=_SP_STARTUPINFO,
+            )
+            import re as _re
+            image_name = next((m.group(0) for m in _re.finditer(
+                r"(?im)([^\r\n\\/]+\.(?:jpg|jpeg|png|webp|bmp|gif))\s*$",
+                listed.stdout or "") ), None)
+            if not image_name:
+                with _file_bytes_lock:
+                    _first_image_cache[cache_key] = None
+                return None
+            args = [str(tool), str(path), "-o", str(tmp), "-f", image_name, "-q"]
+        try:
+            result = subprocess.run(
+                args, capture_output=True, timeout=min(_TIMEOUT_SECONDS, 8),
+                creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            result = None
+        if result is not None and result.returncode == 0:
+            for candidate in tmp.rglob("*"):
+                if candidate.is_file() and candidate.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"):
+                    try:
+                        data = candidate.read_bytes()
+                        if len(data) > 100:
+                            found = (data, candidate.name)
+                            with _file_bytes_lock:
+                                _first_image_cache[cache_key] = found
+                            return found
+                    except OSError:
+                        continue
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    with _file_bytes_lock:
+        _first_image_cache[cache_key] = None
+    return None
+
+
+def extract_files_batch(archive_path, inner_names, should_stop=None) -> dict:
     """批量提取多个文件，返回 {inner_name: bytes or None}。
     SCS# 用 --partial 多路径一次提取（耗时与单文件相同）；
     AEM!/ZIP 逐个提取（有进程内缓存，不重复）。
@@ -406,15 +573,27 @@ def extract_files_batch(archive_path, inner_names) -> dict:
 
         ok = False
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [str(_EXTRACTOR), str(path), "--deep", f"--partial={multi}",
                  "-d", str(tmp), "-s"],
-                capture_output=True, timeout=_TIMEOUT_SECONDS,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
             )
-            # R11.1: check returncode
-            ok = proc.returncode == 0
-        except (subprocess.TimeoutExpired, OSError):
+            deadline = time.monotonic() + _TIMEOUT_SECONDS
+            while proc.poll() is None:
+                if should_stop and should_stop():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    break
+                if time.monotonic() >= deadline:
+                    proc.kill()
+                    break
+                time.sleep(0.05)
+            ok = proc.returncode == 0 and not (should_stop and should_stop())
+        except OSError:
             ok = False
 
         if ok:
@@ -442,7 +621,9 @@ def extract_files_batch(archive_path, inner_names) -> dict:
 
     # AEM!/ZIP: 逐个提取（有进程内缓存）
     for n in names:
-        result[n] = extract_file_bytes(path, n)
+        if should_stop and should_stop():
+            break
+        result[n] = extract_file_bytes(path, n, should_stop=should_stop)
     return result
 
 
@@ -466,6 +647,162 @@ def extract_archive_to_directory(archive_path, destination) -> bool:
         return proc.returncode == 0 and any(dest.rglob("*"))
     except (subprocess.TimeoutExpired, OSError):
         return False
+
+
+def extract_l10n_tree_to_directory(archive_path, destination, target_locale: str = "zh_cn",
+                                   should_stop=None) -> bool:
+    """Extract only localization-relevant trees to a temporary directory.
+
+    The caller can then scan the temporary directory with the normal archive
+    reader and remove it afterwards. Encrypted packages are extracted with a
+    small number of wildcard requests instead of starting one process per SII
+    file; a listed-file fallback is kept for extractor builds without wildcard
+    support.
+    """
+    path = Path(archive_path)
+    dest = Path(destination)
+    if not path.is_file() or (should_stop and should_stop()):
+        return False
+    magic = _detect_magic(path)
+    if magic not in ("scs_hashfs", "aem", "zip"):
+        return False
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+
+    locale = str(target_locale or "zh_cn").replace("\\", "/").strip("/")
+    tree_key = hashlib.md5(f"{_cache_key(path)}|{locale.lower()}".encode("utf-8")).hexdigest()
+    cached_root = _L10N_TREE_CACHE_DIR / tree_key
+    marker = cached_root / "_complete.json"
+    try:
+        if marker.exists() and time.time() - json.loads(marker.read_text(encoding="utf-8")).get("ts", 0) < _ENTRY_CACHE_TTL_SECONDS:
+            for item in cached_root.iterdir():
+                if item.name != marker.name:
+                    target = dest / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, target, dirs_exist_ok=True)
+                    elif item.is_file():
+                        shutil.copy2(item, target)
+            return any(p.is_file() for p in dest.rglob("*"))
+    except Exception:
+        pass
+    # Extractor's partial matcher treats a directory path as recursive. Using
+    # ``/def`` (rather than ``/def/*``) is supported by the bundled extractor
+    # and avoids a second full archive scan caused by wildcard expansion.
+    # The bundled HashFS extractor accepts comma-separated partial paths, so
+    # keep def and locale in one archive pass. SXC accepts one path pattern per
+    # invocation, therefore encrypted ZIP/AEM packages use two passes.
+    patterns = [f"/def,/locale/{locale}"] if magic == "scs_hashfs" else ["/def", f"/locale/{locale}"]
+    runner = _run_extractor if magic == "scs_hashfs" else _run_sxc
+    for pattern in patterns:
+        if should_stop and should_stop():
+            return False
+        ok = runner(path, dest, partial=pattern, should_stop=should_stop,
+                    timeout_seconds=max(_TIMEOUT_SECONDS * 4, 60)) if magic == "scs_hashfs" else \
+            runner(path, dest, filename=pattern, should_stop=should_stop,
+                   timeout_seconds=max(_TIMEOUT_SECONDS * 4, 60))
+        if not ok and should_stop and should_stop():
+            return False
+
+    if any(p.is_file() for p in dest.rglob("*")):
+        try:
+            if cached_root.exists():
+                shutil.rmtree(cached_root, ignore_errors=True)
+            cached_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(dest, cached_root, dirs_exist_ok=True)
+            marker.write_text(json.dumps({"ts": time.time()}), encoding="utf-8")
+        except OSError:
+            pass
+        return True
+
+    # Fallback for older SXC builds that do not expand wildcards.
+    listed = list_external_entries(path)
+    selected = [n for n in listed if n.lower().startswith(("def/", f"locale/{locale.lower()}/"))]
+    if not selected:
+        return False
+    extracted = extract_files_batch(path, selected, should_stop=should_stop)
+    for name, data in extracted.items():
+        if should_stop and should_stop():
+            return False
+        if not data:
+            continue
+        target = dest / name.replace("/", os.sep)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        except OSError:
+            continue
+    if any(p.is_file() for p in dest.rglob("*")):
+        try:
+            if cached_root.exists():
+                shutil.rmtree(cached_root, ignore_errors=True)
+            cached_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(dest, cached_root, dirs_exist_ok=True)
+            marker.write_text(json.dumps({"ts": time.time()}), encoding="utf-8")
+        except OSError:
+            pass
+        return True
+    return False
+
+
+def list_external_entries(archive_path) -> list[str]:
+    """List logical paths from an encrypted archive for selective workflows.
+
+    SXC can enumerate encrypted ZIP/AEM packages without extracting their
+    contents. HashFS uses extractor's deep listing. This is intentionally a
+    listing-only API so localization can request just def/locale files.
+    """
+    path = Path(archive_path)
+    if not path.is_file():
+        return []
+    key = _cache_key(path)
+    cache = _load_entry_cache()
+    cached = cache.get(key)
+    if isinstance(cached, dict) and time.time() - cached.get("ts", 0) < _ENTRY_CACHE_TTL_SECONDS:
+        entries = cached.get("entries")
+        if isinstance(entries, list):
+            return [str(x) for x in entries]
+    magic = _detect_magic(path)
+    if magic == "scs_hashfs":
+        tool = _EXTRACTOR
+        args = [str(tool), str(path), "--deep", "--list"]
+        timeout = max(_TIMEOUT_SECONDS * 4, 45)
+    elif magic in ("aem", "zip"):
+        tool = _SXC
+        args = [str(tool), str(path), "-l"]
+        timeout = max(_TIMEOUT_SECONDS * 2, 30)
+    else:
+        return []
+    if not tool.exists():
+        return []
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            creationflags=_SP_HIDE,
+            startupinfo=_SP_STARTUPINFO,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    import re as _re
+    out: list[str] = []
+    for line in (result.stdout or "").splitlines():
+        value = line.strip().replace("\\", "/")
+        if not value.startswith("/"):
+            continue
+        value = value.lstrip("/")
+        if value and value not in out:
+            out.append(value)
+    # Some extractor builds print paths with a leading marker or mixed case;
+    # retain only normalized logical paths and discard directory-only lines.
+    entries = [x for x in out if "." in Path(x).name]
+    if entries:
+        cache[key] = {"ts": time.time(), "entries": entries}
+        _save_entry_cache(cache)
+    return entries
 
 
 def supports_archive(archive_path) -> bool:

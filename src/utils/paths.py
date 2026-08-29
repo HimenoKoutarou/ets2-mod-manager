@@ -44,9 +44,13 @@ def _find_steam_workshop() -> Optional[Path]:
     # 尝试多个常见 Steam 安装位置
     steams = []
     for drive in ["C:", "D:", "E:", "F:", "G:"]:
-        steams.append(Path(drive) / "Program Files (x86)" / "Steam" / "steamapps" / "workshop" / "content" / ETS2_APPID)
-        steams.append(Path(drive) / "Steam" / "steamapps" / "workshop" / "content" / ETS2_APPID)
-        steams.append(Path(drive) / "SteamLibrary" / "steamapps" / "workshop" / "content" / ETS2_APPID)
+        # ``Path("E:")`` is drive-relative on Windows (``E:SteamLibrary``),
+        # which may resolve against an unrelated current directory. Build an
+        # absolute drive root before appending Steam folders.
+        root = Path(drive + "\\")
+        steams.append(root / "Program Files (x86)" / "Steam" / "steamapps" / "workshop" / "content" / ETS2_APPID)
+        steams.append(root / "Steam" / "steamapps" / "workshop" / "content" / ETS2_APPID)
+        steams.append(root / "SteamLibrary" / "steamapps" / "workshop" / "content" / ETS2_APPID)
     # 注册表查找 Steam 安装路径
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
@@ -66,8 +70,9 @@ def _find_steam_cloud() -> Optional[Path]:
     # 先找 Steam 安装目录 / userdata
     userdata_candidates = []
     for drive in ["C:", "D:", "E:", "F:", "G:"]:
-        for sp in [Path(drive) / "Program Files (x86)" / "Steam" / "userdata",
-                   Path(drive) / "Steam" / "userdata"]:
+        root = Path(drive + "\\")
+        for sp in [root / "Program Files (x86)" / "Steam" / "userdata",
+                   root / "Steam" / "userdata"]:
             if sp.exists():
                 userdata_candidates.append(sp)
     try:

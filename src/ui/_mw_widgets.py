@@ -92,68 +92,84 @@ class SplashScreen(QWidget):
                 if val in self._perf_levels: self._perf_mode = val
         except Exception: pass
 
-        # --- 现代深色主题样式 ---
+        # --- Modium-inspired startup card: clean light surface, blue accent ---
         self.setStyleSheet("""
             QWidget {
-                background-color: #1e1e2e;
-                color: #cdd6f4;
+                background-color: #f5f7fb;
+                color: #1f2937;
                 font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
             }
+            QDialog#splashCard {
+                background: #ffffff;
+                border: 1px solid #e2e7ef;
+                border-radius: 18px;
+            }
             QLabel#titleLabel {
-                font-size: 22px;
+                font-size: 24px;
                 font-weight: bold;
-                color: #cdd6f4;
+                color: #111827;
             }
             QLabel#subtitleLabel {
                 font-size: 12px;
-                color: #a6adc8;
+                color: #8b98a7;
             }
             QLabel#stepLabel {
                 font-size: 14px;
                 font-weight: 600;
-                color: #89b4fa;
+                color: #2f80ed;
             }
             QLabel#percentLabel {
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: bold;
-                color: #f38ba8;
+                color: #2f80ed;
             }
             QLabel#detailLabel {
                 font-size: 11px;
-                color: #a6adc8;
+                color: #5f6b78;
             }
             QLabel#warnLabel {
-                background: #313244;
-                border: 1px solid #f9e2af;
-                border-radius: 8px;
-                color: #f9e2af;
+                background: #fff8e7;
+                border: 1px solid #f1d38b;
+                border-radius: 10px;
+                color: #8a6412;
                 font-size: 11px;
                 padding: 10px 14px;
             }
             QProgressBar {
-                border: none;
-                border-radius: 6px;
-                background-color: #313244;
-                height: 8px;
+                border: 1px solid #e2e7ef;
+                border-radius: 5px;
+                background-color: #eef2f7;
+                height: 10px;
                 text-align: center;
             }
             QProgressBar::chunk {
-                border-radius: 6px;
-                background-color: linear-gradient(90deg, #89b4fa, #cba6f7);
+                border-radius: 4px;
+                background-color: #2f80ed;
+            }
+            QComboBox {
+                background: #ffffff;
+                border: 1px solid #dce3ec;
+                border-radius: 9px;
+                padding: 7px 10px;
+                color: #374151;
+            }
+            QComboBox:hover, QComboBox:focus {
+                border-color: #8bb8f5;
             }
         """)
 
         # --- 主布局 ---
+        self.setObjectName("splashCard")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(36, 32, 36, 24)
-        layout.setSpacing(16)
+        layout.setContentsMargins(38, 34, 38, 26)
+        layout.setSpacing(14)
 
         # --- Logo + 标题区域 ---
         header_layout = QHBoxLayout()
         header_layout.setSpacing(16)
 
         logo_label = QLabel()
-        logo_label.setFixedSize(80, 80)
+        logo_label.setFixedSize(76, 76)
         logo_label.setAlignment(Qt.AlignCenter)
         # Try logo_path -> fallback to assets/app_icon.png -> fallback emoji.
         logo_pix = QPixmap()
@@ -203,7 +219,7 @@ class SplashScreen(QWidget):
         # --- 分隔线 ---
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("background-color: #313244; max-height: 1px;")
+        line.setStyleSheet("background-color: #e7ebf1; max-height: 1px;")
         layout.addWidget(line)
 
         # --- 步骤信息 ---
@@ -213,7 +229,7 @@ class SplashScreen(QWidget):
         step_layout.addWidget(self._step_label)
         step_layout.addStretch()
         self._step_counter = QLabel("步骤 1/3")
-        self._step_counter.setStyleSheet("font-size: 12px; color: #6c7086;")
+        self._step_counter.setStyleSheet("font-size: 12px; color: #8b98a7;")
         step_layout.addWidget(self._step_counter)
         layout.addLayout(step_layout)
 
@@ -247,24 +263,20 @@ class SplashScreen(QWidget):
 
         # --- 当前任务详情 ---
         detail_frame = QFrame()
-        detail_frame.setStyleSheet("""
-            QFrame {
-                background-color: #313244;
-                border-radius: 8px;
-            }
-        """)
+        detail_frame.setObjectName("taskPanel")
+        detail_frame.setStyleSheet("QFrame#taskPanel { background:#f7f9fc; border:1px solid #e5eaf1; border-radius:12px; }")
         detail_layout = QVBoxLayout(detail_frame)
         detail_layout.setContentsMargins(12, 10, 12, 10)
         detail_layout.setSpacing(6)
 
         task_header = QLabel("当前任务")
-        task_header.setStyleSheet("font-size: 10px; color: #6c7086; font-weight: bold;")
+        task_header.setStyleSheet("font-size: 10px; color: #8b98a7; font-weight: bold;")
         detail_layout.addWidget(task_header)
 
         self._detail_label = QLabel("准备就绪...")
         self._detail_label.setObjectName("detailLabel")
         self._detail_label.setWordWrap(True)
-        self._detail_label.setStyleSheet("font-size: 12px; color: #cdd6f4;")
+        self._detail_label.setStyleSheet("font-size: 12px; color: #374151;")
         self._detail_label.setMinimumHeight(20)
         self._detail_label.setMaximumHeight(50)
         detail_layout.addWidget(self._detail_label)
@@ -273,17 +285,12 @@ class SplashScreen(QWidget):
 
         # --- 状态日志（可滚动）---
         self._log_area = QFrame()
-        self._log_area.setStyleSheet("""
-            QFrame {
-                background-color: #181825;
-                border-radius: 8px;
-                padding: 8px;
-            }
-        """)
+        self._log_area.setObjectName("logPanel")
+        self._log_area.setStyleSheet("QFrame#logPanel { background:#ffffff; border:1px solid #e5eaf1; border-radius:12px; }")
         log_layout = QVBoxLayout(self._log_area)
         log_layout.setContentsMargins(4, 4, 4, 4)
         log_header = QLabel("状态日志")
-        log_header.setStyleSheet("font-size: 10px; color: #6c7086; font-weight: bold;")
+        log_header.setStyleSheet("font-size: 10px; color: #8b98a7; font-weight: bold;")
         log_layout.addWidget(log_header)
 
         self._log_text = QTextEdit()
@@ -292,25 +299,25 @@ class SplashScreen(QWidget):
         self._log_text.setMaximumHeight(180)
         self._log_text.setStyleSheet("""
             QTextEdit {
-                background: transparent;
+                background: #fbfcfe;
                 border: none;
-                color: #a6adc8;
+                color: #6b7785;
                 font-family: "Consolas", "Microsoft YaHei", monospace;
                 font-size: 11px;
-                selection-background-color: #45475a;
+                selection-background-color: #dbeafe;
             }
             QTextEdit QScrollBar:vertical {
-                background: #181825;
+                background: #fbfcfe;
                 width: 8px;
                 border: none;
             }
             QTextEdit QScrollBar::handle:vertical {
-                background: #45475a;
+                background: #cbd5e1;
                 border-radius: 4px;
                 min-height: 20px;
             }
             QTextEdit QScrollBar::handle:vertical:hover {
-                background: #585b70;
+                background: #94a3b8;
             }
             QTextEdit QScrollBar::add-line:vertical,
             QTextEdit QScrollBar::sub-line:vertical {
@@ -338,7 +345,7 @@ class SplashScreen(QWidget):
         # --- 底部提示 ---
         footer = QLabel(_("splash.footer"))
         footer.setAlignment(Qt.AlignCenter)
-        footer.setStyleSheet("font-size: 10px; color: #6c7086;")
+        footer.setStyleSheet("font-size: 10px; color: #9aa6b2;")
         layout.addWidget(footer)
 
     def set_first_scan(self, is_first: bool):
@@ -573,6 +580,12 @@ COL_VERSION = 4
 COL_ORDER = 5
 COL_PKG = 6  # 隐藏列：package_name
 
+# Row metadata stored on the hidden package cell.  Folder rows are UI-only
+# group headers; their member Mod rows keep the normal package key so the
+# profile writer never receives a synthetic folder entry.
+ROW_KIND_ROLE = Qt.UserRole + 101
+ROW_FOLDER_ROLE = Qt.UserRole + 102
+
 
 
 class ModTable(QTableWidget):
@@ -580,6 +593,7 @@ class ModTable(QTableWidget):
 
     def __init__(self, parent=None):
         super().__init__(0, 7, parent)
+        self._expanded_folders: set[str] = set()
         self.setHorizontalHeaderLabels([_("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"), _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"])
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -597,45 +611,95 @@ class ModTable(QTableWidget):
         self.setAlternatingRowColors(True)
         self.verticalHeader().setDefaultSectionSize(24)
 
+    def startDrag(self, supported_actions):
+        """保留表格内部排序 MIME，同时标记可拖到左侧分类树。"""
+        items = self.selectedItems()
+        if not items:
+            return
+        mime = self.mimeData(items)
+        packages = []
+        for row in sorted({item.row() for item in items}):
+            cell = self.item(row, COL_PKG)
+            if cell and cell.text():
+                packages.append(cell.text())
+        mime.setData("application/x-ets2-mods", "\n".join(packages).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(supported_actions)
+
     def dropEvent(self, event):
         # 不使用 QTableWidget::InternalMove：已启用页包含被隐藏的禁用行，
         # Qt 默认 drop 会按隐藏行索引移动，结果经常看似拖动但顺序不变。
-        selected_rows = sorted({i.row() for i in self.selectedRows()})
+        selected_rows = self.selected_rows()
         visible_rows = [r for r in range(self.rowCount()) if not self.isRowHidden(r)]
         if not selected_rows or not visible_rows:
             event.ignore(); return
-        selected_rows = [r for r in selected_rows if r in visible_rows and self._row_enabled(r)]
+        # Folder headers represent a block and remain draggable even when
+        # only part of the folder is enabled (their checkbox is intentionally
+        # unchecked in that mixed state).
+        selected_rows = [
+            r for r in selected_rows
+            if r in visible_rows and (self._row_enabled(r) or self.is_folder_row(r))
+        ]
         if not selected_rows:
             event.ignore(); return
+        # When a folder is expanded, move its visible child rows together with
+        # the header so the block stays intact after a drag.
+        selected_folders = {
+            self.row_folder(r) for r in selected_rows if self.is_folder_row(r)
+        }
+        if selected_folders:
+            selected_rows = sorted(set(selected_rows) | {
+                r for r in visible_rows
+                if self.is_folder_child_row(r) and self.row_folder(r) in selected_folders
+            })
         target_row = self.indexAt(event.position().toPoint()).row()
         if target_row not in visible_rows:
             target_row = visible_rows[-1]
-        if not self._row_enabled(target_row):
+        if not (self._row_enabled(target_row) or self.is_folder_row(target_row)):
             event.ignore(); return
 
-        # 按当前可见顺序移动选中包，保留多选块内部顺序。
-        visible_pkgs = [self.package_at(r) for r in visible_rows]
-        selected_pkgs = [self.package_at(r) for r in selected_rows]
-        moving = set(selected_pkgs)
-        remaining = [p for p in visible_pkgs if p not in moving]
-        target_pkg = self.package_at(target_row)
-        insert_at = remaining.index(target_pkg) if target_pkg in remaining else len(remaining)
-        visible_order = remaining[:insert_at] + selected_pkgs + remaining[insert_at:]
+        # 按当前可见顺序移动选中包，保留多选块内部顺序。整个重建过程
+        # 必须屏蔽 itemChanged：takeItem/setItem 会产生短暂的半成品行，
+        # 此时隐藏包名列为空，若进入同步逻辑会触发 None.text() 崩溃。
+        signals_blocked = self.signalsBlocked()
+        self.blockSignals(True)
+        try:
+            # Reorder by original row identity, never by package name. Two
+            # different archives can legally expose the same manifest package
+            # key; using a dict keyed by package_name would silently drop one.
+            selected_set = set(selected_rows)
+            moving_rows = [
+                r for r in visible_rows
+                if r in selected_set and (self._row_enabled(r) or self.is_folder_row(r) or self.is_folder_child_row(r))
+            ]
+            remaining_rows = [r for r in visible_rows if r not in selected_set]
+            insert_at = remaining_rows.index(target_row) if target_row in remaining_rows else len(remaining_rows)
+            visible_order_rows = remaining_rows[:insert_at] + moving_rows + remaining_rows[insert_at:]
 
-        # 保存所有行内容，按“启用新顺序 + 禁用原顺序”重建表格。
-        disabled_order = [self.package_at(r) for r in range(self.rowCount()) if r not in visible_rows]
-        cells_by_pkg = {}
-        for r in range(self.rowCount()):
-            pkg = self.package_at(r)
-            cells_by_pkg[pkg] = [self.takeItem(r, c) for c in range(self.columnCount())]
-        self.setRowCount(0)
-        for pkg in visible_order + disabled_order:
-            cells = cells_by_pkg.get(pkg)
-            if not cells: continue
-            self.insertRow(self.rowCount())
-            for c, item in enumerate(cells):
-                if item is not None: self.setItem(self.rowCount() - 1, c, item)
-        self._renumber_order()
+            # 保存所有行内容，按“启用新顺序 + 禁用原顺序”重建表格。
+            disabled_order = [r for r in range(self.rowCount()) if r not in visible_rows]
+            cells_by_row = {}
+            hidden_by_row = {}
+            for r in range(self.rowCount()):
+                cells_by_row[r] = [self.takeItem(r, c) for c in range(self.columnCount())]
+                hidden_by_row[r] = self.isRowHidden(r)
+            self.setRowCount(0)
+            for old_row in visible_order_rows + disabled_order:
+                cells = cells_by_row.get(old_row)
+                if cells is None:
+                    continue
+                new_row = self.rowCount()
+                self.insertRow(new_row)
+                for c, item in enumerate(cells):
+                    if item is not None: self.setItem(new_row, c, item)
+                # QTableWidget does not retain row visibility when rows are
+                # removed/reinserted. Restore it explicitly or hidden
+                # disabled rows leak into the active tab after a drag.
+                self.setRowHidden(new_row, bool(hidden_by_row.get(old_row, False)))
+            self._renumber_order()
+        finally:
+            self.blockSignals(signals_blocked)
         event.accept()
         self.order_changed.emit()
 
@@ -663,6 +727,56 @@ class ModTable(QTableWidget):
     def _row_enabled(self, row: int) -> bool:
         it = self.item(row, COL_ENABLED)
         return bool(it and it.checkState() == Qt.Checked)
+
+    def row_kind(self, row: int) -> str:
+        item = self.item(row, COL_PKG)
+        return str(item.data(ROW_KIND_ROLE) or "mod") if item is not None else "mod"
+
+    def row_folder(self, row: int) -> str:
+        item = self.item(row, COL_PKG)
+        return str(item.data(ROW_FOLDER_ROLE) or "") if item is not None else ""
+
+    def is_folder_row(self, row: int) -> bool:
+        return self.row_kind(row) == "folder"
+
+    def is_folder_child_row(self, row: int) -> bool:
+        return self.row_kind(row) == "folder_child"
+
+    def set_row_kind(self, row: int, kind: str, folder: str = "") -> None:
+        item = self.item(row, COL_PKG)
+        if item is None:
+            return
+        item.setData(ROW_KIND_ROLE, kind)
+        item.setData(ROW_FOLDER_ROLE, folder)
+
+    def add_folder_row(self, folder: str, enabled: bool, total: int,
+                       enabled_count: int, order: int = -1) -> int:
+        """Insert a UI-only folder group row and return its row index."""
+        row = self.rowCount()
+        self.insertRow(row)
+        chk = QTableWidgetItem()
+        chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
+        chk.setCheckState(Qt.Checked if total > 0 and enabled_count == total else Qt.Unchecked)
+        self.setItem(row, COL_ENABLED, chk)
+        expanded = folder in self._expanded_folders
+        marker = "▾" if expanded else "▸"
+        name = self._mk(f"{marker} {folder}  ({enabled_count}/{total})")
+        name.setForeground(QBrush(QColor("#4f8cff")))
+        name.setToolTip("点击展开/收起文件夹内的 Mod")
+        self.setItem(row, COL_NAME, name)
+        self.setItem(row, COL_SOURCE, self._mk("自定义文件夹"))
+        self.setItem(row, COL_SIZE, self._mk("—", align=Qt.AlignRight | Qt.AlignVCenter))
+        self.setItem(row, COL_VERSION, self._mk(f"{enabled_count}/{total} 已启用"))
+        self.setItem(row, COL_ORDER, self._mk(str(order) if order >= 0 else "—", align=Qt.AlignCenter))
+        pkg = f"__folder__:{folder}"
+        pkg_item = self._mk(pkg)
+        self.setItem(row, COL_PKG, pkg_item)
+        self.set_row_kind(row, "folder", folder)
+        for c in range(self.columnCount()):
+            cell = self.item(row, c)
+            if cell is not None:
+                cell.setFlags(cell.flags() | Qt.ItemIsDragEnabled)
+        return row
 
     def set_row_enabled(self, row: int, enabled: bool):
         it = self.item(row, COL_ENABLED)
@@ -804,7 +918,8 @@ class ModTable(QTableWidget):
         return sorted(rs)
 
     def package_at(self, row: int) -> str:
-        return self.item(row, COL_PKG).text()
+        item = self.item(row, COL_PKG)
+        return item.text() if item is not None else ""
 
 
 # ---------------------------------------------------------------------------
