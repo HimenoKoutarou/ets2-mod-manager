@@ -114,7 +114,11 @@ class SaveEditorDialog(QDialog):
 
         # 填充 profile 下拉
         for prof in profiles:
-            label = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
+            name = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
+            source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
+                getattr(prof, "location", ""), getattr(prof, "location", "")
+            )
+            label = f"{name}（{source}）"
             self.cb_profile.addItem(label, userData=prof)
         if initial_profile is not None:
             for i in range(self.cb_profile.count()):
@@ -423,7 +427,11 @@ class SaveEditorDialog(QDialog):
 
         # 填充 profile 列表
         for prof in self.profiles:
-            label = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
+            name = prof.display_name or prof.save_name or prof.company_name or prof.profile_id
+            source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
+                getattr(prof, "location", ""), getattr(prof, "location", "")
+            )
+            label = f"{name}（{source}）"
             self.cb_copy_src.addItem(label, userData=prof)
             self.cb_copy_dst.addItem(label, userData=prof)
         return w
@@ -515,9 +523,17 @@ class SaveEditorDialog(QDialog):
         prof = self.cb_profile.itemData(idx)
         if prof is None:
             return
+        source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
+            getattr(prof, "location", ""), getattr(prof, "location", "")
+        )
         # 同时更新重命名 Tab 的当前值显示
         self.lbl_cur_name.setText(prof.display_name or "—")
         self.lbl_cur_company.setText(prof.company_name or "—")
+        self.lbl_status.setText(
+            "Steam/Cloud 存档只读，仅可查看；请选择本地存档进行修改。"
+            if getattr(prof, "location", "") != "local"
+            else f"当前存档来源：{source}"
+        )
         self.edt_new_name.setText(prof.display_name or "")
         self.edt_new_company.setText(prof.company_name or "")
         self._refresh_slots()
@@ -628,13 +644,18 @@ class SaveEditorDialog(QDialog):
         self.lbl_status.setText(_("se.status_ready"))
 
     def _set_apply_buttons_enabled(self, enabled: bool):
+        prof = self.cb_profile.currentData() if hasattr(self, "cb_profile") else None
+        editable = bool(prof is not None and getattr(prof, "location", "") == "local")
         for btn in (self.btn_set_money, self.btn_set_xp, self.btn_set_level,
-                    self.btn_rename, self.btn_copy, self.btn_unlock_dealers,
+                    self.btn_rename, self.btn_unlock_dealers,
                     self.btn_unlock_garages, self.btn_unlock_all,
                     self.btn_repair, self.btn_refuel,
                     self.btn_money_1m, self.btn_money_10m, self.btn_money_100m,
                     self.btn_xp_to_level):
-            btn.setEnabled(enabled)
+            btn.setEnabled(bool(enabled and editable))
+        # Copy settings may read a Cloud source, but the destination is
+        # validated separately and must be local.
+        self.btn_copy.setEnabled(bool(enabled))
 
     # ---------- 功能 5: 金钱 / 经验 / 等级 ----------
 
@@ -764,6 +785,12 @@ class SaveEditorDialog(QDialog):
         if src is dst:
             QMessageBox.warning(self, _("se.error"), _("se.copy_same"))
             return
+        if getattr(dst, "location", "") != "local":
+            QMessageBox.information(
+                self, "云存档只读",
+                "不能把设置写入 Steam/Cloud 存档。请选择本地存档作为目标。",
+            )
+            return
         if not (self.chk_copy_mods.isChecked() or self.chk_copy_controls.isChecked()):
             QMessageBox.warning(self, _("se.error"), _("se.copy_nothing"))
             return
@@ -880,6 +907,12 @@ class SaveEditorDialog(QDialog):
     def _require_slot(self) -> bool:
         if self._current_slot is None:
             QMessageBox.warning(self, _("se.error"), _("se.no_slot"))
+            return False
+        if getattr(self._current_slot.profile, "location", "") != "local":
+            QMessageBox.information(
+                self, "云存档只读",
+                "Steam/Cloud 存档只能查看，不能修改。请选择本地存档槽位。",
+            )
             return False
         return True
 

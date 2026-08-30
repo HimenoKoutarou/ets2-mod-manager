@@ -1,6 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
+from pathlib import Path
+
+_PROJECT_ROOT = Path.cwd()
 
 datas = []
 binaries = []
@@ -12,7 +15,9 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 a = Analysis(
     ['run.py'],
-    pathex=[],
+    # ``run.py`` adds src/ at runtime in source mode, but PyInstaller needs
+    # the package root at analysis time or the frozen exe silently omits ui/.
+    pathex=[str(_PROJECT_ROOT / 'src'), str(_PROJECT_ROOT)],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

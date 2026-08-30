@@ -87,7 +87,10 @@ def _sig_equal(a: dict, b: dict) -> bool:
 
 _LOCK = threading.Lock()
 _CACHE: Optional[dict] = None
-FAST_RESTORE_WINDOW_SECONDS = 2 * 60 * 60
+# Keep the fast restore path valid for a full day.  It still validates every
+# cached package's mtime/size, so this is not a blind cache: it only avoids the
+# much more expensive recursive directory signature walk on normal restarts.
+FAST_RESTORE_WINDOW_SECONDS = 24 * 60 * 60
 
 
 def _base_dir() -> Path:

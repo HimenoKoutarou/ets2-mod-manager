@@ -841,6 +841,31 @@ class _SignalMixin:
                 QTimer.singleShot(350, lambda: self._show_new_mods_dialog(ids))
             # 原逻辑：_async_check_update / notes 由 bootstrap 顶部的 singleshot 处理
 
+    def _release_startup_lock_after_timeout(self) -> None:
+        """Keep a slow archive from making the whole application feel hung.
+
+        Metadata/icon enrichment is best-effort and runs in a worker.  Once a
+        cached/quick-scanned mod list is available, the user can safely work
+        with it while the worker continues to fill missing fields.  This
+        fallback only applies to installer startup and is a no-op after the
+        normal finalizer has already run.
+        """
+        if not getattr(self, "_bootstrap_after_installer_splash", False):
+            return
+        if getattr(self, "_bootstrap_finalized", False):
+            return
+        worker = getattr(self, "_async_parse_worker", None)
+        if worker is None or not worker.isRunning():
+            return
+        try:
+            if self._splash is not None:
+                self._splash._log("部分模组解析较慢，先进入主界面，剩余信息将在后台补全。", "warning")
+                self._splash._detail_label.setText("已加载基础模组列表 · 后台继续补全信息")
+        except Exception:
+            pass
+        self.statusBar().showMessage("基础模组列表已加载，正在后台补全预览图和描述…", 8000)
+        self._finalize_bootstrap()
+
 
     @classmethod
     def _queue_startup_modals_sequential(cls, tasks) -> None:
@@ -930,6 +955,11 @@ class _SignalMixin:
         # 初始化必须等待读取/补全完成后再进入主界面。
         if restored and not getattr(self, "_async_parse_started", False):
             self._finalize_bootstrap()
+        elif installer:
+            # Do not keep the entire UI locked behind one slow/encrypted
+            # archive.  The worker remains active; this only releases the
+            # startup gate after a bounded grace period.
+            QTimer.singleShot(8000, self._release_startup_lock_after_timeout)
 
     def _on_ui_refresh_timer(self):
         """定时器回调：在扫描期间定期刷新UI，避免在扫描循环中直接调用processEvents导致重入崩溃。"""
@@ -1316,38 +1346,57 @@ class _SignalMixin:
         QMainWindow.closeEvent(self, event)
 
     def _on_tree_profile_selected(self):
+        # QTreeWidget can emit itemSelectionChanged more than once while an
+        # item is being replaced/enriched.  Re-entering the expensive profile
+        # load during a table rebuild was the source of the intermittent
+        # freeze/crash reported when switching profiles.
+        if getattr(self, "_profile_switch_in_progress", False):
+            return
         items = self.tree_profiles.selectedItems()
         if not items: return
         prof = items[0].data(0, Qt.UserRole)
         if prof is None: return
-        self.current_profile = prof
-        # 优先用 prof.mod_count；若为 0 再实时查一次（兼容解密延迟场景）
-        n_active = getattr(prof, "mod_count", 0) or 0
-        if n_active == 0:
+        self._profile_switch_in_progress = True
+        try:
+            self.current_profile = prof
             try:
-                n_active = len(self.profile_svc.get_active_mods(prof) or [])
+                self._set_profile_editable_state(prof)
             except Exception:
-                n_active = 0
-        self.statusBar().showMessage(
-            _("ui.sb_current_profile", prof=str(prof), n=n_active), 5000
-        )
-        self._fill_table_for_profile(prof)
-        # 切换存档时：对比该存档的 active_mods 与上次会话
-        try:
-            from services.session_service import get_new_active_in_profile
-            pid = getattr(prof, "profile_id", str(id(prof)))
-            active = self.profile_svc.get_active_mods(prof)
-            new_in_profile = get_new_active_in_profile(pid, list(active or []))
-            if new_in_profile and getattr(self, "_splash", None) is None and self.isEnabled() and not getattr(self, "_startup_new_mods_dialog_shown", False):
-                self._startup_new_mods_dialog_shown = True
-                QTimer.singleShot(300, lambda ids=list(new_in_profile): self._show_new_mods_dialog(ids))
-        except Exception:
-            pass
-        # 切换存档后刷新分类相关菜单 enabled 状态
-        try:
-            self._refresh_category_action_enabled()
-        except Exception:
-            pass
+                pass
+            # 优先用 prof.mod_count；若为 0 再实时查一次（兼容解密延迟场景）
+            n_active = getattr(prof, "mod_count", 0) or 0
+            if n_active == 0:
+                try:
+                    n_active = len(self.profile_svc.get_active_mods(prof) or [])
+                except Exception:
+                    n_active = 0
+            self.statusBar().showMessage(
+                _("ui.sb_current_profile", prof=str(prof), n=n_active), 5000
+            )
+            try:
+                self._fill_table_for_profile(prof)
+            except Exception as exc:
+                # Profile switching must not terminate the GUI if one profile
+                # is malformed or temporarily unavailable (e.g. Steam sync).
+                self.statusBar().showMessage(f"读取存档失败：{type(exc).__name__}: {exc}", 10000)
+            # 切换存档时：对比该存档的 active_mods 与上次会话
+            try:
+                from services.session_service import get_new_active_in_profile
+                pid = getattr(prof, "profile_id", str(id(prof)))
+                active = self.profile_svc.get_active_mods(prof)
+                new_in_profile = get_new_active_in_profile(pid, list(active or []))
+                if new_in_profile and getattr(self, "_splash", None) is None and self.isEnabled() and not getattr(self, "_startup_new_mods_dialog_shown", False):
+                    self._startup_new_mods_dialog_shown = True
+                    QTimer.singleShot(300, lambda ids=list(new_in_profile): self._show_new_mods_dialog(ids))
+            except Exception:
+                pass
+            # 切换存档后刷新分类相关菜单 enabled 状态
+            try:
+                self._refresh_category_action_enabled()
+            except Exception:
+                pass
+        finally:
+            self._profile_switch_in_progress = False
 
     def _on_tree_profile_menu(self, pos):
         it = self.tree_profiles.itemAt(pos)
@@ -1362,6 +1411,11 @@ class _SignalMixin:
         a_cp = menu.addAction(_("menu.copy_profile"))
         a_del = menu.addAction(_("menu.delete_profile"))
         a_del.setForeground(QBrush(QColor("#ef4444")))
+        local_editable = getattr(prof, "location", "") == "local"
+        for action in (a_lo, a_se, a_cp, a_del):
+            action.setEnabled(local_editable)
+        if not local_editable:
+            a_bk.setToolTip("云存档只读；仅允许备份")
         act = menu.exec(self.tree_profiles.mapToGlobal(pos))
         if act == a_lo:
             # 先把当前存档切到此 profile（以便加载顺序对话框使用）

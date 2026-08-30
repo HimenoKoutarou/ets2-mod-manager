@@ -40,6 +40,7 @@ from services.profile_service import (
     decrypt_profile_bytes, encrypt_profile_bytes,
     _looks_encrypted, _decode_text, _escape_profile_str_for_sii,
     _unescape_profile_str, _run_sii_decrypt,
+    _encrypt_scsc_profile,
 )
 
 
@@ -365,6 +366,7 @@ class SaveEditorService:
 
     def rename_profile(self, prof: ProfileInfo, new_profile_name: str = "",
                        new_company_name: str = "") -> Path:
+        self.ps.ensure_local_profile(prof)
         original_bytes = prof.profile_sii.read_bytes()
         was_encrypted = _looks_encrypted(original_bytes)
         plain = self.ps._get_plain_text(prof.profile_sii)
@@ -378,7 +380,9 @@ class SaveEditorService:
             plain = self._replace_text_field(plain, "company_name", escaped)
 
         out_bytes = plain.encode("utf-8-sig")
-        if was_encrypted:
+        if original_bytes.startswith((b"ScsC", b"Sii\x00")):
+            out_bytes = _encrypt_scsc_profile(out_bytes, original_bytes)
+        elif was_encrypted:
             try:
                 out_bytes = encrypt_profile_bytes(plain.encode("utf-8-sig"))
             except Exception as e:
@@ -403,6 +407,9 @@ class SaveEditorService:
     def copy_profile_settings(self, src: ProfileInfo, dst: ProfileInfo,
                                copy_active_mods: bool = True,
                                copy_controls: bool = False) -> None:
+        # Reading a Cloud source is allowed; the destination must always be a
+        # local profile because this operation writes active_mods/controls.
+        self.ps.ensure_local_profile(dst)
         if copy_active_mods:
             mods = self.ps.get_active_mods(src)
             self.ps.set_active_mods(dst, mods)
@@ -555,6 +562,7 @@ class SaveEditorService:
 
     def _save_game_sii(self, slot: SaveSlotInfo, new_bsii: bytes) -> None:
         """加密写回 game.sii 并失效缓存。"""
+        self.ps.ensure_local_profile(slot.profile)
         game_sii = slot.game_sii
         self.ps.backup.backup(game_sii, tag="pre-save-edit")
         encrypted = self.encrypt_game_sii(new_bsii, slot)

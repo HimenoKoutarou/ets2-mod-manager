@@ -309,7 +309,7 @@ class _EnrichProfilesWorker(QThread):
             except Exception:
                 ok = False
             if ok:
-                pid = getattr(p, "profile_id", str(id(p)))
+                pid = str(getattr(p, "profile_sii", "") or getattr(p, "profile_id", str(id(p))))
                 # Keep the profile tree label identical to the game's custom
                 # profile name; storage location and mod count belong in status text.
                 name = (getattr(p, "display_name", "") or
@@ -317,7 +317,10 @@ class _EnrichProfilesWorker(QThread):
                         getattr(p, "company_name", "") or
                         getattr(p, "profile_id", "正在读取存档名称…"))
                 count = int(getattr(p, "mod_count", 0) or 0)
-                label = f"{name}（已启用 {count} 个 Mod）"
+                source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
+                    getattr(p, "location", ""), getattr(p, "location", "")
+                )
+                label = f"{name}（{source}，已启用 {count} 个 Mod）"
                 self.one_enriched.emit(pid, label, p)
 
 

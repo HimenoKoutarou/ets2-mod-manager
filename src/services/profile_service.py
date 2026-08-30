@@ -20,6 +20,7 @@ else:
 # -----------------------------------------------------------------------------------
 import struct
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -27,6 +28,15 @@ from typing import Dict, List, Optional, Tuple
 # 相对路径 import（项目根被加到 sys.path 后可用）
 from core.sii_parser import parse_sii, parse_sii_file, SiiUnit
 from services.backup_service import BackupService
+
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad as _aes_pad, unpad as _aes_unpad
+    _HAS_CRYPTO = True
+except ImportError:
+    AES = None
+    _aes_pad = _aes_unpad = None
+    _HAS_CRYPTO = False
 
 
 # =========================================================================
@@ -91,6 +101,46 @@ def _derive_scs_key(text_key: str) -> List[int]:
 
 _PROFILE_DEFAULT_KEY = "ScsCryptionIsForSissies!!!!!"
 
+# Modern ETS2 profile.sii files use the same ScsC container as other SCS
+# serialized data: AES-256-CBC over zlib-compressed SII text.  The old
+# XXTEA/Sii\x00 writer is not accepted by current game builds and results in
+# "missing magic mark" in game.log.txt.
+_SCS_AES_KEY = bytes([
+    0x2A, 0x5F, 0xCB, 0x17, 0x91, 0xD2, 0x2F, 0xB6,
+    0x02, 0x45, 0xB3, 0xD8, 0x36, 0x9E, 0xD0, 0xB2,
+    0xC2, 0x73, 0x71, 0x56, 0x3F, 0xBF, 0x1F, 0x3C,
+    0x9E, 0xDF, 0x6B, 0x11, 0x82, 0x5A, 0x5D, 0x0A,
+])
+
+
+def _decrypt_scsc_profile(data: bytes) -> bytes:
+    if not data.startswith(_HEAD_SCSC):
+        return data
+    if not _HAS_CRYPTO:
+        raise RuntimeError("ScsC profile 解密需要 pycryptodome")
+    if len(data) < 56:
+        raise ValueError("ScsC profile 文件头不完整")
+    iv = data[36:52]
+    encrypted = data[56:]
+    plain = _aes_unpad(AES.new(_SCS_AES_KEY, AES.MODE_CBC, iv).decrypt(encrypted), AES.block_size)
+    plain = zlib.decompress(plain)
+    expected = struct.unpack("<I", data[52:56])[0]
+    if expected and len(plain) != expected:
+        raise ValueError(f"ScsC profile 解压长度不匹配: {len(plain)} != {expected}")
+    return plain
+
+
+def _encrypt_scsc_profile(plaintext: bytes, original: bytes | None = None) -> bytes:
+    if not _HAS_CRYPTO:
+        raise RuntimeError("ScsC profile 加密需要 pycryptodome")
+    compressed = zlib.compress(plaintext, 9)
+    iv = os.urandom(16)
+    encrypted = AES.new(_SCS_AES_KEY, AES.MODE_CBC, iv).encrypt(_aes_pad(compressed, AES.block_size))
+    # Preserve the source hash field when available.  The game primarily uses
+    # it as container metadata; retaining it avoids needless profile churn.
+    digest = original[4:36] if original is not None and len(original) >= 36 and original.startswith(_HEAD_SCSC) else b"\x00" * 32
+    return _HEAD_SCSC + digest + iv + struct.pack("<I", len(plaintext)) + encrypted
+
 # SCS 文件头 3 种常见签名
 _HEAD_4S = b"Sii\x00"   # Sii NUL (旧版)
 _HEAD_2H = b"#S"        # Sii# / AEM! (社区)
@@ -116,9 +166,13 @@ def decrypt_profile_bytes(data: bytes, key_text: str = _PROFILE_DEFAULT_KEY) -> 
     """尝试解密 profile.sii 的原始字节；若判断为明文直接原封返回。"""
     if not _looks_encrypted(data):
         return data
-    # 新版 ScsC 头：内置 XXTEA 解不开，直接返回原样让上层强制走 SII_Decrypt.exe
     if data.startswith(_HEAD_SCSC):
-        return data
+        try:
+            return _decrypt_scsc_profile(data)
+        except Exception:
+            # Keep the external-tool fallback in the caller for installations
+            # without the Python crypto dependency.
+            return data
     k = _derive_scs_key(key_text)
     # 多种头处理：
     #   A. Sii\x00 + uint32 body_len + uint32 reserved + <cipher>
@@ -350,6 +404,23 @@ class ProfileService:
         self.backup = backup or BackupService()
         self.sii_decrypt_exe = sii_decrypt_exe or self._auto_sii_decrypt()
 
+    @staticmethod
+    def ensure_local_profile(prof: ProfileInfo) -> None:
+        """Reject every write aimed at Steam/Cloud profiles.
+
+        Cloud profiles remain readable for comparison, but this guard is kept
+        at the service boundary so UI actions and background jobs cannot
+        accidentally mutate the copy used by Steam synchronization.
+        """
+        # ``test`` is used only by the repository's synthetic round-trip
+        # fixtures; real profiles are writable exclusively when location is
+        # exactly ``local``.
+        if prof is None or getattr(prof, "location", "") not in ("local", "test"):
+            location = getattr(prof, "location", "unknown") if prof is not None else "unknown"
+            raise PermissionError(
+                f"只允许修改本地存档，当前存档来源为 {location}。请切换到“本地”存档后再操作。"
+            )
+
     def _auto_sii_decrypt(self) -> Optional[Path]:
         bin_dir = Path(__file__).resolve().parents[2] / "assets" / "bin"
         for name in ("SII_Decrypt.exe", "sii_core.exe"):
@@ -498,6 +569,7 @@ class ProfileService:
         避免双倍开销（原实现每次写入都 get_active_mods 再读一次）。
         保留 verify=True 用于调试或关键路径。
         """
+        self.ensure_local_profile(prof)
         original_bytes = prof.profile_sii.read_bytes()
         was_encrypted = _looks_encrypted(original_bytes)
         # 解密文本
@@ -507,7 +579,9 @@ class ProfileService:
         self.backup.backup(prof.profile_sii, tag="pre-write")
         # 输出字节
         out_bytes = new_text.encode("utf-8-sig")
-        if was_encrypted:
+        if original_bytes.startswith((_HEAD_SCSC, _HEAD_4S)):
+            out_bytes = _encrypt_scsc_profile(out_bytes, original_bytes)
+        elif was_encrypted:
             # P0 安全修复：加密失败拒绝写明文（防止损坏 profile）
             try:
                 out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
@@ -541,6 +615,7 @@ class ProfileService:
     # ---------- 复制存档 ----------
     def copy_profile(self, prof: ProfileInfo, new_display_name: str = "", new_company_name: str = "") -> ProfileInfo:
         """复制存档到同一位置（local/steam/cloud）。"""
+        self.ensure_local_profile(prof)
         # 1. 根据 prof.location 定位目标父目录
         if prof.location == "local":
             parent = self.paths.profiles_dir
@@ -674,7 +749,9 @@ class ProfileService:
 
         # 保存时注意原文件加密状态
         out_bytes = new_text.encode("utf-8-sig")
-        if was_encrypted:
+        if original_bytes.startswith((_HEAD_SCSC, _HEAD_4S)):
+            out_bytes = _encrypt_scsc_profile(out_bytes, original_bytes)
+        elif was_encrypted:
             try:
                 out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
             except Exception as e:
@@ -723,6 +800,7 @@ class ProfileService:
     # ---------- 删除存档 ----------
     def delete_profile(self, prof: ProfileInfo, backup_first: bool = True) -> None:
         """删除存档（含备份）"""
+        self.ensure_local_profile(prof)
         # 1. 若 backup_first=True：先把整个 prof.folder 目录打 zip 备份到 BackupService 的备份目录
         if backup_first:
             try:

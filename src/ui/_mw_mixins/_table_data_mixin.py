@@ -1258,6 +1258,12 @@ class _TableDataMixin:
         if not self.current_profile:
             QMessageBox.warning(self, _("dlg.no_profile_title"), _("dlg.no_profile_save"))
             return
+        if getattr(self.current_profile, "location", "") != "local":
+            QMessageBox.information(
+                self, "云存档只读",
+                "Steam/Cloud 存档只能查看，不能修改。请切换到“本地”存档后再保存。",
+            )
+            return
         if self._is_game_running():
             QMessageBox.warning(
                 self, "无法保存存档",
@@ -1294,7 +1300,7 @@ class _TableDataMixin:
             )
             self.current_profile.mod_count = len(new_active)
             try:
-                pid = getattr(self.current_profile, "profile_id", "")
+                pid = str(getattr(self.current_profile, "profile_sii", "") or getattr(self.current_profile, "profile_id", ""))
                 name = (
                     self.current_profile.display_name
                     or self.current_profile.save_name
@@ -1311,7 +1317,13 @@ class _TableDataMixin:
             bar.setValue(100); label.setText("保存完成"); QApplication.processEvents()
             progress.close(); progress.deleteLater(); self.setEnabled(True)
             QMessageBox.information(self, _("dlg.save_ok_title"), _("dlg.save_ok_msg", wrote=wrote))
-            self.statusBar().showMessage(_("ui.sb_saved", n=len(new_active)))
+            source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
+                getattr(self.current_profile, "location", ""), getattr(self.current_profile, "location", "")
+            )
+            self.statusBar().showMessage(
+                f"保存完成：{source}，{len(new_active)} 个 Mod，文件：{self.current_profile.profile_sii}",
+                10000,
+            )
         except Exception as e:
             progress.close(); progress.deleteLater(); self.setEnabled(True)
             QMessageBox.critical(self, _("dlg.save_fail_title"), _("dlg.save_fail_msg", e=f"{e!r}"))

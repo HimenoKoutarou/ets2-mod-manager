@@ -91,6 +91,29 @@ def resolve_asset(rel: str) -> Path:
     return (project_root / relp).resolve()
 
 
+def _write_startup_error(message: str) -> None:
+    """Persist bootstrap failures so windowed builds never fail silently."""
+    import traceback as _traceback
+    candidates = []
+    try:
+        base = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
+        candidates.append(base / "logs" / "startup.log")
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.append(Path(local_app_data) / "ETS2ModManager" / "startup.log")
+        candidates.append(Path(os.environ.get("TEMP", ".")) / "ETS2ModManager-startup.log")
+    except Exception:
+        return
+    for path in candidates:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(message.rstrip() + "\n")
+            return
+        except OSError:
+            continue
+
+
 # ---------------------------------------------------------------------------
 #  启动加载屏（SplashScreen）——扫描期间显示，禁止主窗口交互
 # 拆分出来的辅助 Widget / Worker（单文件 3785 行 → ~3060 行，降低 IDE 诊断压力）
@@ -365,6 +388,9 @@ def main():
         try:
             w._bootstrap()
         except Exception as exc:
+            _write_startup_error(
+                "[bootstrap failed]\n" + __import__("traceback").format_exc()
+            )
             # Keep the application alive on startup failures so the user can
             # inspect the window/status bar instead of the process vanishing.
             try:
@@ -373,10 +399,14 @@ def main():
                 pass
             try:
                 w.show()
+                w.raise_()
+                w.activateWindow()
                 w.setEnabled(True)
                 w.statusBar().showMessage(f"初始化失败：{type(exc).__name__}: {exc}", 15000)
             except Exception:
-                pass
+                _write_startup_error(
+                    "[bootstrap recovery failed]\n" + __import__("traceback").format_exc()
+                )
 
     QTimer.singleShot(60, _bootstrap_and_show)
     sys.exit(app.exec())

@@ -320,6 +320,9 @@ class _ToolbarMixin:
         tb.addWidget(btn_crash)
         # 保留工具栏动作引用供 retranslate 遍历
         self._tb_toolbuttons = [btn_mods, btn_prio, btn_save, btn_tools, btn_crash]
+        self.btn_save = btn_save
+        self._btn_priority = btn_prio
+        self._action_save_editor = act_se
         self._tb_toolbars = [tb]  # 缓存工具栏引用，避免 findChildren 遍历
         # ---- 主题切换按钮 ----
         btn_theme = QToolButton(); btn_theme.setText("🎨"); btn_theme.setToolTip("主题切换")
@@ -863,6 +866,13 @@ class _ToolbarMixin:
         worker.finished.connect(self._on_async_parse_finished)
         self._async_parse_started = True
         worker.start()
+        # Installer startup normally waits for complete enrichment.  Keep a
+        # bounded fallback as well so a single encrypted archive cannot leave
+        # the whole window disabled forever (fresh scans do not pass through
+        # the restore branch in _bootstrap).
+        if getattr(self, "_bootstrap_after_installer_splash", False):
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(8000, self._release_startup_lock_after_timeout)
 
     def _fetch_workshop_titles_async(self):
         """QThread 查询 Steam Workshop 标题，完成后刷新表格。"""
@@ -880,13 +890,11 @@ class _ToolbarMixin:
         # 性能优化：先用 quick=True 快速列出 profile 骨架（不解密不解 SII），
         # 立即更新 UI 显示 profile_id；再后台异步填充 display_name/company_name。
         # 原实现同步解密每个 profile.sii，数量多时启动明显卡顿。
-        # The game profile selector should manage local profiles only.
-        # Steam/Cloud profiles are a separate storage area and saving them can
-        # make the UI appear out of sync with the local 592-mod profile.
-        self.profiles = [
-            p for p in self.profile_svc.list_profiles(quick=True)
-            if getattr(p, "location", "") == "local"
-        ]
+        # Show every profile source that the game can use.  Hiding Steam/Cloud
+        # entries made it possible to edit a local profile while ETS2 was
+        # actually loading the Steam Cloud copy, so the game appeared to keep
+        # the old Mod list after a successful save.
+        self.profiles = list(self.profile_svc.list_profiles(quick=True))
         for i in range(self.tree_profiles.topLevelItemCount() - 1, -1, -1):
             self.tree_profiles.takeTopLevelItem(i)
         self._profile_tree_items: dict[str, QTreeWidgetItem] = {}
@@ -895,13 +903,17 @@ class _ToolbarMixin:
         for p in self.profiles:
             name = p.display_name or p.save_name or "正在读取存档名称…"
             count = int(getattr(p, "mod_count", 0) or 0)
-            label = f"{name}（已启用 {count} 个 Mod）"
+            source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
+                getattr(p, "location", ""), getattr(p, "location", "")
+            )
+            label = f"{name}（{source}，已启用 {count} 个 Mod）"
             it = QTreeWidgetItem([label])
             it.setData(0, Qt.UserRole, p)
             if getattr(p, "location", None) == "cloud":
                 it.setForeground(0, QBrush(QColor("#1a6ab0")))
             self.tree_profiles.addTopLevelItem(it)
-            self._profile_tree_items[getattr(p, "profile_id", str(id(p)))] = it
+            key = str(getattr(p, "profile_sii", "") or getattr(p, "profile_id", str(id(p))))
+            self._profile_tree_items[key] = it
             if first_any is None: first_any = it
             # 取 mod_count（来自 _enrich 解析结果）判断
             n_active = getattr(p, "mod_count", 0) or 0
@@ -916,6 +928,26 @@ class _ToolbarMixin:
         # 异步后台填充 display_name/company_name 并刷新树节点标签
         self._enrich_profiles_async()
 
+    def _set_profile_editable_state(self, prof) -> None:
+        """Make non-local profiles strictly read-only in the main window."""
+        editable = bool(prof is not None and getattr(prof, "location", "") == "local")
+        for widget in (getattr(self, "table_all", None),
+                       getattr(self, "table_active", None),
+                       getattr(self, "tree_categories", None)):
+            if widget is not None:
+                widget.setEnabled(editable)
+        btn = getattr(self, "btn_save", None)
+        if btn is not None:
+            btn.setEnabled(editable)
+            btn.setToolTip("仅本地存档可修改" if not editable else "")
+        priority_btn = getattr(self, "_btn_priority", None)
+        if priority_btn is not None:
+            priority_btn.setEnabled(editable)
+            priority_btn.setToolTip("仅本地存档可修改" if not editable else "")
+        action = getattr(self, "_action_save_editor", None)
+        if action is not None:
+            action.setEnabled(editable)
+
     def _enrich_profiles_async(self):
         """QThread 逐个 enrich_profile，通过 Signal one_enriched 通知主线程更新树节点。"""
         if not self.profiles:
@@ -926,7 +958,8 @@ class _ToolbarMixin:
 
     def _update_profile_tree_label(self, pid: str, label: str, prof) -> None:
         """主线程更新单个 profile 树节点的显示文本。"""
-        it = self._profile_tree_items.get(pid) if hasattr(self, "_profile_tree_items") else None
+        key = str(getattr(prof, "profile_sii", "") or pid)
+        it = self._profile_tree_items.get(key) if hasattr(self, "_profile_tree_items") else None
         if it is not None:
             it.setText(0, label)
             # 若当前选中的就是这个 profile 且是其首次填充，触发一次选中刷新
