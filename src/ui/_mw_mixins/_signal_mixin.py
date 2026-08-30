@@ -84,6 +84,23 @@ class _SignalMixin:
         """把表格中选中的 Mod 拖到左侧分类节点即可完成归类。"""
         tree = getattr(self, "tree_categories", None)
         if watched is tree or (tree is not None and watched is tree.viewport()):
+            # Remember clicks on the actual checkbox indicator. QTreeWidget
+            # emits itemClicked for both the label and the checkbox; the
+            # former changes the filter, while the latter must only enable or
+            # disable the folder and keep the current Mod tab/filter intact.
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._category_checkbox_press = None
+                try:
+                    pos = event.position().toPoint()
+                    if watched is tree:
+                        pos = tree.viewport().mapFrom(tree, pos)
+                    item = tree.itemAt(pos)
+                    role = item.data(0, Qt.UserRole) if item else None
+                    if item is not None and role and role[0] == "__filter_cat__" and role[1]:
+                        rect = tree.visualItemRect(item)
+                        self._category_checkbox_press = item if pos.x() <= rect.left() + 28 else None
+                except Exception:
+                    self._category_checkbox_press = None
             if event.type() == QEvent.DragEnter:
                 if event.mimeData().hasFormat("application/x-ets2-mods"):
                     event.acceptProposedAction()
@@ -1503,6 +1520,12 @@ class _SignalMixin:
         QMessageBox.information(self, _("dlg.preset_title"), _("dlg.preset_msg"))
 
     def _on_tree_category_clicked(self, item, column=0):
+        # A checkbox click also emits itemClicked. It is already handled by
+        # itemChanged, so do not turn that action into an unintended filter
+        # navigation (especially from the active-mods tab).
+        if getattr(self, "_category_checkbox_press", None) is item:
+            self._category_checkbox_press = None
+            return
         role = item.data(0, Qt.UserRole)
         if not role:
             return

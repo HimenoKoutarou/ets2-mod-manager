@@ -142,6 +142,27 @@ def test_category_enable_renders_both_tables_from_memory():
     assert active_states["A"] == Qt.Checked and active_states["B"] == Qt.Checked
 
 
+def test_category_toggle_from_empty_active_tab_keeps_complete_worklist():
+    """A fully disabled folder must not make the active projection erase rows."""
+    mods = [_mod("A", "folder"), _mod("B", "folder"), _mod("C", "")]
+    wl = [
+        {"package_name": "A", "enabled": False, "order": -1, "priority_index": None},
+        {"package_name": "B", "enabled": False, "order": -1, "priority_index": None},
+        {"package_name": "C", "enabled": True, "order": 0, "priority_index": 0},
+    ]
+    ui = _FakeMain(mods, wl)
+    with patch("services.category_service.all_folders", return_value=["folder"]):
+        ui._render_current_worklist()
+        # Reproduce the user's view: the active projection has no folder rows
+        # because every member is disabled, while the all-mods table is full.
+        ui.table = ui.table_active
+        ui._enable_category("folder")
+    assert [e["package_name"] for e in ui.current_worklist] == ["C", "A", "B"]
+    assert all(
+        e["enabled"] for e in ui.current_worklist if e["package_name"] in {"A", "B"}
+    )
+
+
 def test_lookup_accepts_workshop_profile_display_alias():
     m = _mod("1061306287")
     ui = _FakeMain([m], [])

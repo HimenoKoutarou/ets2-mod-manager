@@ -483,21 +483,28 @@ class _TableDataMixin:
                     other_tbl.blockSignals(False)
             except Exception:
                 pass
+            # The active tab is a filtered/grouped projection: disabled rows
+            # may be hidden and a fully-disabled folder may have no rows at
+            # all. Rebuilding the profile worklist from that projection would
+            # therefore silently drop every entry. The all-mods table is the
+            # canonical complete row set; use it whenever the active tab is
+            # selected, after syncing the user's visible checkbox changes.
+            source_tbl = self.table_all if self.table is self.table_active else self.table
             enabled_pkgs = []
             disabled_pkgs = []
             pkg_enabled = {}
             invalid_row = False
-            for r in range(self.table.rowCount()):
-                if self.table.is_folder_row(r):
+            for r in range(source_tbl.rowCount()):
+                if source_tbl.is_folder_row(r):
                     continue
-                pkg = self.table.package_at(r)
+                pkg = source_tbl.package_at(r)
                 if not pkg:
                     # Do not rebuild from a half-constructed Qt row. Keeping
                     # the existing worklist is safer than silently dropping a
                     # package while drag/drop or a full refresh is in flight.
                     invalid_row = True
                     break
-                en = self.table._row_enabled(r)
+                en = source_tbl._row_enabled(r)
                 pkg_enabled[pkg] = en
                 if en: enabled_pkgs.append(pkg)
                 else: disabled_pkgs.append(pkg)
