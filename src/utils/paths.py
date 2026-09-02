@@ -72,6 +72,7 @@ def _find_steam_cloud() -> Optional[Path]:
     for drive in ["C:", "D:", "E:", "F:", "G:"]:
         root = Path(drive + "\\")
         for sp in [root / "Program Files (x86)" / "Steam" / "userdata",
+                   root / "Program Files" / "Steam" / "userdata",
                    root / "Steam" / "userdata"]:
             if sp.exists():
                 userdata_candidates.append(sp)

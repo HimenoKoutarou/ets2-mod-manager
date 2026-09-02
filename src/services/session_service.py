@@ -208,6 +208,37 @@ def save_mod_icon_probe(mod_id: str, last_modified: float, available: bool) -> N
         pass
 
 
+def save_mod_icon_probes_bulk(entries) -> None:
+    """Persist many icon probe results with one JSON read/write operation.
+
+    The startup parser can finish hundreds of packages at once.  Calling
+    ``save_mod_icon_probe`` for every package rewrites the entire JSON file for
+    each row and blocks the GUI thread.  This batch form keeps the same cache
+    format while reducing the operation to a single atomic replacement.
+    """
+    path = _icon_probe_path()
+    try:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError, TypeError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        stamp = datetime.now().isoformat()
+        for mod_id, last_modified, available in entries or ():
+            if not mod_id:
+                continue
+            data[_icon_probe_key(str(mod_id), float(last_modified or 0.0))] = {
+                "available": bool(available),
+                "ts": stamp,
+            }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError, UnicodeEncodeError):
+        pass
+
+
 def save_session_state(
     all_mod_ids: List[str],
     profiles_state: Dict[str, Dict],

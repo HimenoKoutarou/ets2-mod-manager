@@ -317,11 +317,27 @@ class _EnrichProfilesWorker(QThread):
                         getattr(p, "company_name", "") or
                         getattr(p, "profile_id", "正在读取存档名称…"))
                 count = int(getattr(p, "mod_count", 0) or 0)
-                source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
-                    getattr(p, "location", ""), getattr(p, "location", "")
-                )
-                label = f"{name}（{source}，已启用 {count} 个 Mod）"
+                label = f"{name}（本地，已启用 {count} 个 Mod）"
                 self.one_enriched.emit(pid, label, p)
+
+
+class _ProfileReadWorker(QThread):
+    """Read one profile's active_mods without blocking the Qt GUI thread."""
+
+    result_ready = Signal(object, list, str, int)  # (profile, active_mods, error, token)
+
+    def __init__(self, profile_svc, profile, token: int = 0, parent=None):
+        super().__init__(parent)
+        self._svc = profile_svc
+        self._profile = profile
+        self._token = int(token or 0)
+
+    def run(self):
+        try:
+            active = self._svc.get_active_mods(self._profile)
+            self.result_ready.emit(self._profile, list(active or []), "", self._token)
+        except Exception as exc:
+            self.result_ready.emit(self._profile, [], f"{type(exc).__name__}: {exc}", self._token)
 
 
 def _build_progress_detail_zh(stage: str, name: str) -> str:

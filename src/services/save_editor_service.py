@@ -9,7 +9,7 @@ ETS2 存档编辑器服务
   7. 卡车维修 / 加油
 
 技术要点：
-  - profile.sii：ScsC/XXTEA 加密 → 解密为文本 SII → 文本编辑 → 重新加密
+  - profile.sii：ScsC/XXTEA 加密 → 解密为文本 SII → 文本编辑 → 写回 ETS2 可读 SII
   - game.sii：ScsC 加密 → 解密为 BSII 二进制 → 字段搜索/修改 → 重新加密
   - ScsC 格式：AES-256-CBC + zlib（key 为社区公开的 32 字节常量）
   - BSII 格式：[u32 name_len][name][u8 type_byte][3 padding bytes 0x00 0x00 0x00]...
@@ -40,7 +40,7 @@ from services.profile_service import (
     decrypt_profile_bytes, encrypt_profile_bytes,
     _looks_encrypted, _decode_text, _escape_profile_str_for_sii,
     _unescape_profile_str, _run_sii_decrypt,
-    _encrypt_scsc_profile,
+    profile_plaintext_bytes,
 )
 
 
@@ -367,8 +367,6 @@ class SaveEditorService:
     def rename_profile(self, prof: ProfileInfo, new_profile_name: str = "",
                        new_company_name: str = "") -> Path:
         self.ps.ensure_local_profile(prof)
-        original_bytes = prof.profile_sii.read_bytes()
-        was_encrypted = _looks_encrypted(original_bytes)
         plain = self.ps._get_plain_text(prof.profile_sii)
 
         if new_profile_name:
@@ -379,16 +377,7 @@ class SaveEditorService:
             escaped = _escape_profile_str_for_sii(new_company_name)
             plain = self._replace_text_field(plain, "company_name", escaped)
 
-        out_bytes = plain.encode("utf-8-sig")
-        if original_bytes.startswith((b"ScsC", b"Sii\x00")):
-            out_bytes = _encrypt_scsc_profile(out_bytes, original_bytes)
-        elif was_encrypted:
-            try:
-                out_bytes = encrypt_profile_bytes(plain.encode("utf-8-sig"))
-            except Exception as e:
-                # 加密失败 = 数据写回后游戏无法识别，不能降级写明文
-                # 让上层捕获提示用户，避免静默损坏存档
-                raise RuntimeError(f"profile.sii 重新加密失败，已取消写入以防存档损坏: {e}") from e
+        out_bytes = profile_plaintext_bytes(plain)
 
         self.ps.backup.backup(prof.profile_sii, tag="pre-rename")
         _atomic_write_bytes(prof.profile_sii, out_bytes)

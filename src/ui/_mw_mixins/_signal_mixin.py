@@ -6,6 +6,7 @@ Mixin 类本身不做 __init__ / 不 super()，所有 self.xxx 属性都来自 M
 from __future__ import annotations
 from services.priority_service import PriorityService
 from .._mw_widgets import _LangSwitchDialog, SplashScreen, ModTable, COL_ENABLED, COL_NAME, COL_SOURCE, COL_SIZE, COL_VERSION, COL_ORDER, COL_PKG
+from .._mw_workers import _ProfileReadWorker
 from version import __version__
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
 
@@ -60,6 +61,7 @@ class _SignalMixin:
             "_async_parse_worker",
             "_ws_fetch_worker",
             "_enrich_profiles_worker",
+            "_profile_read_worker",
         )
         seen = set()
         workers = []
@@ -69,6 +71,10 @@ class _SignalMixin:
                 continue
             seen.add(id(worker))
             workers.append(worker)
+        for worker in list(getattr(self, "_profile_read_workers", []) or []):
+            if worker is not None and id(worker) not in seen:
+                seen.add(id(worker))
+                workers.append(worker)
         return workers
 
     def _finish_deferred_close(self):
@@ -114,6 +120,9 @@ class _SignalMixin:
                 event.ignore()
                 return True
             if event.type() == QEvent.Drop:
+                if not self._ensure_profile_editable():
+                    event.ignore()
+                    return True
                 pos = event.position().toPoint()
                 # QTreeWidget.itemAt() expects viewport coordinates.  Events
                 # filtered on the wrapper itself are offset by its frame.
@@ -143,6 +152,8 @@ class _SignalMixin:
         self._assign_packages_to_category(packages, cat_key)
 
     def _assign_packages_to_category(self, packages, cat_key: str):
+        if not self._ensure_profile_editable():
+            return
         # A drag can contain multiple cells for one row; dedupe before
         # mutating the persistent category cache.
         unique_packages = []
@@ -230,6 +241,8 @@ class _SignalMixin:
         assign_actions = {}
         for label, key in category_items:
             assign_actions[key] = assign_menu.addAction(label)
+            if not getattr(self, "_profile_editable", True):
+                assign_actions[key].setEnabled(False)
         chosen = menu.exec(table.viewport().mapToGlobal(pos))
         if chosen is a_name:
             QApplication.clipboard().setText(name)
@@ -831,6 +844,12 @@ class _SignalMixin:
             # 这样用户先看到主界面 1.5 秒，然后才弹更新日志（"进主界面后再弹"）
         else:
             self._close_splash()
+            # Direct source startup may have been shown before bootstrap, but
+            # a platform/window-manager can hide it while the splash owns
+            # activation. Ensure the normal (non-installer) path always ends
+            # with a visible main window.
+            if not self.isVisible():
+                self.show()
             self.setEnabled(True)
             pending_ids = getattr(self, "_startup_pending_new_mod_ids", None)
             if pending_ids and not getattr(self, "_startup_new_mods_dialog_shown", False):
@@ -847,15 +866,16 @@ class _SignalMixin:
         Metadata/icon enrichment is best-effort and runs in a worker.  Once a
         cached/quick-scanned mod list is available, the user can safely work
         with it while the worker continues to fill missing fields.  This
-        fallback only applies to installer startup and is a no-op after the
-        normal finalizer has already run.
+        The fallback applies to both installer and direct source startup and
+        is a no-op after the normal finalizer has already run.
         """
-        if not getattr(self, "_bootstrap_after_installer_splash", False):
-            return
         if getattr(self, "_bootstrap_finalized", False):
             return
         worker = getattr(self, "_async_parse_worker", None)
         if worker is None or not worker.isRunning():
+            # The worker may finish between the timer firing and this check;
+            # do not leave the startup gate waiting for a queued signal.
+            self._finalize_bootstrap()
             return
         try:
             if self._splash is not None:
@@ -892,6 +912,16 @@ class _SignalMixin:
         此时主窗口已真正可见。再等 1500ms 让用户感知主界面已就绪，
         然后顺序弹更新日志 → 新模组归类对话框。
         """
+        # Startup deliberately suppresses quit-on-last-window-closed while
+        # handing focus from the splash to this window.  Normal close behavior
+        # must be restored only after the main window is actually visible.
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.setQuitOnLastWindowClosed(True)
+        except Exception:
+            pass
+
         def _after_entry_updates():
             if getattr(self, "_startup_entry_modals_started", False):
                 return
@@ -1192,9 +1222,9 @@ class _SignalMixin:
         # Persist the fully enriched metadata (including decrypted packages) so
         # the next startup can restore it without invoking the extractor again.
         try:
-            from services.session_service import save_session_state, _dir_signature
+            from services.session_service import save_session_state, _dir_signature, save_mod_icon_probes_bulk
             snapshot = []
-            from services.session_service import save_mod_icon_probe
+            icon_probe_entries = []
             for m in self.all_mods:
                 try:
                     if getattr(m, "icon", None) is not None and m.icon.is_available:
@@ -1209,11 +1239,11 @@ class _SignalMixin:
                     # package with no preview must not trigger another costly
                     # deep extractor scan on every subsequent startup.
                     if getattr(m, "package_type", "") != "workshop":
-                        save_mod_icon_probe(
+                        icon_probe_entries.append((
                             m.mod_id,
                             m.last_modified,
                             bool(getattr(m, "icon", None) and m.icon.is_available),
-                        )
+                        ))
                 except Exception:
                     pass
                 snapshot.append({
@@ -1234,6 +1264,7 @@ class _SignalMixin:
                     "description": getattr(m, "description", "") or "",
                     "category_tag": getattr(m, "category_tag", "") or "",
                 })
+            save_mod_icon_probes_bulk(icon_probe_entries)
             save_session_state(
                 [m.mod_id for m in self.all_mods], {}, mods_snapshot=snapshot,
                 dir_signatures={
@@ -1249,7 +1280,7 @@ class _SignalMixin:
         self._async_parse_batch_refresh = False
         try:
             if self.current_profile:
-                self._fill_table_for_profile(self.current_profile)
+                self._refresh_table_metadata_in_place()
             self._refresh_category_counts()
         except Exception:
             pass
@@ -1356,47 +1387,92 @@ class _SignalMixin:
         if not items: return
         prof = items[0].data(0, Qt.UserRole)
         if prof is None: return
+        # QTreeWidget may emit the selection signal more than once for one
+        # click.  Once this profile is already current, avoid launching a
+        # second decrypt/read worker for the same file.
+        if prof is getattr(self, "current_profile", None):
+            return
         self._profile_switch_in_progress = True
+        self._profile_switch_token = int(getattr(self, "_profile_switch_token", 0)) + 1
+        token = self._profile_switch_token
         try:
             self.current_profile = prof
             try:
                 self._set_profile_editable_state(prof)
             except Exception:
                 pass
-            # 优先用 prof.mod_count；若为 0 再实时查一次（兼容解密延迟场景）
-            n_active = getattr(prof, "mod_count", 0) or 0
-            if n_active == 0:
-                try:
-                    n_active = len(self.profile_svc.get_active_mods(prof) or [])
-                except Exception:
-                    n_active = 0
+            # Never decrypt/parse profile.sii in the selection callback.  That
+            # callback runs on the GUI thread and encrypted profiles can take
+            # seconds to read.  The worker result will render the new worklist.
+            n_active = int(getattr(prof, "mod_count", 0) or 0)
             self.statusBar().showMessage(
-                _("ui.sb_current_profile", prof=str(prof), n=n_active), 5000
+                f"正在读取存档：{str(prof)}（已启用约 {n_active} 个 Mod）", 5000
             )
-            try:
-                self._fill_table_for_profile(prof)
-            except Exception as exc:
-                # Profile switching must not terminate the GUI if one profile
-                # is malformed or temporarily unavailable (e.g. Steam sync).
-                self.statusBar().showMessage(f"读取存档失败：{type(exc).__name__}: {exc}", 10000)
-            # 切换存档时：对比该存档的 active_mods 与上次会话
-            try:
-                from services.session_service import get_new_active_in_profile
-                pid = getattr(prof, "profile_id", str(id(prof)))
-                active = self.profile_svc.get_active_mods(prof)
-                new_in_profile = get_new_active_in_profile(pid, list(active or []))
-                if new_in_profile and getattr(self, "_splash", None) is None and self.isEnabled() and not getattr(self, "_startup_new_mods_dialog_shown", False):
-                    self._startup_new_mods_dialog_shown = True
-                    QTimer.singleShot(300, lambda ids=list(new_in_profile): self._show_new_mods_dialog(ids))
-            except Exception:
-                pass
-            # 切换存档后刷新分类相关菜单 enabled 状态
-            try:
-                self._refresh_category_action_enabled()
-            except Exception:
-                pass
+            key = self._profile_worklist_key(prof)
+            cached = getattr(self, "_profile_worklist_cache", {}).get(key)
+            if cached is not None:
+                # Switching back to a profile already visited this session is
+                # a pure UI operation: no decrypt and no alias-index rebuild.
+                self.current_worklist = [dict(entry) for entry in cached]
+                self._worklist_profile_key = key
+                try:
+                    self._clear_priority_dirty()
+                except Exception:
+                    pass
+                self._start_profile_table_render(token)
+                self.statusBar().showMessage(
+                    _("ui.sb_current_profile", prof=str(prof), n=n_active), 5000
+                )
+                return
+            worker = _ProfileReadWorker(self.profile_svc, prof, token=token, parent=self)
+            self._profile_read_worker = worker
+            self._profile_read_workers.append(worker)
+            # Connect directly to the MainWindow QObject method.  This forces
+            # Qt's queued delivery to the GUI thread; a lambda/partial can be
+            # treated as a functor without QObject affinity on some PySide6
+            # versions, causing table mutations from the worker thread.
+            worker.result_ready.connect(self._on_profile_read_finished, Qt.QueuedConnection)
+            worker.finished.connect(lambda w=worker: self._clear_profile_read_worker(w), Qt.QueuedConnection)
+            worker.start()
         finally:
             self._profile_switch_in_progress = False
+
+    def _clear_profile_read_worker(self, worker):
+        try:
+            self._profile_read_workers.remove(worker)
+        except (ValueError, AttributeError):
+            pass
+        if getattr(self, "_profile_read_worker", None) is worker:
+            self._profile_read_worker = None
+
+    def _on_profile_read_finished(self, prof, active: list, error: str, token: int) -> None:
+        if token != getattr(self, "_profile_switch_token", 0) or prof is not getattr(self, "current_profile", None):
+            return
+        if error:
+            self.statusBar().showMessage(f"读取存档失败：{error}", 10000)
+            return
+        try:
+            prof.mod_count = len(active)
+            self._fill_table_for_profile(prof, active_override=active, defer_render=True)
+            self._start_profile_table_render(token)
+            self.statusBar().showMessage(
+                _("ui.sb_current_profile", prof=str(prof), n=len(active)), 5000
+            )
+        except Exception as exc:
+            self.statusBar().showMessage(f"读取存档失败：{type(exc).__name__}: {exc}", 10000)
+        try:
+            from services.session_service import get_new_active_in_profile
+            pid = getattr(prof, "profile_id", str(id(prof)))
+            new_in_profile = get_new_active_in_profile(pid, list(active or []))
+            if new_in_profile and getattr(self, "_splash", None) is None and self.isEnabled() and not getattr(self, "_startup_new_mods_dialog_shown", False):
+                self._startup_new_mods_dialog_shown = True
+                QTimer.singleShot(300, lambda ids=list(new_in_profile): self._show_new_mods_dialog(ids))
+        except Exception:
+            pass
+        try:
+            self._refresh_category_action_enabled()
+        except Exception:
+            pass
 
     def _on_tree_profile_menu(self, pos):
         it = self.tree_profiles.itemAt(pos)
@@ -1480,6 +1556,8 @@ class _SignalMixin:
         pass
 
     def _on_table_order_changed(self):
+        if not self._ensure_profile_editable():
+            return
         if getattr(self, "table", None) is getattr(self, "table_active", None):
             self._sync_active_group_order_from_table()
         else:
@@ -1490,6 +1568,8 @@ class _SignalMixin:
 
     def _on_check_changed(self, item: QTableWidgetItem):
         if item.column() != COL_ENABLED: return
+        if not self._ensure_profile_editable():
+            return
         # Bug A 修复：顶层重入 + 行有效性 guard
         # 1) 重入 guard（防止 _sync → 另一表 set_row_enabled → 虽 blockSignals，但 debounce/重填仍可能间接触发）
         guard = getattr(self, "_in_check_changed", False)
@@ -1542,10 +1622,16 @@ class _SignalMixin:
     def _on_mod_tab_changed(self, idx: int):
         self._current_mod_tab = "active" if idx == 1 else "all"
         self.table = self.table_active if idx == 1 else self.table_all
-        # 两个 Tab 共享同一份内存工作列表；切换时只重绘，绝不能重新
-        # 从 profile.sii 读取旧状态覆盖尚未保存的拖动/勾选结果。
+        # 两张表本来就是同一份内存工作列表的投影。切 Tab 时不要重建
+        # 573 行表格；重建会同步阻塞 GUI 数百毫秒，让用户感觉“点不动”。
+        # 只有在表格尚未填充（例如扫描完成后首次切换）时才补一次完整渲染。
         if self.current_profile:
-            self._render_current_worklist()
+            if (getattr(self.table_all, "rowCount", lambda: 0)() == 0
+                    or getattr(self.table_active, "rowCount", lambda: 0)() == 0):
+                self._render_current_worklist()
+            else:
+                self._apply_filter_to_table()
+                self._refresh_status_after_change()
 
     # ---------- 搜索 ----------
     def _on_search_changed(self, text: str):

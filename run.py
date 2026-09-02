@@ -64,7 +64,11 @@ except BaseException:
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
+    except SystemExit:
+        # A normal Qt event-loop return is not a startup failure.  Logging it
+        # as one made real diagnostics needlessly confusing.
+        raise
     except BaseException:
         _write_startup_log("[main failed]\n" + traceback.format_exc())
         raise

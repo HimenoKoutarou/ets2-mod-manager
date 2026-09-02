@@ -499,6 +499,11 @@ class SplashScreen(QWidget):
                     except Exception: pass
                 self.close()
                 self.deleteLater()
+                if then_show_main is not None and getattr(then_show_main, "_splash", None) is self:
+                    # The QObject is scheduled for deletion above. Clear the
+                    # Python reference so later callbacks cannot call a
+                    # deleted SplashScreen C++ object.
+                    then_show_main._splash = None
                 # 通知 MainWindow: 主窗口已经真正 show + activate 了，
                 # 可以开始排延后的更新日志/新模组弹窗
                 cb = getattr(then_show_main, "_on_main_window_shown", None) if then_show_main else None
@@ -593,6 +598,9 @@ class ModTable(QTableWidget):
 
     def __init__(self, parent=None):
         super().__init__(0, 7, parent)
+        # Read-only profiles remain browsable; this flag controls edit
+        # affordances such as checkboxes and drag/drop only.
+        self._editable = True
         self._expanded_folders: set[str] = set()
         self.setHorizontalHeaderLabels([_("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"), _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"])
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -611,8 +619,38 @@ class ModTable(QTableWidget):
         self.setAlternatingRowColors(True)
         self.verticalHeader().setDefaultSectionSize(24)
 
+    def set_editable(self, editable: bool) -> None:
+        """Toggle editing without disabling selection, scrolling, or search."""
+        self._editable = bool(editable)
+        self.setDragDropMode(
+            QAbstractItemView.InternalMove if self._editable
+            else QAbstractItemView.NoDragDrop
+        )
+        self.setAcceptDrops(self._editable)
+        was_blocked = self.signalsBlocked()
+        self.blockSignals(True)
+        try:
+            for row in range(self.rowCount()):
+                for col in range(self.columnCount()):
+                    item = self.item(row, col)
+                    if item is None:
+                        continue
+                    flags = item.flags()
+                    if self._editable:
+                        if col == COL_ENABLED:
+                            flags |= Qt.ItemIsUserCheckable
+                        flags |= Qt.ItemIsDragEnabled
+                    else:
+                        flags &= ~Qt.ItemIsUserCheckable
+                        flags &= ~Qt.ItemIsDragEnabled
+                    item.setFlags(flags)
+        finally:
+            self.blockSignals(was_blocked)
+
     def startDrag(self, supported_actions):
         """保留表格内部排序 MIME，同时标记可拖到左侧分类树。"""
+        if not self._editable:
+            return
         items = self.selectedItems()
         if not items:
             return
@@ -628,6 +666,9 @@ class ModTable(QTableWidget):
         drag.exec(supported_actions)
 
     def dropEvent(self, event):
+        if not self._editable:
+            event.ignore()
+            return
         # 不使用 QTableWidget::InternalMove：已启用页包含被隐藏的禁用行，
         # Qt 默认 drop 会按隐藏行索引移动，结果经常看似拖动但顺序不变。
         selected_rows = self.selected_rows()
@@ -755,7 +796,10 @@ class ModTable(QTableWidget):
         row = self.rowCount()
         self.insertRow(row)
         chk = QTableWidgetItem()
-        chk.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
+        chk_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if self._editable:
+            chk_flags |= Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled
+        chk.setFlags(chk_flags)
         chk.setCheckState(Qt.Checked if total > 0 and enabled_count == total else Qt.Unchecked)
         self.setItem(row, COL_ENABLED, chk)
         expanded = folder in self._expanded_folders
@@ -772,10 +816,11 @@ class ModTable(QTableWidget):
         pkg_item = self._mk(pkg)
         self.setItem(row, COL_PKG, pkg_item)
         self.set_row_kind(row, "folder", folder)
-        for c in range(self.columnCount()):
-            cell = self.item(row, c)
-            if cell is not None:
-                cell.setFlags(cell.flags() | Qt.ItemIsDragEnabled)
+        if self._editable:
+            for c in range(self.columnCount()):
+                cell = self.item(row, c)
+                if cell is not None:
+                    cell.setFlags(cell.flags() | Qt.ItemIsDragEnabled)
         return row
 
     def set_row_enabled(self, row: int, enabled: bool):
@@ -789,7 +834,10 @@ class ModTable(QTableWidget):
         # checkbox
         en = work_entry.get("enabled", False)
         chk_item = QTableWidgetItem()
-        chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsDragEnabled)
+        chk_flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+        if self._editable:
+            chk_flags |= Qt.ItemIsUserCheckable | Qt.ItemIsDragEnabled
+        chk_item.setFlags(chk_flags)
         chk_item.setCheckState(Qt.Checked if en else Qt.Unchecked)
         self.setItem(r, COL_ENABLED, chk_item)
         # name + 分类颜色
@@ -831,10 +879,11 @@ class ModTable(QTableWidget):
         self.setItem(r, COL_PKG, self._mk(work_entry["package_name"]))
         # 整行允许拖动；此前只有复选框设置了 ItemIsDragEnabled，
         # 从名称/来源列开始拖动时 Qt 可能不会发出稳定的 dropEvent。
-        for c in range(self.columnCount()):
-            cell = self.item(r, c)
-            if cell is not None:
-                cell.setFlags(cell.flags() | Qt.ItemIsDragEnabled)
+        if self._editable:
+            for c in range(self.columnCount()):
+                cell = self.item(r, c)
+                if cell is not None:
+                    cell.setFlags(cell.flags() | Qt.ItemIsDragEnabled)
         # name column 缺失 mod 标红
         if work_entry.get("_missing_mod"):
             name_item = self.item(r, COL_NAME)

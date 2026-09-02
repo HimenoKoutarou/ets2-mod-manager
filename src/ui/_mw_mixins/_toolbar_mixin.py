@@ -320,6 +320,7 @@ class _ToolbarMixin:
         tb.addWidget(btn_crash)
         # 保留工具栏动作引用供 retranslate 遍历
         self._tb_toolbuttons = [btn_mods, btn_prio, btn_save, btn_tools, btn_crash]
+        self._btn_mods = btn_mods
         self.btn_save = btn_save
         self._btn_priority = btn_prio
         self._action_save_editor = act_se
@@ -866,19 +867,17 @@ class _ToolbarMixin:
         worker.finished.connect(self._on_async_parse_finished)
         self._async_parse_started = True
         worker.start()
-        # Installer startup normally waits for complete enrichment.  Keep a
-        # bounded fallback as well so a single encrypted archive cannot leave
-        # the whole window disabled forever (fresh scans do not pass through
-        # the restore branch in _bootstrap).
-        if getattr(self, "_bootstrap_after_installer_splash", False):
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(8000, self._release_startup_lock_after_timeout)
+        # Keep a bounded fallback in every startup mode so a single encrypted
+        # archive cannot leave the whole window disabled forever.  The parser
+        # continues in the background and fills metadata/icon fields later.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(8000, self._release_startup_lock_after_timeout)
 
     def _fetch_workshop_titles_async(self):
         """QThread 查询 Steam Workshop 标题，完成后刷新表格。"""
         def _refresh_table_after_fetch():
             if self.current_profile:
-                self._render_current_worklist()
+                self._refresh_table_metadata_in_place()
             self._refresh_category_counts()
 
         self._refresh_table_after_fetch = _refresh_table_after_fetch
@@ -890,11 +889,13 @@ class _ToolbarMixin:
         # 性能优化：先用 quick=True 快速列出 profile 骨架（不解密不解 SII），
         # 立即更新 UI 显示 profile_id；再后台异步填充 display_name/company_name。
         # 原实现同步解密每个 profile.sii，数量多时启动明显卡顿。
-        # Show every profile source that the game can use.  Hiding Steam/Cloud
-        # entries made it possible to edit a local profile while ETS2 was
-        # actually loading the Steam Cloud copy, so the game appeared to keep
-        # the old Mod list after a successful save.
-        self.profiles = list(self.profile_svc.list_profiles(quick=True))
+        # The manager is intentionally local-profile-only.  Steam/Cloud
+        # profiles are not writable and showing them here caused users to edit
+        # one copy while the game loaded another.
+        self.profiles = [
+            p for p in self.profile_svc.list_profiles(quick=True)
+            if getattr(p, "location", "") == "local"
+        ]
         for i in range(self.tree_profiles.topLevelItemCount() - 1, -1, -1):
             self.tree_profiles.takeTopLevelItem(i)
         self._profile_tree_items: dict[str, QTreeWidgetItem] = {}
@@ -903,10 +904,7 @@ class _ToolbarMixin:
         for p in self.profiles:
             name = p.display_name or p.save_name or "正在读取存档名称…"
             count = int(getattr(p, "mod_count", 0) or 0)
-            source = {"local": "本地", "steam": "Steam", "cloud": "Steam Cloud"}.get(
-                getattr(p, "location", ""), getattr(p, "location", "")
-            )
-            label = f"{name}（{source}，已启用 {count} 个 Mod）"
+            label = f"{name}（本地，已启用 {count} 个 Mod）"
             it = QTreeWidgetItem([label])
             it.setData(0, Qt.UserRole, p)
             if getattr(p, "location", None) == "cloud":
@@ -921,25 +919,59 @@ class _ToolbarMixin:
                 first_with_mods = it
         if first_with_mods is not None:
             self.tree_profiles.setCurrentItem(first_with_mods)
-            self._on_tree_profile_selected()
+            if self.current_profile is not first_with_mods.data(0, Qt.UserRole):
+                self._on_tree_profile_selected()
         elif first_any is not None:
             self.tree_profiles.setCurrentItem(first_any)
-            self._on_tree_profile_selected()
+            if self.current_profile is not first_any.data(0, Qt.UserRole):
+                self._on_tree_profile_selected()
         # 异步后台填充 display_name/company_name 并刷新树节点标签
         self._enrich_profiles_async()
 
     def _set_profile_editable_state(self, prof) -> None:
-        """Make non-local profiles strictly read-only in the main window."""
+        """Make non-local profiles read-only without disabling browsing."""
         editable = bool(prof is not None and getattr(prof, "location", "") == "local")
-        for widget in (getattr(self, "table_all", None),
-                       getattr(self, "table_active", None),
-                       getattr(self, "tree_categories", None)):
+        self._profile_editable = editable
+        for widget in (getattr(self, "table_all", None), getattr(self, "table_active", None)):
             if widget is not None:
-                widget.setEnabled(editable)
+                try:
+                    widget.setEnabled(True)
+                    widget.set_editable(editable)
+                except Exception:
+                    pass
+        tree = getattr(self, "tree_categories", None)
+        if tree is not None:
+            # Filters and expansion remain usable in read-only mode; only
+            # checkbox/drop assignment affordances are removed.
+            tree.setEnabled(True)
+            tree.setAcceptDrops(editable)
+            try:
+                tree.viewport().setAcceptDrops(editable)
+            except Exception:
+                pass
+            was_blocked = tree.signalsBlocked()
+            tree.blockSignals(True)
+            try:
+                for i in range(tree.topLevelItemCount()):
+                    item = tree.topLevelItem(i)
+                    role = item.data(0, Qt.UserRole)
+                    is_folder = bool(role and role[0] == "__filter_cat__" and role[1])
+                    flags = item.flags()
+                    if editable and is_folder:
+                        flags |= Qt.ItemIsUserCheckable
+                    elif is_folder:
+                        flags &= ~Qt.ItemIsUserCheckable
+                    item.setFlags(flags)
+            finally:
+                tree.blockSignals(was_blocked)
         btn = getattr(self, "btn_save", None)
         if btn is not None:
             btn.setEnabled(editable)
             btn.setToolTip("仅本地存档可修改" if not editable else "")
+        mods_btn = getattr(self, "_btn_mods", None)
+        if mods_btn is not None:
+            mods_btn.setEnabled(editable)
+            mods_btn.setToolTip("仅本地存档可修改" if not editable else "")
         priority_btn = getattr(self, "_btn_priority", None)
         if priority_btn is not None:
             priority_btn.setEnabled(editable)
@@ -947,6 +979,16 @@ class _ToolbarMixin:
         action = getattr(self, "_action_save_editor", None)
         if action is not None:
             action.setEnabled(editable)
+
+    def _profile_edit_guard(self) -> bool:
+        """Return whether a mutating UI action may proceed."""
+        if getattr(self, "_profile_editable", True):
+            return True
+        try:
+            self.statusBar().showMessage("Steam/Cloud 存档只读，请切换到本地存档后再修改。", 4000)
+        except Exception:
+            pass
+        return False
 
     def _enrich_profiles_async(self):
         """QThread 逐个 enrich_profile，通过 Signal one_enriched 通知主线程更新树节点。"""
@@ -962,13 +1004,9 @@ class _ToolbarMixin:
         it = self._profile_tree_items.get(key) if hasattr(self, "_profile_tree_items") else None
         if it is not None:
             it.setText(0, label)
-            # 若当前选中的就是这个 profile 且是其首次填充，触发一次选中刷新
-            if self.tree_profiles.currentItem() is it:
-                # 仅当原来 label 是 profile_id（未填充）时才触发选中事件
-                try:
-                    self._on_tree_profile_selected()
-                except Exception:
-                    pass
+            # ``prof`` is the same object stored on the tree item. Enrichment
+            # changes display fields only; reloading here rebuilt both large
+            # Mod tables and blocked the UI after startup.
 
     # ---------- profile 切换 / 表格填装 ----------
     def _open_save_editor(self, prof: Optional[ProfileInfo]):

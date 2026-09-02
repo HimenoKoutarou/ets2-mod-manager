@@ -118,7 +118,7 @@ def _write_startup_error(message: str) -> None:
 #  启动加载屏（SplashScreen）——扫描期间显示，禁止主窗口交互
 # 拆分出来的辅助 Widget / Worker（单文件 3785 行 → ~3060 行，降低 IDE 诊断压力）
 from ._mw_widgets import _LangSwitchDialog, SplashScreen, ModTable
-from ._mw_workers import _QuickScanWorker, _AsyncParseWorker, _WorkshopFetchWorker, _EnrichProfilesWorker
+from ._mw_workers import _QuickScanWorker, _AsyncParseWorker, _WorkshopFetchWorker, _EnrichProfilesWorker, _ProfileReadWorker
 from ._mw_mixins import _SignalMixin, _TableDataMixin, _ToolbarMixin, _DialogMixin
 from .theme import ThemeManager, THEME_DARK, THEME_LIGHT, THEME_AUTO, QTB_DEFAULT, QTB_PRIMARY
 
@@ -157,6 +157,9 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self.priority_svc = PriorityService([])
         self.current_worklist: List[dict] = []
         self.current_profile: Optional[ProfileInfo] = None
+        # Startup/shutdown uses QWidget.isEnabled(); profile editability is a
+        # separate state so Steam/Cloud profiles can still be browsed.
+        self._profile_editable = False
         self._worklist_profile_key = None
         self.profiles: List[ProfileInfo] = []
         self._current_filter_cat: str | None = None
@@ -172,6 +175,10 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self._async_parse_worker: Optional["_AsyncParseWorker"] = None
         self._ws_fetch_worker: Optional["_WorkshopFetchWorker"] = None
         self._enrich_profiles_worker: Optional["_EnrichProfilesWorker"] = None
+        self._profile_read_worker: Optional["_ProfileReadWorker"] = None
+        self._profile_read_workers: list = []
+        self._profile_switch_token = 0
+        self._profile_worklist_cache: dict = {}
         self._deferred_close_requested = False
         self._async_parse_progress: Optional[QProgressBar] = None
         # 顶部主进度条（显眼位置，扫描时显示，空闲隐藏）
@@ -358,6 +365,12 @@ def _relaunch_without_console():
 def main():
     _relaunch_without_console()
     app = QApplication.instance() or QApplication(sys.argv)
+    # The installer splash used to be the only visible top-level widget.
+    # On some Windows/Qt combinations closing it made QApplication leave the
+    # event loop before the deferred MainWindow.show() callback could run.
+    # Keep quit-on-last-window-closed disabled only during this hand-off; it is
+    # restored by _on_main_window_shown once the real window is on screen.
+    app.setQuitOnLastWindowClosed(False)
     ThemeManager.instance().apply(app)
     # App 级图标 + splash logo （统一 resolve_asset：dev tree / onedir / onefile 全匹配）
     icon_path = resolve_asset("assets/app_icon.png")
@@ -383,6 +396,15 @@ def main():
     w._splash = splash
     # 注意：此处 NOT w.show()。必须等 _finalize_bootstrap 调 splash done 再 show。
     w._bootstrap_after_installer_splash = True
+    # Keep a real top-level window alive throughout startup.  It stays hidden
+    # behind the splash and disabled until bootstrap completes, so this does
+    # not expose a half-initialized UI to the user.
+    w.setEnabled(False)
+    w.show()
+    # Reassert the splash after showing the disabled owner window.  Qt may
+    # otherwise activate the main window briefly during construction.
+    splash.raise_()
+    splash.activateWindow()
 
     def _bootstrap_and_show():
         try:
@@ -402,6 +424,7 @@ def main():
                 w.raise_()
                 w.activateWindow()
                 w.setEnabled(True)
+                app.setQuitOnLastWindowClosed(True)
                 w.statusBar().showMessage(f"初始化失败：{type(exc).__name__}: {exc}", 15000)
             except Exception:
                 _write_startup_error(
@@ -409,7 +432,7 @@ def main():
                 )
 
     QTimer.singleShot(60, _bootstrap_and_show)
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":

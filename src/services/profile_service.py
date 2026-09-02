@@ -162,6 +162,23 @@ def _looks_encrypted(data: bytes) -> bool:
     return True
 
 
+def profile_plaintext_bytes(text: str) -> bytes:
+    """Return an ETS2-compatible plaintext SII profile payload.
+
+    Current ScsC files carry a 32-byte HMAC that cannot be recomputed by this
+    application. Re-encrypting modified text therefore produces a container
+    that this app can decrypt but ETS2 rejects. ETS2 accepts plaintext
+    ``SiiNunit`` profiles, so every profile mutation is deliberately written
+    as validated UTF-8 SII instead.
+    """
+    raw = str(text or "").encode("utf-8")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    if b"SiiNunit" not in raw[:128] or b"profile" not in raw:
+        raise ValueError("拒绝写入：profile 明文 SII 格式无效")
+    return raw
+
+
 def decrypt_profile_bytes(data: bytes, key_text: str = _PROFILE_DEFAULT_KEY) -> bytes:
     """尝试解密 profile.sii 的原始字节；若判断为明文直接原封返回。"""
     if not _looks_encrypted(data):
@@ -386,6 +403,10 @@ class ProfileInfo:
     save_name: str = ""                # 存档显示名
     company_name: str = ""             # 公司/角色中文名
     mod_count: int = 0
+    # Populated by the background profile enrichment pass so switching back
+    # to a profile does not decrypt/parse the same file again.
+    active_mods: List[str] = field(default_factory=list, repr=False)
+    active_mods_stamp: Tuple[int, int] = field(default_factory=lambda: (0, 0), repr=False)
 
     def __str__(self) -> str:
         # profile_name is the custom profile/save name shown by the game.
@@ -403,6 +424,11 @@ class ProfileService:
         self.paths = paths
         self.backup = backup or BackupService()
         self.sii_decrypt_exe = sii_decrypt_exe or self._auto_sii_decrypt()
+        # Profile reads are immutable between file changes.  Keeping the
+        # decoded active_mods list avoids decrypting the same profile again
+        # when the tree label, selection handler and table renderer all ask
+        # for it during one switch.
+        self._active_mod_cache: Dict[str, Tuple[int, int, List[str]]] = {}
 
     @staticmethod
     def ensure_local_profile(prof: ProfileInfo) -> None:
@@ -440,10 +466,9 @@ class ProfileService:
           - quick=False（默认）：保持原行为，立即 _enrich。
         """
         out: List[ProfileInfo] = []
-        # Steam Cloud is the copy the game actually reads when Cloud is enabled.
-        # Keep it ahead of local profiles so the UI's initial selection matches
-        # the in-game profile.  A steam pointer and its cloud target can resolve
-        # to the same profile.sii; de-duplicate those entries by real path.
+        # Enumerate every discovered source for callers that need read-only
+        # comparison.  The main manager filters this result to local profiles
+        # before presenting the editable profile list.
         locations: List[Tuple[str, Optional[Path]]] = [
             ("cloud", self.paths.steam_cloud_dir),
             ("steam", self.paths.steam_profiles_dir),
@@ -491,7 +516,8 @@ class ProfileService:
 
     def _enrich(self, info: ProfileInfo) -> None:
         try:
-            plain = self._get_plain_text(info.profile_sii)
+            path = Path(info.profile_sii)
+            plain = self._get_plain_text(path)
             units = parse_sii(plain)
             if not units:
                 return
@@ -499,7 +525,16 @@ class ProfileService:
             info.display_name = _unescape_profile_str(u.get("profile_name", "") or "")
             info.save_name = _unescape_profile_str(u.get("save_name", "") or "")
             info.company_name = _unescape_profile_str(u.get("company_name", "") or "")
-            info.mod_count = len(_extract_active_mods(u))
+            active = list(_extract_active_mods(u))
+            info.active_mods = active
+            info.mod_count = len(active)
+            try:
+                st = path.stat()
+                stamp = (int(st.st_mtime_ns), int(st.st_size))
+                info.active_mods_stamp = stamp
+                self._active_mod_cache[str(path.resolve())] = (stamp[0], stamp[1], active)
+            except OSError:
+                pass
         except Exception:
             return
 
@@ -550,10 +585,28 @@ class ProfileService:
 
     # ---------- 读取 active_mods ----------
     def get_active_mods(self, prof: ProfileInfo) -> List[str]:
-        units = self._read_units(prof.profile_sii)
+        path = Path(prof.profile_sii)
+        try:
+            st = path.stat()
+            key = str(path.resolve())
+            cached = self._active_mod_cache.get(key)
+            stamp = (int(st.st_mtime_ns), int(st.st_size))
+            if cached is not None and cached[:2] == stamp:
+                return list(cached[2])
+            profile_cached = list(getattr(prof, "active_mods", []) or [])
+            profile_stamp = tuple(getattr(prof, "active_mods_stamp", (0, 0)) or (0, 0))
+            if profile_cached and profile_stamp == stamp:
+                self._active_mod_cache[key] = (stamp[0], stamp[1], profile_cached)
+                return profile_cached
+        except OSError:
+            key = str(path)
+            stamp = (-1, -1)
+        units = self._read_units(path)
         if not units:
             return []
-        return _extract_active_mods(units[0])
+        active = list(_extract_active_mods(units[0]))
+        self._active_mod_cache[key] = (stamp[0], stamp[1], active)
+        return list(active)
 
     # ---------- 写回 active_mods ----------
     def set_active_mods(self, prof: ProfileInfo, new_mods: List[str],
@@ -561,7 +614,7 @@ class ProfileService:
         """
         1. 读取 profile.sii 原始字节并解密成文本
         2. 文本级原位重写 active_mods 条目
-        3. 若原文件为加密 → 重新加密写回；若明文 → 明文写回
+        3. 写回 ETS2 支持的明文 SII（避免 ScsC HMAC 无法重建导致游戏回退）
         4. 写前备份
         返回实际写入的文件路径
 
@@ -570,25 +623,12 @@ class ProfileService:
         保留 verify=True 用于调试或关键路径。
         """
         self.ensure_local_profile(prof)
-        original_bytes = prof.profile_sii.read_bytes()
-        was_encrypted = _looks_encrypted(original_bytes)
         # 解密文本
         plain = self._get_plain_text_strict(prof.profile_sii)
         new_text = rewrite_active_mods_in_text(plain, list(new_mods))
         # 写前备份
         self.backup.backup(prof.profile_sii, tag="pre-write")
-        # 输出字节
-        out_bytes = new_text.encode("utf-8-sig")
-        if original_bytes.startswith((_HEAD_SCSC, _HEAD_4S)):
-            out_bytes = _encrypt_scsc_profile(out_bytes, original_bytes)
-        elif was_encrypted:
-            # P0 安全修复：加密失败拒绝写明文（防止损坏 profile）
-            try:
-                out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
-            except Exception as e:
-                raise RuntimeError(
-                    f"Profile 加密失败，拒绝写入明文以保护存档: {e}"
-                ) from e
+        out_bytes = profile_plaintext_bytes(new_text)
         # P0 原子写入：先写 .tmp 再 os.replace，防止写入中途崩溃损坏 profile
         import tempfile as _tf
         tmp_fd, tmp_path = _tf.mkstemp(
@@ -722,8 +762,6 @@ class ProfileService:
         if not new_sii_target.exists():
             raise RuntimeError(f"复制后找不到 profile.sii: {new_sii_target}")
 
-        original_bytes = new_sii_target.read_bytes()
-        was_encrypted = _looks_encrypted(original_bytes)
         plain = self._get_plain_text_strict(new_sii_target)
 
         # 文本级替换 profile_name 和 company_name
@@ -747,30 +785,7 @@ class ProfileService:
         new_text = _replace_kv(plain, "profile_name", escaped_pn)
         new_text = _replace_kv(new_text, "company_name", escaped_cn)
 
-        # 保存时注意原文件加密状态
-        out_bytes = new_text.encode("utf-8-sig")
-        if original_bytes.startswith((_HEAD_SCSC, _HEAD_4S)):
-            out_bytes = _encrypt_scsc_profile(out_bytes, original_bytes)
-        elif was_encrypted:
-            try:
-                out_bytes = encrypt_profile_bytes(new_text.encode("utf-8-sig"))
-            except Exception as e:
-                # R13: 加密失败 → 回滚整个 copy（local + cloud）
-                if new_folder.exists():
-                    shutil.rmtree(new_folder, ignore_errors=True)
-                try:
-                    new_cloud_dir
-                except NameError:
-                    pass
-                else:
-                    try:
-                        if new_cloud_dir.exists():
-                            shutil.rmtree(new_cloud_dir, ignore_errors=True)
-                    except Exception:
-                        pass
-                raise RuntimeError(
-                    f"Profile 加密失败，拒绝写入明文以保护存档，已回滚: {e}"
-                ) from e
+        out_bytes = profile_plaintext_bytes(new_text)
         # P0 原子写入
         tmp_fd, tmp_path = tempfile.mkstemp(
             prefix=".profile_sii_", dir=str(new_sii_target.parent)

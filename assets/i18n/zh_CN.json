@@ -68,7 +68,7 @@
   "dlg.save_ok_title": "保存成功",
   "dlg.save_ok_msg": "已写入：\n{wrote}\n\n写入后校验一致 ✅",
   "dlg.save_fail_title": "保存失败",
-  "dlg.save_fail_msg": "写回失败：{e}\n\n如果你的 profile.sii 是 SCS 新加密（ScsCryption 签名），请把 SII_Decrypt.exe 放到 项目目录 assets/bin/SII_Decrypt.exe，然后重试。",
+  "dlg.save_fail_msg": "写回失败：{e}\n\n程序只允许修改本地 profile.sii；写入前会自动备份。若游戏仍显示旧的 Mod 数量，请检查同目录 profile.bak.sii 是否被游戏用于回退。",
   "dlg.backup_skip_title": "已跳过",
   "dlg.backup_skip_msg": "内容与最近备份 100% 相同，未重复创建。",
   "dlg.backup_ok_title": "备份完成",

@@ -53,7 +53,7 @@ src/
 │   └── game_data.py                     # 游戏静态数据（城市/国家/港口/提示文本汉化数据）
 │
 ├── services/                            # 业务服务层
-│   ├── profile_service.py               # Profile 读写（调用 SII_Decrypt 解密/加密）
+│   ├── profile_service.py               # Profile 读写（解密读取，写回 ETS2 可读 SII）
 │   ├── priority_service.py              # 排序 / 批量启用 / 预设方案
 │   ├── backup_service.py                # 自动备份（最多 10 份）
 │   ├── session_service.py               # 会话状态 + 新 mod 检测（iterdir 轻量签名）
@@ -216,7 +216,7 @@ ETS2ModManager/
 
 ## ⚠️ 注意事项
 
-1. **profile.sii 默认是加密格式**，读写需要社区工具 `SII_Decrypt.exe`（放在 `assets/bin/` 下即可自动调用）。
+1. **profile.sii 可能是 ScsC 加密格式**。程序可调用 `SII_Decrypt.exe` 解密读取；修改后写回经过校验的 UTF-8 `SiiNunit` SII，避免无法重建 ScsC 校验导致游戏回退到 `profile.bak.sii`。
 2. **软链接功能**：优先使用 Junction（目录联接），不需要管理员权限；Junction 失败自动回退到 Symlink。
 3. **写入存档前务必备份**：本程序已内置自动备份，但仍建议首次使用时手动复制一份 `profile.sii`。
 4. **崩溃排查功能**：需要游戏至少运行过一次（产生 game.log.txt），崩溃后需要游戏生成 game.crash.txt。

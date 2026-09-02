@@ -162,6 +162,35 @@ class _TableDataMixin:
         self._apply_filter_to_table()
         self._refresh_status_after_change()
 
+    def _refresh_table_metadata_in_place(self) -> None:
+        """Refresh metadata without rebuilding every row in both tables."""
+        if not getattr(self, "current_worklist", None):
+            return
+        if getattr(self, "table_all", None) is None or self.table_all.rowCount() == 0:
+            self._render_current_worklist()
+            return
+        for table in (self.table_all, self.table_active):
+            was_blocked = table.signalsBlocked()
+            table.blockSignals(True)
+            table.setUpdatesEnabled(False)
+            try:
+                for row in range(table.rowCount()):
+                    if table.is_folder_row(row):
+                        continue
+                    mod = self._lookup_mod(table.package_at(row))
+                    if mod is None:
+                        continue
+                    table.update_row_for_mod(row, mod)
+                    if table.is_folder_child_row(row):
+                        name_item = table.item(row, COL_NAME)
+                        if name_item is not None and not name_item.text().startswith("    "):
+                            name_item.setText("    " + name_item.text())
+            finally:
+                table.setUpdatesEnabled(True)
+                table.blockSignals(was_blocked)
+        self._apply_filter_to_table()
+        self._refresh_status_after_change()
+
     def _render_active_grouped_table(self, table: ModTable) -> None:
         """Render enabled Mods with custom folders as expandable group rows."""
         from services.category_service import all_folders
@@ -337,7 +366,7 @@ class _TableDataMixin:
             str(getattr(prof, "profile_sii", "") or ""),
         )
 
-    def _fill_table_for_profile(self, prof: ProfileInfo, *, force: bool = False):
+    def _fill_table_for_profile(self, prof: ProfileInfo, *, force: bool = False, active_override=None, defer_render: bool = False):
         """Load a profile only when needed; otherwise render the live worklist.
 
         Async metadata callbacks and tab changes can arrive after the user has
@@ -354,27 +383,38 @@ class _TableDataMixin:
         for t in (self.table_all, self.table_active):
             t.setUpdatesEnabled(False)
         try:
-            self._fill_table_impl(prof, force=force)
+            self._fill_table_impl(prof, force=force, active_override=active_override, render=not defer_render)
         finally:
             for t in (self.table_all, self.table_active):
                 t.setUpdatesEnabled(True)
 
-    def _fill_table_impl(self, prof: ProfileInfo, *, force: bool = False):
+    def _fill_table_impl(self, prof: ProfileInfo, *, force: bool = False, active_override=None, render: bool = True):
         # 快速扫描未完成时（all_mods 为空 / priority_svc 未就绪），跳过填表格
         # 设置 _profile_fill_pending 标志，数据就绪后自动填充
         if not self.all_mods or not self.all_mods_by_pkg or self.priority_svc is None:
             self._profile_fill_pending = True
             return
         self._profile_fill_pending = False
-        try:
-            active = self.profile_svc.get_active_mods(prof)
-        except Exception as e:
-            QMessageBox.warning(self, _("dlg.read_fail_title"), _("dlg.read_active_fail", e=f"{e!r}"))
-            active = []
+        if active_override is not None:
+            active = list(active_override)
+        else:
+            try:
+                active = self.profile_svc.get_active_mods(prof)
+            except Exception as e:
+                QMessageBox.warning(self, _("dlg.read_fail_title"), _("dlg.read_active_fail", e=f"{e!r}"))
+                active = []
         self.current_worklist = self.priority_svc.build_worklist(
             active, list(self.all_mods_by_pkg.keys())
         )
         self._worklist_profile_key = self._profile_worklist_key(prof)
+        # Keep a cheap in-memory projection per profile. Switching back only
+        # needs these row dictionaries, not another full priority rebuild.
+        try:
+            cache = getattr(self, "_profile_worklist_cache", None)
+            if isinstance(cache, dict):
+                cache[self._worklist_profile_key] = [dict(entry) for entry in self.current_worklist]
+        except Exception:
+            pass
         # Record the baseline only after the new profile worklist exists.
         # Hashing the previous profile here made dirty-state comparisons use
         # the wrong profile after a switch.
@@ -384,7 +424,120 @@ class _TableDataMixin:
         except Exception:
             pass
         # 两张表都用相同数据构建（active 表通过 _apply_filter_to_table 自动只显示 enabled）
-        self._render_current_worklist()
+        if render:
+            self._render_current_worklist()
+
+    def _start_profile_table_render(self, token: int) -> None:
+        """Render only the visible profile table in event-loop sized batches."""
+        self._profile_render_token = int(token)
+        table = getattr(self, "table", None) or getattr(self, "table_all", None)
+        if table is None:
+            return
+        # The other projection is intentionally lazy.  This removes the second
+        # 573-row rebuild from the profile-switch critical path.
+        other = self.table_active if table is self.table_all else self.table_all
+        for t in (table, other):
+            t.blockSignals(True)
+            t.setUpdatesEnabled(False)
+            try:
+                t.setRowCount(0)
+            finally:
+                t.setUpdatesEnabled(True)
+                t.blockSignals(False)
+        self._profile_table_pending_key = self._worklist_profile_key(self.current_profile)
+        specs = self._profile_row_specs(table is self.table_active)
+        state = {"pos": 0, "specs": specs, "table": table, "token": int(token)}
+
+        def pump():
+            if state["token"] != getattr(self, "_profile_render_token", -1):
+                return
+            if self.current_profile is None:
+                return
+            tbl = state["table"]
+            tbl.blockSignals(True)
+            tbl.setUpdatesEnabled(False)
+            try:
+                end = min(state["pos"] + 40, len(state["specs"]))
+                for spec in state["specs"][state["pos"]:end]:
+                    self._append_profile_row_spec(tbl, spec)
+                state["pos"] = end
+            finally:
+                tbl.setUpdatesEnabled(True)
+                tbl.blockSignals(False)
+            if state["pos"] < len(state["specs"]):
+                QTimer.singleShot(0, pump)
+                return
+            try:
+                self._reorder_table_for(tbl)
+                self._apply_filter_to_table()
+                self._refresh_status_after_change()
+            except Exception:
+                pass
+            self.statusBar().showMessage("存档已切换", 2500)
+
+        QTimer.singleShot(0, pump)
+
+    def _profile_row_specs(self, active_table: bool) -> list:
+        """Build lightweight row descriptions without touching Qt widgets."""
+        worklist = list(getattr(self, "current_worklist", []) or [])
+        if not active_table:
+            return [("mod", dict(entry), self._lookup_mod(str(entry.get("package_name") or "")) or entry.get("mod"))
+                    for entry in worklist]
+        from services.category_service import all_folders
+        folders = set(all_folders())
+        folder_entries: Dict[str, list] = {}
+        for entry in worklist:
+            pkg = str(entry.get("package_name") or "").strip()
+            if not pkg:
+                continue
+            mod = self._lookup_mod(pkg) or entry.get("mod")
+            cat = self._category_tag_for_entry({"package_name": pkg}, mod)
+            if cat and cat in folders:
+                folder_entries.setdefault(cat, []).append(entry)
+        specs = []
+        rendered = set()
+        for entry in worklist:
+            pkg = str(entry.get("package_name") or "").strip()
+            if not pkg:
+                continue
+            mod = self._lookup_mod(pkg) or entry.get("mod")
+            cat = self._category_tag_for_entry({"package_name": pkg}, mod)
+            if cat and cat in folder_entries:
+                if cat in rendered:
+                    continue
+                rendered.add(cat)
+                members = folder_entries[cat]
+                enabled_count = sum(1 for e in members if e.get("enabled"))
+                if enabled_count <= 0:
+                    continue
+                first_order = next((int(e.get("order", -1)) for e in members if e.get("enabled")), -1)
+                specs.append(("folder", cat, enabled_count == len(members), len(members), enabled_count, first_order))
+                for child in members:
+                    cpkg = str(child.get("package_name") or "").strip()
+                    specs.append(("child", cat, dict(child), self._lookup_mod(cpkg) or child.get("mod")))
+                continue
+            if entry.get("enabled"):
+                specs.append(("mod", dict(entry), mod))
+        return specs
+
+    @staticmethod
+    def _append_profile_row_spec(table, spec) -> None:
+        kind = spec[0]
+        if kind == "folder":
+            _, folder, enabled, total, enabled_count, order = spec
+            table.add_folder_row(folder, enabled, total, enabled_count, order)
+            return
+        if kind == "child":
+            _, folder, entry, mod = spec
+            row = table.rowCount()
+            table.add_mod_row(entry, mod)
+            table.set_row_kind(row, "folder_child", folder)
+            item = table.item(row, COL_NAME)
+            if item is not None and not item.text().startswith("    "):
+                item.setText("    " + item.text())
+            return
+        _, entry, mod = spec
+        table.add_mod_row(entry, mod)
 
     def _reorder_table_for(self, tbl):
         """对指定 tbl 按 current_worklist 重排序并 renumber"""
@@ -436,6 +589,15 @@ class _TableDataMixin:
             self._reorder_table_for(t)
 
     # ---------- 用户操作：批量、上下移、保存 ----------
+    def _ensure_profile_editable(self) -> bool:
+        """Shared guard for mutating actions.
+
+        MainWindow supplies ``_profile_edit_guard``; small headless regression
+        fakes do not, so they remain usable without duplicating UI state.
+        """
+        guard = getattr(self, "_profile_edit_guard", None)
+        return bool(guard()) if callable(guard) else True
+
     def _sync_worklist_from_table(self):
         """把当前活动表格的勾选+顺序回写到 self.current_worklist，同时同步勾选状态到另一张表。
 
@@ -616,6 +778,8 @@ class _TableDataMixin:
                 entry["priority_index"] = None
 
     def _batch(self, action: str):
+        if not self._ensure_profile_editable():
+            return
         rows = self._selected_worklist_indices()
         if not rows:
             QMessageBox.information(self, _("dlg.hint_title"), _("dlg.hint_select_rows"))
@@ -631,6 +795,8 @@ class _TableDataMixin:
         self._schedule_refresh(order=True, filter=True, counts=True, status=True)
 
     def _move(self, kind: str):
+        if not self._ensure_profile_editable():
+            return
         selected_rows = self.table.selected_rows()
         rows = self._selected_worklist_indices()
         if not rows: return
@@ -663,6 +829,8 @@ class _TableDataMixin:
 
     def _move_delta(self, delta: int):
         """在启用列表中，将选中的行往前(-)/后(+)移动 delta 个优先级（单位是 enabled-list 的 index，而非表格行）。"""
+        if not self._ensure_profile_editable():
+            return
         tbl = getattr(self, "table", None)
         if tbl is None: return
         selected_rows = tbl.selected_rows()
@@ -905,6 +1073,8 @@ class _TableDataMixin:
 
     def _enable_category(self, cat_key: str):
         """启用指定分类下所有 mod。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -925,6 +1095,8 @@ class _TableDataMixin:
 
     def _disable_category(self, cat_key: str):
         """禁用指定分类下所有 mod。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -945,6 +1117,8 @@ class _TableDataMixin:
 
     def _toggle_category(self, cat_key: str):
         """反选指定分类下所有 mod 的启用状态。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -964,6 +1138,8 @@ class _TableDataMixin:
 
     def _move_cat_up(self, cat_key: str, steps: int = 1):
         """按 package_set 整体上移分类（保持块内相对顺序）。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -984,6 +1160,8 @@ class _TableDataMixin:
 
     def _move_cat_down(self, cat_key: str, steps: int = 1):
         """按 package_set 整体下移分类（保持块内相对顺序）。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -1004,6 +1182,8 @@ class _TableDataMixin:
 
     def _cat_top(self, cat_key: str):
         """把分类整体置顶（保持块内相对顺序）。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -1024,6 +1204,8 @@ class _TableDataMixin:
 
     def _cat_bottom(self, cat_key: str):
         """把分类整体置底（保持块内相对顺序）。"""
+        if not self._ensure_profile_editable():
+            return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -1052,7 +1234,7 @@ class _TableDataMixin:
 
     def _refresh_category_action_enabled(self):
         """刷新所有分类相关菜单的 enabled 状态：无 profile 或无用户分类时置灰。"""
-        has_profile = self.current_profile is not None
+        has_profile = self.current_profile is not None and bool(getattr(self, "_profile_editable", True))
         has_user_cats = len(self._iter_user_categories_for_menu()) > 0
         enabled = has_profile and has_user_cats
         try:
@@ -1071,7 +1253,7 @@ class _TableDataMixin:
         """打开「模组操作 ▼」时动态重填按分类批量启用/禁用/反选子菜单。"""
         from PySide6.QtGui import QAction
         cats = self._iter_user_categories_for_menu()
-        has_profile = self.current_profile is not None
+        has_profile = self.current_profile is not None and bool(getattr(self, "_profile_editable", True))
         for menu, method, i18n_prefix in [
             (getattr(self, "_cat_sm_en", None), self._enable_category, "en"),
             (getattr(self, "_cat_sm_dis", None), self._disable_category, "dis"),
@@ -1095,7 +1277,11 @@ class _TableDataMixin:
         """打开「优先级 ▼」时动态重填按分类整体排序子菜单。"""
         from PySide6.QtGui import QAction
         cats = self._iter_user_categories_for_menu()
-        has_profile = self.current_profile is not None and self.priority_svc is not None
+        has_profile = (
+            self.current_profile is not None
+            and self.priority_svc is not None
+            and bool(getattr(self, "_profile_editable", True))
+        )
         # 1) 按分类整体上移 → 步长子菜单
         sm_up = getattr(self, "_cat_sm_up", None)
         if sm_up is not None:
@@ -1299,6 +1485,20 @@ class _TableDataMixin:
                 self.current_profile, new_active, verify=True
             )
             self.current_profile.mod_count = len(new_active)
+            self.current_profile.active_mods = list(new_active)
+            try:
+                st = self.current_profile.profile_sii.stat()
+                self.current_profile.active_mods_stamp = (int(st.st_mtime_ns), int(st.st_size))
+            except OSError:
+                pass
+            try:
+                cache = getattr(self, "_profile_worklist_cache", None)
+                if isinstance(cache, dict):
+                    cache[self._profile_worklist_key(self.current_profile)] = [
+                        dict(entry) for entry in self.current_worklist
+                    ]
+            except Exception:
+                pass
             try:
                 pid = str(getattr(self.current_profile, "profile_sii", "") or getattr(self.current_profile, "profile_id", ""))
                 name = (
@@ -1340,6 +1540,8 @@ class _TableDataMixin:
 
     # ---------- 分类文件夹筛选 / 右键归类 ----------
     def _create_folder(self):
+        if not self._ensure_profile_editable():
+            return
         from PySide6.QtWidgets import QInputDialog
         name, ok = QInputDialog.getText(self, _("dlg.new_folder_title"), _("dlg.new_folder_label"))
         if not ok: return
@@ -1355,6 +1557,8 @@ class _TableDataMixin:
         self.statusBar().showMessage(_("ui.sb_folder_created", name=name), 5000)
 
     def _rename_folder(self, old_name: str):
+        if not self._ensure_profile_editable():
+            return
         from PySide6.QtWidgets import QInputDialog
         new_name, ok = QInputDialog.getText(
             self, _("dlg.rename_folder_title"), _("dlg.rename_folder_label"), text=old_name)
@@ -1372,6 +1576,8 @@ class _TableDataMixin:
             _("ui.sb_folder_renamed", old=old_name, new=new_name, n=max(n, 0)), 5000)
 
     def _delete_folder(self, name: str):
+        if not self._ensure_profile_editable():
+            return
         from services import category_service as _cs
         st = _cs.stats()
         count = st.get(name, 0)
@@ -1474,6 +1680,16 @@ class _TableDataMixin:
         if not role or role[0] != "__filter_cat__":
             return
         cat_key = role[1] or ""
+        if not self._ensure_profile_editable():
+            # A programmatic refresh or a platform-specific checkbox click can
+            # still emit itemChanged after the item flags were made read-only.
+            # Restore the authoritative state without re-entering this slot.
+            self._updating_category_checks = True
+            try:
+                self._set_category_check_state(item, cat_key)
+            finally:
+                self._updating_category_checks = False
+            return
         # 未分类只能筛选/分配，禁止通过 checkbox 批量启用或禁用。
         if not cat_key:
             self._updating_category_checks = True
