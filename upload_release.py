@@ -17,9 +17,14 @@ from pathlib import Path
 
 REPO_OWNER = "HimenoKoutarou"
 REPO_NAME = "ets2-mod-manager"
-VERSION = "v1.2.2"
+VERSION = "v1.2.3"
 RELEASE_NAME = f"ETS2 Mod Manager {VERSION}"
 RELEASE_NOTES = """## 更新内容
+
+- 修复汉化扫描对 `city_name_localized` / `@@locale_key@@` 的读取
+- 区分缺少 def localized 字段、缺少 locale 翻译和普通待翻译项
+- 改进 Workshop/加密 Mod 的 def 与 locale 扫描及实时汉化展示
+- 增加汉化扫描回归测试
 
 - 自动更新功能：启动时自动检查GitHub Releases，有新版本时提示下载安装
 - 多语言支持：更新功能支持中文、英文、俄文三种语言
