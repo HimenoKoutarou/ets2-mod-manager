@@ -18,6 +18,7 @@ from services.l10n_service import L10nService, L10nResult, TranslationEntry
 
 class _ExtractThread(QThread):
     progress = Signal(int, int, str)
+    item_ready = Signal(str, object)
     result_ready = Signal(object)
     canceled = Signal()
 
@@ -42,12 +43,22 @@ class _ExtractThread(QThread):
         error_text = ""
         try:
             def progress_cb(cur, count, name):
-                self.progress.emit(cur + 1, count, name)
+                # collect_all_def_files reports the zero-based index of the
+                # package currently being opened. Do not turn the last
+                # package's start into 100%; 100% is reserved for the fully
+                # parsed GameDataResult emitted below.
+                total_count = max(0, int(count or 0))
+                if total_count <= 0:
+                    shown = 0
+                else:
+                    shown = max(0, min(int(cur or 0), total_count - 1))
+                self.progress.emit(shown, total_count, name)
             game_data = extract_game_data_for_active_mods(
                 self._active_mods,
                 self._target_locale,
                 should_stop=self.should_stop,
                 progress=progress_cb,
+                item_callback=lambda category, item: self.item_ready.emit(category, item),
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -57,7 +68,6 @@ class _ExtractThread(QThread):
             return
         if error_text:
             game_data._extract_error = error_text
-        self.progress.emit(total, total, "")
         self.result_ready.emit(game_data)
 
 
@@ -69,12 +79,22 @@ class _TranslateThread(QThread):
         super().__init__(parent)
         self._service = l10n_service
         self._entries = entries
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+        self.requestInterruption()
+
+    def should_stop(self) -> bool:
+        return self._stop_requested or self.isInterruptionRequested()
 
     def run(self):
         def cb(cur, total, name):
             self.progress.emit(cur, total, name)
         try:
-            self._service.batch_translate(self._entries, cb)
+            self._service.batch_translate(self._entries, cb, should_stop=self.should_stop)
+            if self.should_stop():
+                return
             self.result_ready.emit(True, "")
         except Exception as exc:
             self.result_ready.emit(False, f"{type(exc).__name__}: {exc}")
@@ -88,6 +108,7 @@ class L10nDialog(QDialog):
         "api":     QColor("#a855f7"),
         "pending": QColor("#f59e0b"),
         "failed":  QColor("#ef4444"),
+        "missing_locale": QColor("#dc2626"),
     }
     STATUS_LABELS = {
         "native":  "原生",
@@ -96,6 +117,7 @@ class L10nDialog(QDialog):
         "api":     "AI翻译",
         "pending": "待翻译",
         "failed":  "未翻译",
+        "missing_locale": "缺少 locale key",
     }
 
     def __init__(self, l10n_service: L10nService, parent=None):
@@ -164,7 +186,7 @@ class L10nDialog(QDialog):
 
     def _create_tab(self, name: str) -> QTableWidget:
         table = QTableWidget(0, 5)
-        table.setHorizontalHeaderLabels(["英文名", "中文名", "来源mod", "状态", ""])
+        table.setHorizontalHeaderLabels(["英文名", "中文名", "来源mod", "状态", "def / locale key"])
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -182,10 +204,18 @@ class L10nDialog(QDialog):
         self.status_label.setText(f"正在提取已启用mod的数据 (0/{len(active_mods)})...")
         self.locale_combo.setEnabled(False)
         self.btn_close.setEnabled(True)
+        self.result = L10nResult()
+        self._entries = []
+        self._stream_seen = set()
+        for table in (self.tab_cities, self.tab_countries, self.tab_ferries, self.tab_hints):
+            table.setRowCount(0)
+        for i, label in enumerate(("城市", "国家", "港口", "提示文本")):
+            self.tabs.setTabText(i, f"{label} (0)")
         self._extract_thread = _ExtractThread(
             active_mods, mod_dir, self.current_locale, self
         )
         self._extract_thread.progress.connect(self._on_extract_progress)
+        self._extract_thread.item_ready.connect(self._on_extract_item)
         self._extract_thread.result_ready.connect(self._on_extract_done)
         self._extract_thread.canceled.connect(self._on_extract_canceled)
         self._extract_thread.finished.connect(self._on_extract_thread_finished)
@@ -226,6 +256,64 @@ class L10nDialog(QDialog):
         self.progress_bar.setValue(current)
         self.status_label.setText(f"正在提取 ({current}/{total}): {name}")
 
+    def _on_extract_item(self, category: str, item) -> None:
+        """把后台刚解析出的条目立即追加到对应页签。"""
+        if category == "city":
+            source = getattr(item, "locale_key", "") or getattr(item, "city_name", "")
+            target_list, table, label = self.result.cities, self.tab_cities, "城市"
+        elif category == "country":
+            source = getattr(item, "locale_key", "") or getattr(item, "name", "")
+            target_list, table, label = self.result.countries, self.tab_countries, "国家"
+        elif category == "ferry":
+            source = getattr(item, "locale_key", "") or getattr(item, "ferry_name", "")
+            target_list, table, label = self.result.ferries, self.tab_ferries, "港口"
+        elif category == "hint":
+            source = getattr(item, "text", "")
+            target_list, table, label = self.result.hints, self.tab_hints, "提示文本"
+        else:
+            return
+        source = str(source or "").strip()
+        if not source:
+            return
+        # Use the SII unit identity when available so an override from a
+        # higher-priority mod does not briefly create a duplicate row.
+        identity = str(getattr(item, "unit_name", "") or source)
+        key = (category, identity)
+        if key in self._stream_seen:
+            return
+        self._stream_seen.add(key)
+        entry = self.l10n.translate(
+            source, category, getattr(item, "source_mod", ""), allow_api=False,
+            locale_key=getattr(item, "locale_key", "") or source,
+            def_locale_key_present=bool(
+                getattr(item, "city_name_localized", "")
+                or getattr(item, "name_localized", "")
+                or getattr(item, "ferry_name_localized", "")
+            ) if category in ("city", "country", "ferry") else True,
+            unit_name=getattr(item, "unit_name", ""),
+        )
+        target_list.append(entry)
+        self._entries.append(entry)
+        self._append_table_row(table, entry)
+        index = {"城市": 0, "国家": 1, "港口": 2, "提示文本": 3}[label]
+        self.tabs.setTabText(index, f"{label} ({len(target_list)})")
+
+    def _append_table_row(self, table: QTableWidget, entry: TranslationEntry) -> None:
+        row = table.rowCount()
+        table.insertRow(row)
+        key_state = ("有" if entry.def_locale_key_present else "缺少 def 字段") + "/" + ("有" if entry.locale_key_present else "缺少 locale")
+        values = (entry.source, entry.translated, entry.source_mod,
+                  self.STATUS_LABELS.get(entry.status, entry.status), key_state)
+        for column, value in enumerate(values):
+            cell = QTableWidgetItem(value)
+            if column != 1:
+                cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+            if column in (1, 3):
+                cell.setForeground(self.STATUS_COLORS.get(entry.status, QColor("#999")))
+            elif column == 4:
+                cell.setForeground(QColor("#16a34a") if entry.def_locale_key_present and entry.locale_key_present else QColor("#dc2626"))
+            table.setItem(row, column, cell)
+
     def _on_extract_done(self, game_data: GameDataResult):
         self.progress_bar.setVisible(False)
         n_c = len(game_data.cities)
@@ -242,24 +330,47 @@ class L10nDialog(QDialog):
             f"提取完成: {n_c}个城市, {n_co}个国家, {n_f}个港口, {n_h}条提示文本"
             + (f", {n_loc}条原生翻译" if n_loc else "")
         )
+        if not any((n_c, n_co, n_f, n_h)):
+            self.status_label.setText(
+                "扫描完成，但当前启用的 Mod 没有可汉化的城市/国家/港口定义；"
+                "天气、车辆、加油站等功能 Mod 不会产生城市列表。"
+            )
 
         self.l10n.set_native_locale(game_data.native_locale_dict)
 
         self.result = L10nResult()
         for c in game_data.cities:
-            e = self.l10n.translate(c.city_name, "city", c.source_mod)
+            source = c.locale_key or c.city_name
+            e = self.l10n.translate(
+                source, "city", c.source_mod, allow_api=False,
+                locale_key=source,
+                def_locale_key_present=bool(c.city_name_localized),
+                unit_name=c.unit_name,
+            )
             self.result.cities.append(e)
             self._entries.append(e)
         for c in game_data.countries:
-            e = self.l10n.translate(c.name, "country", c.source_mod)
+            source = c.locale_key or c.name
+            e = self.l10n.translate(
+                source, "country", c.source_mod, allow_api=False,
+                locale_key=source,
+                def_locale_key_present=bool(c.name_localized),
+                unit_name=c.unit_name,
+            )
             self.result.countries.append(e)
             self._entries.append(e)
         for f in game_data.ferries:
-            e = self.l10n.translate(f.ferry_name, "ferry", f.source_mod)
+            source = f.locale_key or f.ferry_name
+            e = self.l10n.translate(
+                source, "ferry", f.source_mod, allow_api=False,
+                locale_key=source,
+                def_locale_key_present=bool(f.ferry_name_localized),
+                unit_name=f.unit_name,
+            )
             self.result.ferries.append(e)
             self._entries.append(e)
         for h in game_data.hints:
-            e = self.l10n.translate(h.text, "hint", h.source_mod)
+            e = self.l10n.translate(h.text, "hint", h.source_mod, allow_api=False)
             self.result.hints.append(e)
             self._entries.append(e)
 
@@ -295,7 +406,7 @@ class L10nDialog(QDialog):
                 item1.setForeground(self.STATUS_COLORS["local"])
             elif e.status == "api":
                 item1.setForeground(self.STATUS_COLORS["api"])
-            elif e.status in ("pending", "failed"):
+            elif e.status in ("pending", "failed", "missing_locale"):
                 item1.setForeground(self.STATUS_COLORS["failed"])
             table.setItem(i, 1, item1)
 
@@ -307,6 +418,12 @@ class L10nDialog(QDialog):
             item3.setForeground(self.STATUS_COLORS.get(e.status, QColor("#999")))
             item3.setFlags(item3.flags() & ~Qt.ItemIsEditable)
             table.setItem(i, 3, item3)
+
+            key_state = ("有" if e.def_locale_key_present else "缺少 def 字段") + "/" + ("有" if e.locale_key_present else "缺少 locale")
+            item4 = QTableWidgetItem(key_state)
+            item4.setForeground(QColor("#16a34a") if e.def_locale_key_present and e.locale_key_present else QColor("#dc2626"))
+            item4.setFlags(item4.flags() & ~Qt.ItemIsEditable)
+            table.setItem(i, 4, item4)
 
     def _on_cell_double_clicked(self, row, col):
         if col != 1:
@@ -334,7 +451,7 @@ class L10nDialog(QDialog):
                     break
 
     def _do_translate(self):
-        pending = [e for e in self._entries if e.status in ("pending", "failed")]
+        pending = [e for e in self._entries if e.status in ("pending", "failed", "missing_locale")]
         if not pending:
             return
         self.btn_translate.setEnabled(False)
@@ -365,7 +482,7 @@ class L10nDialog(QDialog):
             self.btn_translate.setEnabled(True)
             return
         translated = sum(1 for e in self._entries if e.status == "api")
-        still_failed = sum(1 for e in self._entries if e.status == "failed")
+        still_failed = sum(1 for e in self._entries if e.status in ("failed", "missing_locale"))
         self.status_label.setText(
             f"翻译完成: API翻译{translated}项"
             + (f", 仍有{still_failed}项需手动补全" if still_failed else "")
@@ -417,9 +534,15 @@ class L10nDialog(QDialog):
             for e in lst:
                 if e.status in ("native",):
                     continue
-                new_entry = self.l10n.translate(e.source, e.category, e.source_mod)
+                new_entry = self.l10n.translate(
+                    e.source, e.category, e.source_mod, allow_api=False,
+                    locale_key=e.locale_key,
+                    def_locale_key_present=e.def_locale_key_present,
+                    unit_name=e.unit_name,
+                )
                 e.translated = new_entry.translated
                 e.status = new_entry.status
+                e.locale_key_present = new_entry.locale_key_present
 
         refresh_list(self.result.cities)
         refresh_list(self.result.countries)

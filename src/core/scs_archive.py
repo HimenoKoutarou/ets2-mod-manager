@@ -242,7 +242,10 @@ class ScsArchiveReader:
         b = self.read_bytes(inner_path)
         if b is None:
             return None
-        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        # Map mods frequently contain legacy Cyrillic SII encoded as Windows-
+        # 1251.  Trying cp1252 first silently decodes those bytes as mojibake,
+        # which then prevents city names from matching locale dictionaries.
+        for enc in ("utf-8-sig", "utf-8", "cp1251", "cp1252", "latin-1"):
             try:
                 return b.decode(enc)
             except UnicodeDecodeError:

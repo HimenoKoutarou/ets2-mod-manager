@@ -1,5 +1,6 @@
 """汉化服务层
-四层翻译：mod内置原生 -> 本地字典 -> UFL内置翻译库 -> MyMemory API -> 标红待手动补全
+四层翻译：mod内置原生 -> 本地字典 -> UFL内置翻译库 -> MyMemory API。
+同时区分“没有翻译”和“def 没有 city_name_localized/locale key”。
 """
 from __future__ import annotations
 
@@ -18,9 +19,16 @@ from typing import Dict, List, Optional, Tuple
 class TranslationEntry:
     source: str = ""
     translated: str = ""
-    status: str = "pending"  # "native" / "local" / "ufl" / "api" / "pending" / "failed"
+    status: str = "pending"  # native/local/ufl/api/pending/failed/missing_locale
     source_mod: str = ""
     category: str = "city"
+    # Whether the active target locale already contains this key in the
+    # scanned mod set.  A missing key is different from a missing translation:
+    # the generated localization mod must add the key when it is translated.
+    locale_key_present: bool = False
+    def_locale_key_present: bool = True
+    locale_key: str = ""
+    unit_name: str = ""
 
 
 @dataclass
@@ -40,7 +48,7 @@ class L10nResult:
 
     @property
     def pending_count(self) -> int:
-        return sum(1 for e in self.all_entries if e.status in ("pending", "failed"))
+        return sum(1 for e in self.all_entries if e.status in ("pending", "failed", "missing_locale"))
 
     @property
     def all_entries(self) -> List[TranslationEntry]:
@@ -187,7 +195,11 @@ class L10nService:
         return pairs
 
     def _unescape(self, s: str) -> str:
-        return s.replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+        return (s.replace("\\r", "\r")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\"))
 
     def _locale_to_lang_code(self, locale: str) -> str:
         """将 locale 名转为 MyMemory API 使用的语言代码"""
@@ -203,42 +215,53 @@ class L10nService:
             return "sr"
         return locale.split("_")[0]
 
-    def translate(self, source: str, category: str = "city", source_mod: str = "") -> TranslationEntry:
-        """翻译单个词条"""
+    def translate(self, source: str, category: str = "city", source_mod: str = "",
+                 allow_api: bool = False, *, locale_key: str = "",
+                 def_locale_key_present: bool = True, unit_name: str = "") -> TranslationEntry:
+        """Resolve one entry from local/native dictionaries.
+
+        Online translation is opt-in.  The dialog uses this method while
+        rendering scan results, so the default must never block the GUI on a
+        network request.  ``batch_translate`` is the explicit online path.
+        """
         if not source or not source.strip():
             return TranslationEntry(source=source, status="pending", category=category, source_mod=source_mod)
 
+        locale_key_present = source in self._native_locale_dict
+
+        def entry(status: str, translated: str = "") -> TranslationEntry:
+            return TranslationEntry(
+                source=source,
+                translated=translated,
+                status=status,
+                category=category,
+                source_mod=source_mod,
+                locale_key_present=locale_key_present,
+                def_locale_key_present=def_locale_key_present,
+                locale_key=locale_key or source,
+                unit_name=unit_name,
+            )
+
         # 0. mod 内置原生翻译（最高优先级）
         if source in self._native_locale_dict:
-            return TranslationEntry(
-                source=source, translated=self._native_locale_dict[source],
-                status="native", category=category, source_mod=source_mod
-            )
+            return entry("native", self._native_locale_dict[source])
 
         # 1. 本地字典
         if source in self._local_dict:
-            return TranslationEntry(
-                source=source, translated=self._local_dict[source],
-                status="local", category=category, source_mod=source_mod
-            )
+            return entry("local", self._local_dict[source])
 
         # 2. UFL内置库
         if source in self._ufl_dict:
-            return TranslationEntry(
-                source=source, translated=self._ufl_dict[source],
-                status="ufl", category=category, source_mod=source_mod
-            )
+            return entry("ufl", self._ufl_dict[source])
 
-        # 3. MyMemory API
-        api_result = self._translate_via_api(source)
-        if api_result:
-            return TranslationEntry(
-                source=source, translated=api_result,
-                status="api", category=category, source_mod=source_mod
-            )
+        # 3. MyMemory API (only when explicitly requested by a caller)
+        if allow_api:
+            api_result = self._translate_via_api(source)
+            if api_result:
+                return entry("api", api_result)
 
         # 4. 翻译失败
-        return TranslationEntry(source=source, status="failed", category=category, source_mod=source_mod)
+        return entry("failed" if locale_key_present else "missing_locale")
 
     def _translate_via_api(self, text: str) -> Optional[str]:
         """调用 MyMemory 翻译 API（根据 target_locale 自动确定目标语言）"""
@@ -265,10 +288,14 @@ class L10nService:
             self._local_dict[source] = translated
             self.save_local_dict()
 
-    def batch_translate(self, entries: List[TranslationEntry], progress_callback=None) -> None:
+    def batch_translate(self, entries: List[TranslationEntry], progress_callback=None,
+                        should_stop=None) -> None:
         """批量翻译"""
         total = len(entries)
+        changed = False
         for i, entry in enumerate(entries):
+            if should_stop and should_stop():
+                break
             if progress_callback:
                 progress_callback(i, total, entry.source)
             if entry.status in ("native", "local", "ufl", "api"):
@@ -292,10 +319,28 @@ class L10nService:
                 entry.translated = api_result
                 entry.status = "api"
                 self._local_dict[entry.source] = api_result
+                changed = True
             else:
-                entry.status = "failed"
+                entry.status = "failed" if entry.locale_key_present else "missing_locale"
         if progress_callback:
             progress_callback(total, total, "")
+        if changed:
+            # Persist successful API results so a later scan can resolve them
+            # locally without repeating network calls.
+            try:
+                self.save_local_dict()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _escape_sii(value: str) -> str:
+        """Escape a string for a quoted SII field."""
+        return (str(value or "")
+                .replace("\\", "\\\\")
+                .replace('"', '\\"')
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+                .replace("\t", "\\t"))
 
     def validate_dict_entry(self, key: str, value: str) -> List[str]:
         """校验词典条目，返回错误/警告信息列表。空列表表示通过。"""
@@ -458,26 +503,26 @@ class L10nService:
         lines.append('\t# Cities')
         for e in result.cities:
             if e.translated:
-                lines.append(f'\tkey[]: "{e.source}"')
-                lines.append(f'\tval[]: "{e.translated}"')
+                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
+                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
 
         lines.append('\t# Countries')
         for e in result.countries:
             if e.translated:
-                lines.append(f'\tkey[]: "{e.source}"')
-                lines.append(f'\tval[]: "{e.translated}"')
+                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
+                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
 
         lines.append('\t# Ferries')
         for e in result.ferries:
             if e.translated:
-                lines.append(f'\tkey[]: "{e.source}"')
-                lines.append(f'\tval[]: "{e.translated}"')
+                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
+                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
 
         lines.append('\t# Sign and prompt texts')
         for e in result.hints:
             if e.translated:
-                lines.append(f'\tkey[]: "{e.source}"')
-                lines.append(f'\tval[]: "{e.translated}"')
+                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
+                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
 
         lines.append('}')
         lines.append('}')
@@ -486,7 +531,7 @@ class L10nService:
         manifest = (
             'SiiNunit\n{\nmod_package : .unnamed\n{\n'
             f'\tpackage_version: "1.0"\n'
-            f'\tdisplay_name: "{full_mod_name}"\n'
+            f'\tdisplay_name: "{self._escape_sii(full_mod_name)}"\n'
             f'\tauthor: "ETS2ModManager"\n'
             f'\tcategory[]: "map"\n'
             f'\tdescription_file: "description.txt"\n'

@@ -430,9 +430,23 @@ class _ToolbarMixin:
             QMessageBox.information(self, _("ui.l10n_title"), _("ui.l10n_no_profile"))
             return
 
-        # 获取已启用mod列表（按优先级排序）
+        # 获取已启用 mod 列表（按优先级排序）。如果用户刚在界面中
+        # 做了尚未保存的启用/排序调整，优先使用内存工作列表，避免汉化
+        # 窗口仍然读取 profile.sii 里的旧列表而显示 0 个城市。
+        live_rows = None
         try:
-            active_mods = self.profile_svc.get_active_mods(self.current_profile)
+            profile_key = self._profile_worklist_key(self.current_profile)
+            live_key = getattr(self, "_worklist_profile_key", None)
+            live_worklist = getattr(self, "current_worklist", None)
+            if live_key == profile_key and live_worklist:
+                from services.priority_service import PriorityService
+                active_mods = PriorityService.worklist_to_active(live_worklist)
+                # Keep the actual Mod object when available. Re-resolving a
+                # profile string can fail for Workshop aliases or stale
+                # manifest names, yielding a false empty localization scan.
+                live_rows = [row for row in live_worklist if row.get("enabled")]
+            else:
+                active_mods = self.profile_svc.get_active_mods(self.current_profile)
         except Exception:
             active_mods = []
 
@@ -441,8 +455,25 @@ class _ToolbarMixin:
             QMessageBox.information(self, _("ui.l10n_title"), _("ui.l10n_no_mods"))
             return
 
-        # 构建 (mod_path, display_name) 列表
+        # 构建 (mod_path, display_name) 列表。优先使用工作列表里的真实
+        # Mod 对象，确保刚启用但尚未保存的地图也能被汉化扫描读取。
         mod_list = []
+        if live_rows is not None:
+            for row in live_rows:
+                mod = row.get("mod")
+                package_path = str(getattr(mod, "package_path", "") or "") if mod else ""
+                if not Path(package_path).exists() and mod is not None:
+                    package_path = str(getattr(mod, "_workshop_path", "") or package_path)
+                if package_path and Path(package_path).exists():
+                    title = str(getattr(mod, "display_title", "") or row.get("display_title") or row.get("package_name") or "")
+                    mod_list.append((package_path, title))
+
+        # 兼容尚未建立工作列表的启动阶段，或工作列表中没有绑定 Mod 对象
+        # 的旧缓存条目：退回 profile active_mods 的别名解析逻辑。
+        if not mod_list:
+            mod_list = []
+        else:
+            active_mods = []
         for active_entry in active_mods:
             # profile.sii may store entries as `package_name|display_name`.
             # Only the package portion maps to an on-disk .scs file.

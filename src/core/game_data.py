@@ -17,24 +17,48 @@ from .scs_archive import ScsArchiveReader
 class CityData:
     unit_name: str = ""
     city_name: str = ""
+    city_name_localized: str = ""
     short_name: str = ""
     country: str = ""
     source_mod: str = ""
+
+    @property
+    def locale_key(self) -> str:
+        value = (self.city_name_localized or "").strip()
+        if value.startswith("@@") and value.endswith("@@"):
+            return value[2:-2].strip()
+        return value
 
 
 @dataclass
 class CountryData:
     unit_name: str = ""
     name: str = ""
+    name_localized: str = ""
     country_code: str = ""
     source_mod: str = ""
+
+    @property
+    def locale_key(self) -> str:
+        value = (self.name_localized or "").strip()
+        if value.startswith("@@") and value.endswith("@@"):
+            return value[2:-2].strip()
+        return value
 
 
 @dataclass
 class FerryData:
     unit_name: str = ""
     ferry_name: str = ""
+    ferry_name_localized: str = ""
     source_mod: str = ""
+
+    @property
+    def locale_key(self) -> str:
+        value = (self.ferry_name_localized or "").strip()
+        if value.startswith("@@") and value.endswith("@@"):
+            return value[2:-2].strip()
+        return value
 
 
 @dataclass
@@ -62,6 +86,52 @@ class FileWithPriority:
     file_text: str
     source_mod: str
     priority: int
+
+
+def _expand_mod_sources(mod_path: str | Path) -> List[Path]:
+    """Return readable package roots for a mod path.
+
+    Steam Workshop stores one item as a directory containing one or more
+    variant directories (for example ``alt``/``neu`` or ``universal``).  The
+    scanner may intentionally keep the Workshop root as ``package_path``;
+    treating that root as a package makes localization see no ``def`` files.
+    Expand only when the root itself is not a package, preserving normal local
+    directory mods and archive files.
+    """
+    path = Path(mod_path)
+    if not path.is_dir():
+        return [path]
+    if (path / "def").is_dir() or (path / "manifest.sii").is_file():
+        return [path]
+    children: List[Path] = []
+    try:
+        for child in sorted(path.iterdir(), key=lambda p: p.name.casefold()):
+            if not child.is_dir():
+                continue
+            if (child / "def").is_dir() or (child / "manifest.sii").is_file():
+                children.append(child)
+    except OSError:
+        return [path]
+    if not children:
+        return [path]
+
+    # Workshop keeps historical builds next to a ``latest`` package. Only the
+    # selected/current package should participate in localization.
+    latest = next((child for child in children if child.name.casefold() == "latest"), None)
+    if latest is not None:
+        return [latest]
+
+    numeric = []
+    for child in children:
+        match = re.match(r"^(\d+)(?:_content)?$", child.name, re.IGNORECASE)
+        if match:
+            numeric.append((int(match.group(1)), child))
+    if numeric:
+        return [max(numeric, key=lambda item: item[0])[1]]
+    universal = next((child for child in children if child.name.casefold() == "universal"), None)
+    if universal is not None:
+        return [universal]
+    return [children[0]]
 
 
 def _is_l10n_def_path(path: str) -> bool:
@@ -125,6 +195,7 @@ def _extract_cities_from_text(text: str, source_mod: str) -> List[CityData]:
         c = CityData(
             unit_name=u.unit_name,
             city_name=u.get("city_name", "") or "",
+            city_name_localized=u.get("city_name_localized", "") or "",
             short_name=u.get("short_city_name", "") or "",
             country=u.get("country", "") or "",
             source_mod=source_mod,
@@ -143,6 +214,7 @@ def _extract_countries_from_text(text: str, source_mod: str) -> List[CountryData
         c = CountryData(
             unit_name=u.unit_name,
             name=u.get("name", "") or "",
+            name_localized=u.get("name_localized", "") or "",
             country_code=u.get("country_code", "") or "",
             source_mod=source_mod,
         )
@@ -160,6 +232,7 @@ def _extract_ferries_from_text(text: str, source_mod: str) -> List[FerryData]:
         f = FerryData(
             unit_name=u.unit_name,
             ferry_name=u.get("ferry_name", "") or "",
+            ferry_name_localized=u.get("ferry_name_localized", "") or "",
             source_mod=source_mod,
         )
         if f.ferry_name:
@@ -368,90 +441,67 @@ def collect_all_def_files(
         if progress:
             progress(priority, len(active_mods), display_name or mod_path)
         source_mod = display_name or mod_path
-        tmp_root = None
-        try:
-            reader = ScsArchiveReader(mod_path)
-        except Exception:
-            continue
-
-        if reader._mode == "external":
-            # Encrypted packages cannot be enumerated by ScsArchiveReader.
-            # SCS# can be fully extracted, but encrypted ZIP/AEM packages
-            # (such as RhinelandMap) must be listed with SXC and read one file
-            # at a time. The old code attempted only full SCS# extraction and
-            # silently dropped encrypted ZIP maps, which left localization
-            # with cities from just one selected map.
-            try:
-                from services.external_extractor_service import (
-                    extract_l10n_tree_to_directory,
-                )
-                tmp_root = Path(tempfile.mkdtemp(prefix="ets2mm_l10n_"))
-                if extract_l10n_tree_to_directory(
-                    mod_path, tmp_root, target_locale=target_locale,
-                    should_stop=should_stop,
-                ):
-                    reader.close()
-                    reader = ScsArchiveReader(tmp_root)
-                else:
-                    shutil.rmtree(tmp_root, ignore_errors=True)
-                    reader.close()
-                    continue
-            except Exception:
-                reader.close()
-                continue
-
-        all_files: List[str] = []
-        if reader._mode == "zip" and reader._zf:
-            all_files = reader._zf.namelist()
-        elif reader._mode == "dir":
-            def _walk_dir(base_dir, prefix=""):
-                results = []
-                for p in base_dir.iterdir():
-                    rel = f"{prefix}/{p.name}" if prefix else p.name
-                    if p.is_dir():
-                        results.extend(_walk_dir(p, rel))
-                    elif p.is_file():
-                        results.append(rel)
-                return results
-            all_files = _walk_dir(reader.path)
-
-        locale_pattern = re.compile(r"^locale/([^/]+)/local_module\.[^/]+\.sii$", re.IGNORECASE)
-
-        for fname in all_files:
+        for source_path in _expand_mod_sources(mod_path):
             if should_stop and should_stop():
+                return def_files_dict, native_locale_by_lang
+            tmp_root = None
+            try:
+                reader = ScsArchiveReader(source_path)
+            except Exception:
+                continue
+            try:
+                if reader._mode == "external":
+                    from services.external_extractor_service import extract_l10n_tree_to_directory
+                    tmp_root = Path(tempfile.mkdtemp(prefix="ets2mm_l10n_"))
+                    if extract_l10n_tree_to_directory(
+                        source_path, tmp_root, target_locale=target_locale,
+                        should_stop=should_stop,
+                    ):
+                        reader.close()
+                        reader = ScsArchiveReader(tmp_root)
+                    else:
+                        continue
+
+                if reader._mode == "zip" and reader._zf:
+                    all_files = reader._zf.namelist()
+                elif reader._mode == "dir":
+                    all_files = [
+                        p.relative_to(reader.path).as_posix()
+                        for p in reader.path.rglob("*") if p.is_file()
+                    ]
+                else:
+                    all_files = []
+                locale_pattern = re.compile(
+                    r"^locale/([^/]+)/local_module\.[^/]+\.sii$", re.IGNORECASE
+                )
+                for fname in all_files:
+                    if should_stop and should_stop():
+                        return def_files_dict, native_locale_by_lang
+                    fname_norm = fname.replace("\\", "/")
+                    if _is_l10n_def_path(fname_norm):
+                        if fname_norm not in def_files_dict:
+                            text = reader.read_text(fname_norm)
+                            if text is not None:
+                                def_files_dict[fname_norm] = FileWithPriority(
+                                    file_path=fname_norm,
+                                    file_text=text,
+                                    source_mod=source_mod,
+                                    priority=priority,
+                                )
+                    else:
+                        match = locale_pattern.match(fname_norm)
+                        if match:
+                            lang = match.group(1).lower()
+                            values = native_locale_by_lang.setdefault(lang, {})
+                            text = reader.read_text(fname_norm)
+                            if text:
+                                for key, value in _parse_localization_db(text):
+                                    if key and value and key not in values:
+                                        values[key] = value
+            finally:
                 reader.close()
                 if tmp_root is not None:
                     shutil.rmtree(tmp_root, ignore_errors=True)
-                return def_files_dict, native_locale_by_lang
-            # Extractor output on Windows uses backslashes; normalize before
-            # applying game-relative `def/` and `locale/` patterns.
-            fname_norm = fname.replace("\\", "/")
-            lower = fname_norm.lower()
-            if _is_l10n_def_path(fname_norm):
-                if fname_norm not in def_files_dict:
-                    text = reader.read_text(fname_norm)
-                    if text is not None:
-                        def_files_dict[fname_norm] = FileWithPriority(
-                            file_path=fname_norm,
-                            file_text=text,
-                            source_mod=source_mod,
-                            priority=priority,
-                        )
-            else:
-                m = locale_pattern.match(fname_norm)
-                if m:
-                    lang = m.group(1).lower()
-                    if lang not in native_locale_by_lang:
-                        native_locale_by_lang[lang] = {}
-                    text = reader.read_text(fname_norm)
-                    if text:
-                        for k, v in _parse_localization_db(text):
-                            if k and v and k not in native_locale_by_lang[lang]:
-                                native_locale_by_lang[lang][k] = v
-
-        reader.close()
-        if tmp_root is not None:
-            shutil.rmtree(tmp_root, ignore_errors=True)
 
     return def_files_dict, native_locale_by_lang
 
@@ -462,6 +512,7 @@ def _parse_sii_base_with_infix(
     city_units: Dict[str, CityData],
     country_units: Dict[str, CountryData],
     ferry_units: Dict[str, FerryData],
+    item_callback=None,
 ):
     """
     按游戏加载顺序解析 def/{base_name}.sii + def/{base_name}.*.sii
@@ -503,32 +554,45 @@ def _parse_sii_base_with_infix(
                         for c in _extract_cities_from_text(inc_text, inc_source):
                             if c.unit_name:
                                 city_units[c.unit_name] = c
+                                if item_callback:
+                                    item_callback("city", c)
                     elif base_name == "country":
                         for c in _extract_countries_from_text(inc_text, inc_source):
                             if c.unit_name:
                                 country_units[c.unit_name] = c
+                                if item_callback:
+                                    item_callback("country", c)
                     elif base_name == "ferry":
                         for f in _extract_ferries_from_text(inc_text, inc_source):
                             if f.unit_name:
                                 ferry_units[f.unit_name] = f
+                                if item_callback:
+                                    item_callback("ferry", f)
 
         if base_name == "city":
             for c in _extract_cities_from_text(text, source_mod):
                 if c.unit_name:
                     city_units[c.unit_name] = c
+                    if item_callback:
+                        item_callback("city", c)
         elif base_name == "country":
             for c in _extract_countries_from_text(text, source_mod):
                 if c.unit_name:
                     country_units[c.unit_name] = c
+                    if item_callback:
+                        item_callback("country", c)
         elif base_name == "ferry":
             for f in _extract_ferries_from_text(text, source_mod):
                 if f.unit_name:
                     ferry_units[f.unit_name] = f
+                    if item_callback:
+                        item_callback("ferry", f)
 
 
 def parse_from_merged_files(
     merged_def_files: Dict[str, FileWithPriority],
     native_locale: Dict[str, str],
+    item_callback=None,
 ) -> GameDataResult:
     """
     从已经按优先级合并好的def文件中，解析出城市/国家/港口数据 + 翻译字典
@@ -545,9 +609,9 @@ def parse_from_merged_files(
     ferry_units: Dict[str, FerryData] = {}
     hint_units: Dict[str, HintTextData] = {}
 
-    _parse_sii_base_with_infix(merged_def_files, "city", city_units, country_units, ferry_units)
-    _parse_sii_base_with_infix(merged_def_files, "country", city_units, country_units, ferry_units)
-    _parse_sii_base_with_infix(merged_def_files, "ferry", city_units, country_units, ferry_units)
+    _parse_sii_base_with_infix(merged_def_files, "city", city_units, country_units, ferry_units, item_callback)
+    _parse_sii_base_with_infix(merged_def_files, "country", city_units, country_units, ferry_units, item_callback)
+    _parse_sii_base_with_infix(merged_def_files, "ferry", city_units, country_units, ferry_units, item_callback)
 
     # Encrypted/custom maps often keep readable leaf definitions under
     # def/city/*.sui, def/country/*.sui, etc., while their index .sii files are
@@ -566,14 +630,22 @@ def parse_from_merged_files(
             for c in _extract_cities_from_text(text, fw.source_mod):
                 if c.unit_name:
                     city_units[c.unit_name] = c
+                    if item_callback:
+                        item_callback("city", c)
             for c in _extract_countries_from_text(text, fw.source_mod):
                 if c.unit_name:
                     country_units[c.unit_name] = c
+                    if item_callback:
+                        item_callback("country", c)
             for f in _extract_ferries_from_text(text, fw.source_mod):
                 if f.unit_name:
                     ferry_units[f.unit_name] = f
+                    if item_callback:
+                        item_callback("ferry", f)
             for hint in _extract_hint_texts_from_text(text, fw.source_mod):
                 hint_units.setdefault(hint.text, hint)
+                if item_callback:
+                    item_callback("hint", hint)
         except Exception:
             continue
 
@@ -601,6 +673,7 @@ def extract_game_data_for_active_mods(
     target_locale: str = "zh_cn",
     should_stop=None,
     progress=None,
+    item_callback=None,
 ) -> GameDataResult:
     """
     生产环境主入口
@@ -615,5 +688,5 @@ def extract_game_data_for_active_mods(
     if should_stop and should_stop():
         return GameDataResult()
     native_locale = locales_by_lang.get(target_locale, {})
-    result = parse_from_merged_files(def_files, native_locale)
+    result = parse_from_merged_files(def_files, native_locale, item_callback=item_callback)
     return result
