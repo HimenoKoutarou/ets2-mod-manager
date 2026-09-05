@@ -172,7 +172,7 @@ def test_lookup_accepts_workshop_profile_display_alias():
 
 def test_priority_category_block_preserves_order():
     svc = PriorityService([])
-    wl = svc.build_worklist(["A", "X", "B", "Y"], ["A", "X", "B", "Y"])
+    wl = svc.build_worklist(["Y", "B", "X", "A"], ["A", "X", "B", "Y"])
     moved = svc.move_bottom_by_package_set(wl, {"A", "B"})
     assert [e["package_name"] for e in moved if e["enabled"]] == ["X", "Y", "A", "B"]
 
@@ -302,6 +302,17 @@ def test_category_count_preserves_duplicate_alias_rows():
         assert ui._category_worklist_count("test") == 2
 
 
+def test_unresolved_worklist_rows_count_as_uncategorized():
+    ui = _FakeMain([], [])
+    ui.current_worklist = [
+        {"package_name": "missing-a", "enabled": False},
+        {"package_name": "missing-b", "enabled": False},
+    ]
+    with patch("services.category_service.all_folders", return_value=[]), \
+            patch("services.category_service.mods_in_category", return_value=set()):
+        assert ui._category_worklist_count("") == 2
+
+
 def test_active_table_renders_folder_group_and_expands_selection():
     mods = [_mod("A", "Maps"), _mod("B", "Maps"), _mod("C", "")]
     wl = [
@@ -368,6 +379,7 @@ def main() -> int:
         test_mod_table_drag_preserves_duplicate_package_rows,
         test_stale_deleted_folder_records_count_as_uncategorized,
         test_category_count_preserves_duplicate_alias_rows,
+        test_unresolved_worklist_rows_count_as_uncategorized,
         test_active_table_renders_folder_group_and_expands_selection,
         test_mod_table_drag_preserves_hidden_rows,
     ]

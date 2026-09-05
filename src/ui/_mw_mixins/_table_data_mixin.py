@@ -40,8 +40,19 @@ from core.models import Mod
 
 
 class _TableDataMixin:
+    @staticmethod
+    def _canonical_mod_lookup_key(value: object) -> str:
+        import re as _re_key
+        text = str(value or "").split("|", 1)[0].strip()
+        return _re_key.sub(
+            r"_(workshop|copy\d*|local)$", "", text,
+            flags=_re_key.IGNORECASE,
+        ).casefold()
+
     def _build_mod_index(self, mods):
         idx: Dict[str, Mod] = {}
+        canonical_idx: Dict[str, Mod] = {}
+        title_idx: Dict[str, Mod] = {}
         import re as _re_idx
         for m in mods:
             # 主：manifest.package_name 左段
@@ -58,6 +69,25 @@ class _TableDataMixin:
             stripped = _re_idx.sub(r"_(workshop|copy\d*|local)$", "", m.mod_id) if m.mod_id else ""
             if stripped and stripped != m.mod_id and stripped.isdigit():
                 idx.setdefault(stripped, m)
+            mf = getattr(m, "manifest", None)
+            for title in (
+                getattr(mf, "display_name", "") if mf else "",
+                getattr(m, "display_title", ""),
+            ):
+                title_key = str(title or "").strip().casefold()
+                if title_key and not title_key.isdigit():
+                    title_idx.setdefault(title_key, m)
+            for alias in (
+                getattr(m, "mod_id", ""),
+                getattr(mf, "package_name", "") if mf else "",
+                getattr(mf, "display_name", "") if mf else "",
+                getattr(m, "display_title", ""),
+            ):
+                canonical = self._canonical_mod_lookup_key(alias)
+                if canonical:
+                    canonical_idx.setdefault(canonical, m)
+        self._all_mods_by_canonical = canonical_idx
+        self._all_mods_by_title = title_idx
         return idx
 
     def _lookup_mod(self, pkg: str) -> Optional["Mod"]:
@@ -85,41 +115,27 @@ class _TableDataMixin:
         s_pkg = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", pkg)
         if s_pkg and s_pkg != pkg and s_pkg in index:
             return index[s_pkg]
-        if (left.isdigit() or s_left.isdigit() or s_pkg.isdigit() or pkg.isdigit()):
-            target_num = left if left.isdigit() else (s_left if s_left.isdigit() else (s_pkg if s_pkg.isdigit() else pkg))
-            seen_mod_objects = set()
-            for m_ in index.values():
-                marker = id(m_)
-                if marker in seen_mod_objects:
-                    continue
-                seen_mod_objects.add(marker)
-                ms = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", m_.mod_id) if m_.mod_id else ""
-                mp = getattr(getattr(m_, "manifest", None), "package_name", "") or ""
-                mp_left = mp.split("|", 1)[0].strip()
-                if ms == target_num or mp_left == target_num:
-                    return m_
-
-        # Last-resort canonical matching.  Do not add these aliases to
-        # all_mods_by_pkg (that mapping is also used to build table rows).
-        def _canon(value: object) -> str:
-            value = str(value or "").split("|", 1)[0].strip()
-            value = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", value,
-                               flags=_re_lu.IGNORECASE)
-            return value.casefold()
-
-        target = _canon(pkg)
-        if target:
-            candidates = getattr(self, "all_mods", None) or []
-            for m_ in candidates:
-                mf = getattr(m_, "manifest", None)
-                keys = (
-                    getattr(m_, "mod_id", ""),
-                    getattr(mf, "package_name", "") if mf else "",
-                    getattr(mf, "display_name", "") if mf else "",
-                    getattr(m_, "display_title", ""),
-                )
-                if any(_canon(key) == target for key in keys if key):
-                    return m_
+        m_legacy = _re_lu.fullmatch(
+            r"mod_workshop_package\.0*([0-9a-f]{1,8})",
+            left,
+            flags=_re_lu.IGNORECASE,
+        )
+        if m_legacy:
+            try:
+                legacy_ws_id = str(int(m_legacy.group(1), 16))
+            except ValueError:
+                legacy_ws_id = ""
+            if legacy_ws_id and legacy_ws_id in index:
+                return index[legacy_ws_id]
+        target = self._canonical_mod_lookup_key(pkg)
+        canonical_index = getattr(self, "_all_mods_by_canonical", None) or {}
+        resolved = canonical_index.get(target) if target else None
+        if resolved is not None:
+            return resolved
+        if "|" in str(pkg):
+            title = str(pkg).split("|", 1)[1].strip().casefold()
+            if title:
+                return (getattr(self, "_all_mods_by_title", None) or {}).get(title)
         return None
 
     def _render_current_worklist(self) -> None:
@@ -444,7 +460,7 @@ class _TableDataMixin:
             finally:
                 t.setUpdatesEnabled(True)
                 t.blockSignals(False)
-        self._profile_table_pending_key = self._worklist_profile_key(self.current_profile)
+        self._profile_table_pending_key = self._profile_worklist_key(self.current_profile)
         specs = self._profile_row_specs(table is self.table_active)
         state = {"pos": 0, "specs": specs, "table": table, "token": int(token)}
 
@@ -473,8 +489,15 @@ class _TableDataMixin:
                 self._refresh_status_after_change()
             except Exception:
                 pass
+            if getattr(self, "_profile_render_pump", None) is pump:
+                self._profile_render_pump = None
             self.statusBar().showMessage("存档已切换", 2500)
 
+        # Keep the Python callback alive for the whole batched render. Some
+        # PySide6 builds do not reliably retain a local callable passed to the
+        # static singleShot overload after this method returns, leaving both
+        # tables empty even though current_worklist is populated.
+        self._profile_render_pump = pump
         QTimer.singleShot(0, pump)
 
     def _profile_row_specs(self, active_table: bool) -> list:
@@ -1007,8 +1030,15 @@ class _TableDataMixin:
                 identity = str(getattr(mod, "mod_id", "") or _canon(pkg))
             else:
                 identity = _canon(pkg)
-                if not identity or identity not in cached_ids:
+                if not identity:
                     continue
+                if identity not in cached_ids:
+                    # A worklist row that cannot currently be resolved to a
+                    # scanned Mod has no reliable folder metadata. Keep it
+                    # visible in Uncategorized so category totals never lose
+                    # rows compared with the All Mods count.
+                    if cat_key != "":
+                        continue
             # Category operations should act once per real Mod. Statistics
             # pass dedupe=False so the displayed row count remains additive
             # even when a profile temporarily contains alias rows.
@@ -1460,7 +1490,7 @@ class _TableDataMixin:
         self._sync_worklist_from_table()
         if not self._ensure_backup_before_save():
             return
-        new_active = PriorityService.worklist_to_active(self.current_worklist)
+        new_active = PriorityService.worklist_to_profile_active(self.current_worklist)
         dirty_note = "（* 有未保存的优先级/启用变更）" if getattr(self, "_dirty_priority", False) else ""
         ret = QMessageBox.question(
             self, _("dlg.save_confirm_title"),
@@ -1632,16 +1662,21 @@ class _TableDataMixin:
         """Write counts for currently scanned/profile-visible Mods only."""
         try:
             categories = [""] + list(self._cat_items.keys())
-            st = {
-                category: self._category_worklist_count(category)
-                for category in categories
-            }
+            total = len(getattr(self, "current_worklist", []) or [])
+            if not total:
+                total = len(getattr(self, "all_mods", []) or [])
+            # Every worklist row must belong to exactly one visible bucket.
+            # Resolve custom folders first, then assign the residual rows to
+            # Uncategorized. This keeps the displayed category sum equal to
+            # All Mods even when a stale/empty profile key cannot resolve to a
+            # scanned Mod object.
+            st = {category: 0 for category in categories}
+            for category in categories[1:]:
+                st[category] = self._category_worklist_count(category)
+            st[""] = max(0, total - sum(st.values()))
             was_updating = getattr(self, "_updating_category_checks", False)
             self._updating_category_checks = True
             try:
-                total = len(getattr(self, "current_worklist", []) or [])
-                if not total:
-                    total = len(getattr(self, "all_mods", []) or [])
                 self._cat_item_all.setText(0, _("ui.cat_all") + f"  ({total})")
                 self._cat_item_uncategorized.setText(0, _("ui.cat_uncategorized") + f"  ({st.get('', 0)})")
                 for ck, it in self._cat_items.items():
@@ -1819,6 +1854,9 @@ class _TableDataMixin:
                 active = list(getattr(prof, "active_mods", []) or [])
             except Exception:
                 active = []
+        # profile.sii stores low -> high priority; present the dialog like the
+        # main table, with the highest-priority Mod at the top.
+        active.reverse()
         if not active:
             QMessageBox.information(
                 self, _("dlg.lo_title"),
