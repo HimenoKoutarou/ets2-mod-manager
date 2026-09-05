@@ -1,7 +1,7 @@
 """城市反查 mod 服务
 
 按优先级扫描已启用 mod 的 def/city*.sii，建立 {city_name: [来源mod...]} 反向索引。
-priority_index 升序 = 优先级从高到低（ETS2: active_mods[0] 优先级最高，覆盖后面）。
+priority_index 升序 = UI 优先级从高到低；profile.sii 的 active_mods 顺序与此相反。
 索引缓存到 assets/cache/city_index.json，启用 mod 集合变化时增量重建。
 """
 from __future__ import annotations
@@ -30,7 +30,7 @@ class CityHit:
     mod_id: str = ""           # 来源 mod 的 mod_id
     mod_title: str = ""        # 来源 mod 的展示名
     package_path: str = ""     # 来源 mod 磁盘路径
-    priority_index: int = -1   # 在 active_mods 中的位置（越小优先级越高）
+    priority_index: int = -1   # UI 优先级位置（越小优先级越高）
 
 
 @dataclass
@@ -168,7 +168,8 @@ class CityLookupService:
         """重新扫描已启用 mod 列表建立索引。
 
         Args:
-            enabled_mods: 已启用 mod 列表（按 priority_index 升序，priority_index 越小优先级越高）
+            enabled_mods: 已启用 mod 列表（按 UI priority_index 升序，越小优先级越高）。
+                实际扫描从列表底部到顶部，最后扫描最高优先级 Mod。
             progress_cb: 可选回调 (current, total, mod_title) 用于 UI 进度显示
 
         性能：对每个 mod 只打开一次 ScsArchiveReader，复用 _find_city_files + parse_sii。
@@ -179,7 +180,9 @@ class CityLookupService:
         index.built_at = time.time()
 
         total = len(enabled_mods)
-        for i, mod in enumerate(enabled_mods):
+        # UI order is high -> low. Scan low -> high so progress and archive
+        # access follow the game's override direction.
+        for i, mod in enumerate(reversed(enabled_mods)):
             if progress_cb:
                 try:
                     progress_cb(i, total, mod.display_title)

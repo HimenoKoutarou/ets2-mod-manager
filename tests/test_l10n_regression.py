@@ -208,6 +208,14 @@ def main() -> int:
         assert len(parsed.cities) == 1
         assert parsed.cities[0].city_name_localized == "@@High@@"
 
+        # The archive scanner visits the UI list from bottom to top.
+        scan_order = []
+        collect_all_def_files(
+            [(str(high), "High"), (str(low), "Low")],
+            progress=lambda _cur, _total, name: scan_order.append(name),
+        )
+        assert scan_order == ["Low", "High"]
+
         # The same unit can also be declared under different def paths.
         # Priority must still win over traversal/path order.
         with zipfile.ZipFile(high, "w") as zf:

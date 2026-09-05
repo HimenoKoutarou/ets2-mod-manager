@@ -68,11 +68,6 @@ class _ToolbarMixin:
         self.tree_profiles.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_profiles.customContextMenuRequested.connect(self._on_tree_profile_menu)
         lv.addWidget(self.tree_profiles, 2)
-        # 加载顺序按钮
-        self.btn_load_order = QPushButton(_("ui.btn_load_order"))
-        self.btn_load_order.setCursor(Qt.PointingHandCursor)
-        self.btn_load_order.clicked.connect(self._show_load_order_dialog)
-        lv.addWidget(self.btn_load_order)
 
         # (2) 📂 分类文件夹树（资源管理器风格文件夹视图）
         self.gb_categories = QGroupBox(_("ui.gb_categories"))
@@ -383,7 +378,8 @@ class _ToolbarMixin:
         except Exception:
             enabled_mods = []
 
-        # 按 priority_index 升序（保证扫描顺序与游戏加载顺序一致）
+        # UI priority_index 升序用于排序；城市扫描服务会从列表底部到顶部
+        # 扫描，确保最高优先级 Mod 最后处理并覆盖低优先级定义。
         enabled_mods.sort(key=lambda m: getattr(m, "priority_index", 1 << 30))
 
         try:
@@ -446,7 +442,9 @@ class _ToolbarMixin:
                 # manifest names, yielding a false empty localization scan.
                 live_rows = [row for row in live_worklist if row.get("enabled")]
             else:
-                active_mods = self.profile_svc.get_active_mods(self.current_profile)
+                active_mods = list(reversed(
+                    self.profile_svc.get_active_mods(self.current_profile)
+                ))
         except Exception:
             active_mods = []
 
@@ -933,7 +931,7 @@ class _ToolbarMixin:
         first_with_mods: object | None = None
         first_any: object | None = None
         for p in self.profiles:
-            name = p.display_name or p.save_name or "正在读取存档名称…"
+            name = p.display_name or p.save_name or p.profile_id
             count = int(getattr(p, "mod_count", 0) or 0)
             label = f"{name}（本地，已启用 {count} 个 Mod）"
             it = QTreeWidgetItem([label])
@@ -956,13 +954,19 @@ class _ToolbarMixin:
             self.tree_profiles.setCurrentItem(first_any)
             if self.current_profile is not first_any.data(0, Qt.UserRole):
                 self._on_tree_profile_selected()
-        # 异步后台填充 display_name/company_name 并刷新树节点标签
-        self._enrich_profiles_async()
+        # Profile 内容按选择读取。启动时不再解密全部 Profile，避免与当前
+        # Profile 的读取线程争用磁盘并重复解析同一个 profile.sii。
 
     def _set_profile_editable_state(self, prof) -> None:
         """Make non-local profiles read-only without disabling browsing."""
         editable = bool(prof is not None and getattr(prof, "location", "") == "local")
+        previous = getattr(self, "_profile_editable", None)
         self._profile_editable = editable
+        # Switching between two local profiles does not change any edit
+        # affordance. Reapplying flags to every cell in both large tables took
+        # more than ten seconds on real 800-row profiles and froze the window.
+        if previous is not None and bool(previous) == editable:
+            return
         for widget in (getattr(self, "table_all", None), getattr(self, "table_active", None)):
             if widget is not None:
                 try:
@@ -1176,7 +1180,7 @@ class _ToolbarMixin:
         )
 
     def _move_mod_to_bottom(self, mod_id: str) -> None:
-        """将指定 mod 移到 active_mods 末尾（加载顺序最底）→ set_active_mods + 刷新。
+        """将指定 mod 移到最低优先级（profile active_mods 的开头）。
         由 CrashCheckDialog.signals.move_to_bottom_requested(str) 触发。"""
         if not mod_id:
             return
@@ -1198,10 +1202,10 @@ class _ToolbarMixin:
             idx = active.index(entry)
         except ValueError:
             return
-        if idx == len(active) - 1:
+        if idx == 0:
             return  # 已在最底
         active.pop(idx)
-        active.append(entry)
+        active.insert(0, entry)
         # P2 async priority: memory-only + dirty, user must click 保存
         self._sync_worklist_from_table()
         try:
@@ -1210,7 +1214,7 @@ class _ToolbarMixin:
                 self.current_worklist = rebuild
         except Exception:
             pass
-        try: self._mark_priority_dirty("已将崩溃嫌疑 mod 移到加载最末尾 · 请点工具栏「保存」写回 profile")
+        try: self._mark_priority_dirty("已将崩溃嫌疑 mod 移到最低优先级（最先加载）· 请点工具栏「保存」写回 profile")
         except Exception: pass
         try:
             self._render_current_worklist()
@@ -1218,7 +1222,7 @@ class _ToolbarMixin:
             pass
         QMessageBox.information(
             self, "已移动（未保存）",
-            f"已将 mod 移至加载顺序最底: {mod_id}。所有变更都还在内存中，\n"
+            f"已将 mod 移至最低优先级（最先加载）: {mod_id}。所有变更都还在内存中，\n"
             f"请点工具栏「保存 ▼」→「保存 profile」后才真正写回游戏 profile。"
         )
 

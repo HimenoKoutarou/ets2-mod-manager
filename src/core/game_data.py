@@ -448,7 +448,9 @@ def collect_all_def_files(
     progress=None,
 ) -> Tuple[Dict[str, FileWithPriority], Dict[str, Dict[str, str]]]:
     """
-    扫描所有已启用mod，收集def文件和locale翻译文件，路径冲突时保留最高优先级mod的版本
+    扫描所有已启用mod，收集def文件和locale翻译文件。
+    输入列表按 UI 顺序排列（0 为最高优先级），实际扫描从最低优先级到最高优先级，
+    让高优先级 Mod 最后覆盖低优先级内容。
 
     Args:
         active_mods: [(mod_path, display_name), ...] 已按优先级排序（0为最高）
@@ -460,11 +462,15 @@ def collect_all_def_files(
     def_files_dict: Dict[str, FileWithPriority] = {}
     native_locale_by_lang: Dict[str, Dict[str, str]] = {}
 
-    for priority, (mod_path, display_name) in enumerate(active_mods):
+    total_mods = len(active_mods)
+    # UI order is high -> low; filesystem/game merge order is low -> high.
+    for scan_index, (priority, (mod_path, display_name)) in enumerate(
+        reversed(list(enumerate(active_mods)))
+    ):
         if should_stop and should_stop():
             break
         if progress:
-            progress(priority, len(active_mods), display_name or mod_path)
+            progress(scan_index, total_mods, display_name or mod_path)
         source_mod = display_name or mod_path
         for source_path in _expand_mod_sources(mod_path):
             if should_stop and should_stop():
@@ -502,9 +508,13 @@ def collect_all_def_files(
                     read_name = fname
                     fname_norm = fname.replace("\\", "/").lstrip("./")
                     if _is_l10n_def_path(fname_norm):
-                        if fname_norm not in def_files_dict:
-                            text = reader.read_text(read_name)
-                            if text is not None:
+                        text = reader.read_text(read_name)
+                        if text is not None:
+                            existing = def_files_dict.get(fname_norm)
+                            # Lower numeric priority means higher UI priority.
+                            # Since we scan low -> high, the later entry wins;
+                            # keep the explicit comparison for robustness.
+                            if existing is None or priority <= existing.priority:
                                 def_files_dict[fname_norm] = FileWithPriority(
                                     file_path=fname_norm,
                                     file_text=text,
@@ -524,9 +534,10 @@ def collect_all_def_files(
                             text = reader.read_text(read_name)
                             if text:
                                 for key, value in _parse_localization_db(text):
-                                    # An empty value from a higher-priority
-                                    # Mod must also shadow lower-priority data.
-                                    if key and key not in values:
+                                    # Higher-priority content is scanned later,
+                                    # so it must replace lower-priority values,
+                                    # including an explicitly empty value.
+                                    if key:
                                         values[key] = value
             finally:
                 reader.close()
