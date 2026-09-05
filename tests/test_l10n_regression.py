@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from services.l10n_service import L10nService, TranslationEntry
+from core.models import Mod, ModManifest
+from ui._mw_mixins._toolbar_mixin import _is_l10n_candidate_mod
 from core.game_data import (
     _expand_mod_sources,
     _extract_cities_from_text,
@@ -222,6 +224,29 @@ def main() -> int:
         with zipfile.ZipFile(no_def, "w") as zf:
             zf.writestr("manifest.sii", "SiiNunit {}")
         assert _source_has_def_tree(no_def) is False
+
+        promods_component = Mod(
+            mod_id="promods-eu-model1-v282",
+            package_path=str(no_def),
+            package_type="scs",
+            manifest=ModManifest(
+                package_name="promods-eu-model1-v282",
+                display_name="ProMods Europe Models",
+                categories=["models"],
+            ),
+        )
+        assert _is_l10n_candidate_mod(promods_component) is True
+        truck_mod = Mod(
+            mod_id="truck-skin-pack",
+            package_path=str(no_def),
+            package_type="scs",
+            manifest=ModManifest(
+                package_name="truck-skin-pack",
+                display_name="Truck Skin Pack",
+                categories=["truck"],
+            ),
+        )
+        assert _is_l10n_candidate_mod(truck_mod) is False
 
         directory_mod = Path(tmp) / "directory_mod"
         (directory_mod / "def" / "city").mkdir(parents=True)

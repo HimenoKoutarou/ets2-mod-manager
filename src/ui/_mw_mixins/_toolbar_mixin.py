@@ -44,6 +44,33 @@ from ui.crash_check_dialog import CrashCheckDialog
 import weakref
 
 
+def _is_l10n_candidate_mod(mod) -> bool:
+    """Keep map projects even when component manifests use non-map categories."""
+    manifest = getattr(mod, "manifest", None)
+    categories = {
+        str(value or "").strip().casefold()
+        for value in getattr(manifest, "categories", [])
+        if str(value or "").strip()
+    }
+    if not categories or any(value == "map" or value.startswith("map_") for value in categories):
+        return True
+
+    names = " ".join(
+        str(value or "")
+        for value in (
+            getattr(manifest, "display_name", ""),
+            getattr(manifest, "package_name", ""),
+            getattr(mod, "mod_id", ""),
+            Path(str(getattr(mod, "package_path", "") or "")).stem,
+        )
+    ).casefold().replace("_", " ").replace("-", " ")
+    markers = (
+        "promod", "rusmap", "sibir", "volga map", "road to aral",
+        "aral", "map", "rebuild", "map project",
+    )
+    return any(marker in names for marker in markers)
+
+
 class _ToolbarMixin:
     def _build_ui(self):
         central = QWidget(); self.setCentralWidget(central)
@@ -457,19 +484,10 @@ class _ToolbarMixin:
         # Mod 对象，确保刚启用但尚未保存的地图也能被汉化扫描读取。
         mod_list = []
 
-        def is_l10n_candidate(mod) -> bool:
-            """Scan maps and mods whose manifest category is inconclusive."""
-            categories = {
-                str(value or "").strip().casefold()
-                for value in getattr(getattr(mod, "manifest", None), "categories", [])
-                if str(value or "").strip()
-            }
-            return not categories or "map" in categories
-
         if live_rows is not None:
             for row in live_rows:
                 mod = row.get("mod")
-                if mod is not None and not is_l10n_candidate(mod):
+                if mod is not None and not _is_l10n_candidate_mod(mod):
                     continue
                 package_path = str(getattr(mod, "package_path", "") or "") if mod else ""
                 if not Path(package_path).exists() and mod is not None:
@@ -512,7 +530,7 @@ class _ToolbarMixin:
                     if any(n.casefold() == needle for n in names if n):
                         mod = candidate_mod
                         break
-            if mod is not None and not is_l10n_candidate(mod):
+            if mod is not None and not _is_l10n_candidate_mod(mod):
                 continue
             if mod is not None:
                 package_path = str(getattr(mod, 'package_path', '') or '')
