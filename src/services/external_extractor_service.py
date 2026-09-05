@@ -923,9 +923,11 @@ def list_external_entries(archive_path) -> list[str]:
     # Some extractor builds print paths with a leading marker or mixed case;
     # retain only normalized logical paths and discard directory-only lines.
     entries = [x for x in out if "." in Path(x).name]
-    if entries:
-        cache[key] = {"ts": time.time(), "entries": entries}
-        _save_entry_cache(cache)
+    # Cache empty listings too.  Without this, every startup re-runs the
+    # external extractor for packages that have no def/ tree, defeating the
+    # preflight skip and making large Workshop collections feel frozen.
+    cache[key] = {"ts": time.time(), "entries": entries}
+    _save_entry_cache(cache)
     return entries
 
 

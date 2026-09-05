@@ -6,11 +6,16 @@ from __future__ import annotations
 import re
 import tempfile
 import shutil
+import threading
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 from .sii_parser import parse_sii, SiiUnit
 from .scs_archive import ScsArchiveReader
+
+
+_def_tree_presence_cache: Dict[str, bool] = {}
+_def_tree_presence_lock = threading.Lock()
 
 
 def _unwrap_locale_key(value: str) -> str:
@@ -133,29 +138,42 @@ def _expand_mod_sources(mod_path: str | Path) -> List[Path]:
 def _source_has_def_tree(source_path: Path) -> bool:
     """快速确认包内是否存在 def/，没有则避免任何汉化解包。"""
     try:
+        stat = source_path.stat()
+        cache_key = f"{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        cache_key = str(source_path)
+    with _def_tree_presence_lock:
+        cached = _def_tree_presence_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    found = False
+    try:
         if source_path.is_dir():
-            return (source_path / "def").is_dir() or any(
+            found = (source_path / "def").is_dir() or any(
                 p.is_dir() and p.name.casefold() == "def"
                 for p in source_path.iterdir()
             )
-        reader = ScsArchiveReader(source_path)
-        try:
-            if reader._mode == "zip" and reader._zf:
-                return any(
-                    str(name).replace("\\", "/").lstrip("/").lower().startswith("def/")
-                    for name in reader._zf.namelist()
-                )
-            if reader._mode == "external":
-                from services.external_extractor_service import list_external_entries
-                return any(
-                    str(name).replace("\\", "/").lstrip("/").lower().startswith("def/")
-                    for name in list_external_entries(source_path)
-                )
-            return False
-        finally:
-            reader.close()
+        else:
+            reader = ScsArchiveReader(source_path)
+            try:
+                if reader._mode == "zip" and reader._zf:
+                    found = any(
+                        str(name).replace("\\", "/").lstrip("/./").lower().startswith("def/")
+                        for name in reader._zf.namelist()
+                    )
+                elif reader._mode == "external":
+                    from services.external_extractor_service import list_external_entries
+                    found = any(
+                        str(name).replace("\\", "/").lstrip("/./").lower().startswith("def/")
+                        for name in list_external_entries(source_path)
+                    )
+            finally:
+                reader.close()
     except Exception:
-        return False
+        found = False
+    with _def_tree_presence_lock:
+        _def_tree_presence_cache[cache_key] = found
+    return found
 def _is_l10n_def_path(path: str) -> bool:
     """Whether a logical archive path can contain city/country/ferry data.
 
@@ -520,12 +538,21 @@ def collect_all_def_files(
                         continue
 
                 if reader._mode == "zip" and reader._zf:
-                    all_files = reader._zf.namelist()
-                elif reader._mode == "dir":
+                    target_prefix = f"locale/{target_locale.strip('/').lower()}/"
                     all_files = [
-                        p.relative_to(reader.path).as_posix()
-                        for p in reader.path.rglob("*") if p.is_file()
+                        name for name in reader._zf.namelist()
+                        if str(name).replace("\\", "/").lstrip("/./").lower().startswith(("def/", target_prefix))
                     ]
+                elif reader._mode == "dir":
+                    all_files = []
+                    roots = [reader.path / "def", reader.path / "locale" / target_locale]
+                    for root in roots:
+                        if not root.is_dir():
+                            continue
+                        all_files.extend(
+                            p.relative_to(reader.path).as_posix()
+                            for p in root.rglob("*") if p.is_file()
+                        )
                 else:
                     all_files = []
                 for fname in all_files:

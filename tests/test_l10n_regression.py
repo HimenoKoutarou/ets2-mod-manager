@@ -223,6 +223,17 @@ def main() -> int:
             zf.writestr("manifest.sii", "SiiNunit {}")
         assert _source_has_def_tree(no_def) is False
 
+        directory_mod = Path(tmp) / "directory_mod"
+        (directory_mod / "def" / "city").mkdir(parents=True)
+        (directory_mod / "vehicle").mkdir(parents=True)
+        (directory_mod / "vehicle" / "large.bin").write_bytes(b"x")
+        (directory_mod / "def" / "city" / "city.sii").write_text(
+            'SiiNunit { city_data : city.test { city_name: "Test" } }',
+            encoding="utf-8",
+        )
+        defs, _ = collect_all_def_files([(str(directory_mod), "Directory")])
+        assert "def/city/city.sii" in defs
+
         # The same unit can also be declared under different def paths.
         # Priority must still win over traversal/path order.
         with zipfile.ZipFile(high, "w") as zf:
