@@ -17,6 +17,7 @@ from core.game_data import (
     _extract_countries_from_text,
     _extract_ferries_from_text,
     _extract_hint_texts_from_text,
+    _source_has_def_tree,
     collect_all_def_files,
     parse_from_merged_files,
 )
@@ -182,6 +183,7 @@ def main() -> int:
         # built-in translations, including a leading ./ in archive paths.
         custom_locale_mod = Path(tmp) / "custom_locale.scs"
         with zipfile.ZipFile(custom_locale_mod, "w") as zf:
+            zf.writestr("def/city.sii", "SiiNunit {}")
             zf.writestr(
                 "./locale/zh_cn/custom_strings.sui",
                 'SiiNunit { localization_db : .localization { '
@@ -215,6 +217,11 @@ def main() -> int:
             progress=lambda _cur, _total, name: scan_order.append(name),
         )
         assert scan_order == ["Low", "High"]
+
+        no_def = Path(tmp) / "no_def.scs"
+        with zipfile.ZipFile(no_def, "w") as zf:
+            zf.writestr("manifest.sii", "SiiNunit {}")
+        assert _source_has_def_tree(no_def) is False
 
         # The same unit can also be declared under different def paths.
         # Priority must still win over traversal/path order.

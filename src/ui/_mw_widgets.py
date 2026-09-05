@@ -259,6 +259,7 @@ class SplashScreen(QWidget):
         self._perf_combo.setCurrentIndex(("low", "medium", "high").index(self._perf_mode))
         self._perf_combo.currentIndexChanged.connect(self._on_perf_changed)
         perf_layout.addWidget(self._perf_combo, 1)
+
         layout.addLayout(perf_layout)
 
         # --- 当前任务详情 ---
@@ -350,6 +351,12 @@ class SplashScreen(QWidget):
 
     def set_first_scan(self, is_first: bool):
         self._first_scan = is_first
+        if is_first:
+            self._warn_label.setText(chr(0x26a0) + "  " + _("splash.first_scan_warn"))
+            self._warn_label.setVisible(True)
+            self._log("首次扫描：解析加密包需要较长时间（10-30秒），请耐心等待...", "warn")
+        else:
+            self._warn_label.setVisible(False)
 
     def _on_perf_changed(self, index: int):
         self._perf_mode = self._perf_combo.itemData(index)
@@ -360,12 +367,6 @@ class SplashScreen(QWidget):
 
     def worker_count(self) -> int:
         return int(self._perf_levels.get(self._perf_mode, self._perf_levels["medium"]))
-        if is_first:
-            self._warn_label.setText(chr(0x26a0) + "  " + _("splash.first_scan_warn"))
-            self._warn_label.setVisible(True)
-            self._log("首次扫描：解析加密包需要较长时间（10-30秒），请耐心等待...", "warn")
-        else:
-            self._warn_label.setVisible(False)
 
     def _log(self, message: str, level: str = "info"):
         color_map = {
@@ -841,7 +842,7 @@ class ModTable(QTableWidget):
         chk_item.setCheckState(Qt.Checked if en else Qt.Unchecked)
         self.setItem(r, COL_ENABLED, chk_item)
         # name + 分类颜色
-        name = (mod.display_title if mod else None) or work_entry["package_name"]
+        name = (mod.display_title if mod else None) or self._display_name_for_entry(work_entry.get("package_name", ""))
         name_item = self._mk(name, color="#000000" if en else "#8a8a8a")
         self.setItem(r, COL_NAME, name_item)
         # source（友好中文标签）
@@ -919,6 +920,22 @@ class ModTable(QTableWidget):
         vitem = self.item(row, COL_VERSION)
         if vitem is not None:
             vitem.setText(mod.display_compatible_version or "—")
+
+    @staticmethod
+    def _display_name_for_entry(package_name: str) -> str:
+        """Hide legacy Workshop package prefixes in unresolved rows."""
+        raw = str(package_name or "").strip()
+        if "|" in raw:
+            title = raw.split("|", 1)[1].strip()
+            if title:
+                return title
+        prefix = "mod_workshop_package."
+        if raw.casefold().startswith(prefix):
+            return raw[len(prefix):].strip() or raw
+        for prefix in ("workshop_", "workshop."):
+            if raw.casefold().startswith(prefix):
+                return raw[len(prefix):].strip() or raw
+        return raw
 
     def find_row_by_pkg(self, package_name: str) -> Optional[int]:
         """按 package_name 查找行号（COL_PKG 隐藏列）—— 支持 workshop ID 剥后缀智能匹配 + | 左段"""

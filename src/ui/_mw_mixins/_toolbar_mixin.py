@@ -456,9 +456,21 @@ class _ToolbarMixin:
         # 构建 (mod_path, display_name) 列表。优先使用工作列表里的真实
         # Mod 对象，确保刚启用但尚未保存的地图也能被汉化扫描读取。
         mod_list = []
+
+        def is_l10n_candidate(mod) -> bool:
+            """Scan maps and mods whose manifest category is inconclusive."""
+            categories = {
+                str(value or "").strip().casefold()
+                for value in getattr(getattr(mod, "manifest", None), "categories", [])
+                if str(value or "").strip()
+            }
+            return not categories or "map" in categories
+
         if live_rows is not None:
             for row in live_rows:
                 mod = row.get("mod")
+                if mod is not None and not is_l10n_candidate(mod):
+                    continue
                 package_path = str(getattr(mod, "package_path", "") or "") if mod else ""
                 if not Path(package_path).exists() and mod is not None:
                     package_path = str(getattr(mod, "_workshop_path", "") or package_path)
@@ -500,6 +512,8 @@ class _ToolbarMixin:
                     if any(n.casefold() == needle for n in names if n):
                         mod = candidate_mod
                         break
+            if mod is not None and not is_l10n_candidate(mod):
+                continue
             if mod is not None:
                 package_path = str(getattr(mod, 'package_path', '') or '')
                 if not Path(package_path).exists():

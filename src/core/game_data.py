@@ -113,8 +113,6 @@ def _expand_mod_sources(mod_path: str | Path) -> List[Path]:
     if not children:
         return [path]
 
-    # Workshop keeps historical builds next to a ``latest`` package. Only the
-    # selected/current package should participate in localization.
     latest = next((child for child in children if child.name.casefold() == "latest"), None)
     if latest is not None:
         return [latest]
@@ -132,6 +130,32 @@ def _expand_mod_sources(mod_path: str | Path) -> List[Path]:
     return [children[0]]
 
 
+def _source_has_def_tree(source_path: Path) -> bool:
+    """快速确认包内是否存在 def/，没有则避免任何汉化解包。"""
+    try:
+        if source_path.is_dir():
+            return (source_path / "def").is_dir() or any(
+                p.is_dir() and p.name.casefold() == "def"
+                for p in source_path.iterdir()
+            )
+        reader = ScsArchiveReader(source_path)
+        try:
+            if reader._mode == "zip" and reader._zf:
+                return any(
+                    str(name).replace("\\", "/").lstrip("/").lower().startswith("def/")
+                    for name in reader._zf.namelist()
+                )
+            if reader._mode == "external":
+                from services.external_extractor_service import list_external_entries
+                return any(
+                    str(name).replace("\\", "/").lstrip("/").lower().startswith("def/")
+                    for name in list_external_entries(source_path)
+                )
+            return False
+        finally:
+            reader.close()
+    except Exception:
+        return False
 def _is_l10n_def_path(path: str) -> bool:
     """Whether a logical archive path can contain city/country/ferry data.
 
@@ -475,6 +499,8 @@ def collect_all_def_files(
         for source_path in _expand_mod_sources(mod_path):
             if should_stop and should_stop():
                 return def_files_dict, native_locale_by_lang
+            if not _source_has_def_tree(source_path):
+                continue
             tmp_root = None
             try:
                 reader = ScsArchiveReader(source_path)

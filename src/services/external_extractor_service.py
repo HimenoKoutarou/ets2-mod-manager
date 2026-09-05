@@ -53,10 +53,24 @@ MAGIC_SCS = b"SCS#"
 MAGIC_AEM = b"AEM!"
 
 _TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "assets" / "tools"
+# Keep the established extractor untouched. The newer build is an optional
+# engine because some older/community archives behave differently between
+# Extractor releases.
 _EXTRACTOR = _TOOLS_DIR / "extractor.exe"
+_EXTRACTOR_MODERN = _TOOLS_DIR / "extractor-2025-10-21.exe"
 _SXC = _TOOLS_DIR / "sxc64.exe"
 _CACHE_PATH = _TOOLS_DIR.parent / "cache" / "manifest_cache.json"
 _ENTRY_CACHE_PATH = _TOOLS_DIR.parent / "cache" / "external_entries_cache.json"
+_EXTRACTOR_CONFIG_PATH = Path("config") / "extractor.json"
+
+EXTRACTOR_MODE_LEGACY = "legacy"
+EXTRACTOR_MODE_MODERN = "2025_10_21"
+EXTRACTOR_MODE_AUTO = "auto"
+EXTRACTOR_MODES = (
+    EXTRACTOR_MODE_LEGACY,
+    EXTRACTOR_MODE_MODERN,
+    EXTRACTOR_MODE_AUTO,
+)
 
 _lock = threading.Lock()
 _cache: Optional[dict] = None
@@ -74,6 +88,94 @@ _first_image_cache: dict = {}
 _DISK_CACHE_DIR = _TOOLS_DIR.parent / "cache" / "extracted"
 _L10N_TREE_CACHE_DIR = _TOOLS_DIR.parent / "cache" / "l10n_tree"
 _disk_cache_lock = threading.Lock()
+_extractor_mode_lock = threading.Lock()
+_extractor_mode_cache: Optional[str] = None
+
+
+def get_extractor_mode() -> str:
+    """Return the persisted HashFS extractor choice.
+
+    Legacy remains the default so upgrading does not silently replace the
+    engine selected by existing users.
+    """
+    global _extractor_mode_cache
+    with _extractor_mode_lock:
+        if _extractor_mode_cache in EXTRACTOR_MODES:
+            return _extractor_mode_cache
+        # The application selects the extractor automatically. Keep reading
+        # legacy config files for compatibility, but default to the automatic
+        # modern-first strategy when no setting exists.
+        mode = EXTRACTOR_MODE_AUTO
+        try:
+            value = json.loads(_EXTRACTOR_CONFIG_PATH.read_text(encoding="utf-8"))
+            configured = value.get("mode") if isinstance(value, dict) else None
+            if configured in EXTRACTOR_MODES:
+                mode = configured
+        except (OSError, ValueError, TypeError):
+            pass
+        _extractor_mode_cache = mode
+        return mode
+
+
+def set_extractor_mode(mode: str) -> bool:
+    """Persist the selected HashFS extractor mode."""
+    global _extractor_mode_cache
+    if mode not in EXTRACTOR_MODES:
+        return False
+    with _extractor_mode_lock:
+        try:
+            _EXTRACTOR_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _EXTRACTOR_CONFIG_PATH.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps({"mode": mode}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, _EXTRACTOR_CONFIG_PATH)
+        except OSError:
+            return False
+        _extractor_mode_cache = mode
+    return True
+
+
+def extractor_availability() -> dict[str, bool]:
+    """Expose installed engines for settings UIs and diagnostics."""
+    return {
+        EXTRACTOR_MODE_LEGACY: _EXTRACTOR.is_file(),
+        EXTRACTOR_MODE_MODERN: _EXTRACTOR_MODERN.is_file(),
+        EXTRACTOR_MODE_AUTO: _EXTRACTOR.is_file() or _EXTRACTOR_MODERN.is_file(),
+    }
+
+
+def _extractor_candidates() -> list[Path]:
+    mode = get_extractor_mode()
+    if mode == EXTRACTOR_MODE_MODERN:
+        candidates = [_EXTRACTOR_MODERN]
+    elif mode == EXTRACTOR_MODE_AUTO:
+        # Prefer the newer parser and retain the proven legacy build as a
+        # compatibility fallback for unusual community archives.
+        candidates = [_EXTRACTOR_MODERN, _EXTRACTOR]
+    else:
+        candidates = [_EXTRACTOR]
+    return [path for path in candidates if path.is_file()]
+
+
+def _extractor_available() -> bool:
+    return bool(_extractor_candidates())
+
+
+def _extractor_cache_tag() -> str:
+    """Separate caches when a user opts into a different parser build."""
+    mode = get_extractor_mode()
+    if mode == EXTRACTOR_MODE_LEGACY:
+        return ""
+    parts = [mode]
+    for path in _extractor_candidates():
+        try:
+            stat = path.stat()
+            parts.append(f"{path.name}:{stat.st_size}:{int(stat.st_mtime)}")
+        except OSError:
+            parts.append(path.name)
+    return "|extractor=" + ";".join(parts)
 
 
 def _disk_cache_path(cache_key: str, inner_name: str) -> Path:
@@ -153,9 +255,9 @@ def _is_zip_encrypted(path: Path) -> bool:
 def _cache_key(path: Path) -> str:
     try:
         st = path.stat()
-        raw = f"{path}|{st.st_size}|{int(st.st_mtime)}"
+        raw = f"{path}|{st.st_size}|{int(st.st_mtime)}{_extractor_cache_tag()}"
     except OSError:
-        raw = str(path)
+        raw = str(path) + _extractor_cache_tag()
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -211,7 +313,7 @@ def _save_entry_cache(cache: dict) -> None:
 
 
 def _sp_run(cmd_args, /, *, capture_output=True, timeout=None, input=None, env=None, cwd=None,
-            shell=False, stdout=None, stderr=None):
+            shell=False, stdout=None, stderr=None, text=None):
     """Hardened subprocess runner: on Windows always suppresses console window creation.
 
     Rationale: PyInstaller console=False + subprocess.run([...console-mode binary...])
@@ -241,37 +343,76 @@ def _sp_run(cmd_args, /, *, capture_output=True, timeout=None, input=None, env=N
         kwargs["stdout"] = stdout
     if stderr is not None:
         kwargs["stderr"] = stderr
+    if text is not None:
+        kwargs["text"] = text
     return subprocess.run(list(cmd_args), **kwargs)
 
 
-def _run_extractor(scs_path: Path, dest: Path, partial: str = "/manifest.sii", should_stop=None,
+def _run_extractor(scs_path: Path, dest: Path, partial: str | None = "/manifest.sii", should_stop=None,
                    timeout_seconds: float | None = None) -> bool:
     """用 extractor.exe 提取 SCS# 包内指定路径的文件。partial 用 / 开头的绝对路径。"""
-    if not _EXTRACTOR.exists():
+    candidates = _extractor_candidates()
+    if not candidates:
         return False
-    try:
-        proc = subprocess.Popen(
-            [str(_EXTRACTOR), str(scs_path), "--deep", f"--partial={partial}",
-             "-d", str(dest), "-s"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
-        )
-        deadline = time.monotonic() + (timeout_seconds or _TIMEOUT_SECONDS)
-        while proc.poll() is None:
-            if should_stop and should_stop():
-                proc.terminate()
-                try:
-                    proc.wait(timeout=1)
-                except subprocess.TimeoutExpired:
+    for extractor in candidates:
+        if should_stop and should_stop():
+            return False
+        args = [str(extractor), str(scs_path), "--deep"]
+        if partial:
+            args.append(f"--partial={partial}")
+        args.extend(["-d", str(dest), "-s"])
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
+            )
+            deadline = time.monotonic() + (timeout_seconds or _TIMEOUT_SECONDS)
+            while proc.poll() is None:
+                if should_stop and should_stop():
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return False
+                if time.monotonic() >= deadline:
                     proc.kill()
-                return False
-            if time.monotonic() >= deadline:
-                proc.kill()
-                return False
-            time.sleep(0.05)
-        return proc.returncode == 0
-    except OSError:
-        return False
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    break
+                time.sleep(0.05)
+            if proc.returncode == 0:
+                # In automatic mode a build may report success for an unknown
+                # partial path while producing nothing. Let the compatibility
+                # engine try before accepting that as a successful extraction.
+                if len(candidates) == 1 or any(p.is_file() for p in dest.rglob("*")):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _run_extractor_capture(scs_path: Path, extra_args: list[str], timeout_seconds: float):
+    """Run a listing-style command with the selected engine and fallback."""
+    candidates = _extractor_candidates()
+    for extractor in candidates:
+        try:
+            result = _sp_run(
+                [str(extractor), str(scs_path), *extra_args],
+                capture_output=True,
+                timeout=timeout_seconds,
+                text=True,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if result.returncode == 0 and (
+            len(candidates) == 1 or bool((result.stdout or "").strip())
+        ):
+            return result
+    return None
 
 
 def _run_sxc(archive_path: Path, dest: Path, filename: str = "manifest.sii", should_stop=None,
@@ -419,8 +560,10 @@ def extract_first_image_bytes(archive_path) -> Optional[tuple[bytes, str]]:
     tmp = Path(tempfile.mkdtemp(prefix="ets2mm_img_"))
     try:
         magic = _detect_magic(path)
-        tool = _EXTRACTOR if magic == "scs_hashfs" else _SXC
-        if not tool.exists():
+        tool = _SXC
+        if magic == "scs_hashfs" and not _extractor_available():
+            return None
+        if magic != "scs_hashfs" and not tool.exists():
             return None
         if magic == "scs_hashfs":
             # Encrypted HashFS packages frequently use an arbitrary preview
@@ -429,13 +572,12 @@ def extract_first_image_bytes(archive_path) -> Optional[tuple[bytes, str]]:
             # by read_icon before reaching here.
             import re as _re
             try:
-                listed = subprocess.run(
-                    [str(tool), str(path), "--deep", "--list"],
-                    capture_output=True, text=True,
-                    timeout=max(_TIMEOUT_SECONDS * 4, 45),
-                    creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
+                listed = _run_extractor_capture(
+                    path,
+                    ["--deep", "--list"],
+                    max(_TIMEOUT_SECONDS * 4, 45),
                 )
-            except (subprocess.TimeoutExpired, OSError):
+            except OSError:
                 listed = None
             names = []
             if listed is not None:
@@ -559,7 +701,7 @@ def extract_files_batch(archive_path, inner_names, should_stop=None) -> dict:
     magic = _detect_magic(path)
     result: dict = {}
 
-    if magic == "scs_hashfs" and _EXTRACTOR.exists():
+    if magic == "scs_hashfs" and _extractor_available():
         # SCS#: 用 --partial 多路径一次提取所有候选
         key = _cache_key(path)
         partials = []
@@ -571,30 +713,13 @@ def extract_files_batch(archive_path, inner_names, should_stop=None) -> dict:
         # R11.1: mkdtemp replaces fixed dir (race condition fix)
         tmp = Path(tempfile.mkdtemp(prefix="ets2mm_b_"))
 
-        ok = False
-        try:
-            proc = subprocess.Popen(
-                [str(_EXTRACTOR), str(path), "--deep", f"--partial={multi}",
-                 "-d", str(tmp), "-s"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
-            )
-            deadline = time.monotonic() + _TIMEOUT_SECONDS
-            while proc.poll() is None:
-                if should_stop and should_stop():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    break
-                if time.monotonic() >= deadline:
-                    proc.kill()
-                    break
-                time.sleep(0.05)
-            ok = proc.returncode == 0 and not (should_stop and should_stop())
-        except OSError:
-            ok = False
+        ok = _run_extractor(
+            path,
+            tmp,
+            partial=multi,
+            should_stop=should_stop,
+            timeout_seconds=_TIMEOUT_SECONDS,
+        )
 
         if ok:
             for n in names:
@@ -635,17 +760,18 @@ def extract_archive_to_directory(archive_path, destination) -> bool:
     """
     path = Path(archive_path)
     dest = Path(destination)
-    if not path.is_file() or _detect_magic(path) != "scs_hashfs" or not _EXTRACTOR.exists():
+    if not path.is_file() or _detect_magic(path) != "scs_hashfs" or not _extractor_available():
         return False
     try:
         dest.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.run(
-            [str(_EXTRACTOR), str(path), "--deep", "-d", str(dest)],
-            capture_output=True, timeout=max(_TIMEOUT_SECONDS, 120),
-            creationflags=_SP_HIDE, startupinfo=_SP_STARTUPINFO,
+        ok = _run_extractor(
+            path,
+            dest,
+            partial=None,
+            timeout_seconds=max(_TIMEOUT_SECONDS, 120),
         )
-        return proc.returncode == 0 and any(dest.rglob("*"))
-    except (subprocess.TimeoutExpired, OSError):
+        return ok and any(dest.rglob("*"))
+    except OSError:
         return False
 
 
@@ -765,8 +891,8 @@ def list_external_entries(archive_path) -> list[str]:
             return [str(x) for x in entries]
     magic = _detect_magic(path)
     if magic == "scs_hashfs":
-        tool = _EXTRACTOR
-        args = [str(tool), str(path), "--deep", "--list"]
+        if not _extractor_available():
+            return []
         timeout = max(_TIMEOUT_SECONDS * 4, 45)
     elif magic in ("aem", "zip"):
         tool = _SXC
@@ -774,19 +900,17 @@ def list_external_entries(archive_path) -> list[str]:
         timeout = max(_TIMEOUT_SECONDS * 2, 30)
     else:
         return []
-    if not tool.exists():
-        return []
-    try:
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            creationflags=_SP_HIDE,
-            startupinfo=_SP_STARTUPINFO,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
+    if magic == "scs_hashfs":
+        result = _run_extractor_capture(path, ["--deep", "--list"], timeout)
+        if result is None:
+            return []
+    else:
+        if not tool.exists():
+            return []
+        try:
+            result = _sp_run(args, capture_output=True, timeout=timeout, text=True)
+        except (subprocess.TimeoutExpired, OSError):
+            return []
     import re as _re
     out: list[str] = []
     for line in (result.stdout or "").splitlines():

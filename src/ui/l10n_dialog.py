@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QSignalBlocker, QThread, Signal, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QTabWidget, QTableWidget, QTableWidgetItem, QDialog, QVBoxLayout,
@@ -108,6 +108,7 @@ class L10nDialog(QDialog):
         "api":     QColor("#a855f7"),
         "pending": QColor("#f59e0b"),
         "failed":  QColor("#ef4444"),
+        "missing_value": QColor("#f59e0b"),
         "missing_locale": QColor("#dc2626"),
     }
     STATUS_LABELS = {
@@ -117,6 +118,7 @@ class L10nDialog(QDialog):
         "api":     "AI翻译",
         "pending": "待翻译",
         "failed":  "未翻译",
+        "missing_value": "缺少 value，可填写",
         "missing_locale": "缺少 locale key",
     }
 
@@ -148,6 +150,7 @@ class L10nDialog(QDialog):
         self.locale_combo.setCurrentIndex(idx)
         self.locale_combo.currentIndexChanged.connect(self._on_locale_changed)
         top_layout.addWidget(self.locale_combo, 1)
+
         layout.addLayout(top_layout)
 
         self.status_label = QLabel("准备提取已启用mod的数据...")
@@ -193,7 +196,9 @@ class L10nDialog(QDialog):
         table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         table.setAlternatingRowColors(True)
-        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        table.itemChanged.connect(
+            lambda item, source_table=table: self._on_translation_item_changed(source_table, item)
+        )
         self.tabs.addTab(table, name)
         return table
 
@@ -299,6 +304,7 @@ class L10nDialog(QDialog):
         self.tabs.setTabText(index, f"{label} ({len(target_list)})")
 
     def _append_table_row(self, table: QTableWidget, entry: TranslationEntry) -> None:
+        blocker = QSignalBlocker(table)
         row = table.rowCount()
         table.insertRow(row)
         key_state = ("有" if entry.def_locale_key_present else "缺少 def 字段") + "/" + ("有" if entry.locale_key_present else "缺少 locale")
@@ -313,6 +319,7 @@ class L10nDialog(QDialog):
             elif column == 4:
                 cell.setForeground(QColor("#16a34a") if entry.def_locale_key_present and entry.locale_key_present else QColor("#dc2626"))
             table.setItem(row, column, cell)
+        del blocker
 
     def _on_extract_done(self, game_data: GameDataResult):
         self.progress_bar.setVisible(False)
@@ -320,7 +327,8 @@ class L10nDialog(QDialog):
         n_co = len(game_data.countries)
         n_f = len(game_data.ferries)
         n_h = len(game_data.hints)
-        n_loc = len(game_data.native_locale_dict)
+        n_loc = sum(1 for value in game_data.native_locale_dict.values() if str(value or "").strip())
+        n_empty_loc = len(game_data.native_locale_dict) - n_loc
         extract_error = getattr(game_data, "_extract_error", "")
         if extract_error:
             self.status_label.setText(f"提取失败：{extract_error}")
@@ -329,6 +337,7 @@ class L10nDialog(QDialog):
         self.status_label.setText(
             f"提取完成: {n_c}个城市, {n_co}个国家, {n_f}个港口, {n_h}条提示文本"
             + (f", {n_loc}条原生翻译" if n_loc else "")
+            + (f", {n_empty_loc}个空 value 待填写" if n_empty_loc else "")
         )
         if not any((n_c, n_co, n_f, n_h)):
             self.status_label.setText(
@@ -393,6 +402,7 @@ class L10nDialog(QDialog):
         self.status_label.setText("扫描已取消")
 
     def _fill_table(self, table: QTableWidget, entries: List[TranslationEntry]):
+        blocker = QSignalBlocker(table)
         table.setRowCount(len(entries))
         for i, e in enumerate(entries):
             item0 = QTableWidgetItem(e.source)
@@ -400,14 +410,7 @@ class L10nDialog(QDialog):
             table.setItem(i, 0, item0)
 
             item1 = QTableWidgetItem(e.translated)
-            if e.status == "native":
-                item1.setForeground(self.STATUS_COLORS["native"])
-            elif e.status in ("local", "ufl"):
-                item1.setForeground(self.STATUS_COLORS["local"])
-            elif e.status == "api":
-                item1.setForeground(self.STATUS_COLORS["api"])
-            elif e.status in ("pending", "failed", "missing_locale"):
-                item1.setForeground(self.STATUS_COLORS["failed"])
+            item1.setForeground(self.STATUS_COLORS.get(e.status, QColor("#999")))
             table.setItem(i, 1, item1)
 
             item2 = QTableWidgetItem(e.source_mod)
@@ -424,34 +427,81 @@ class L10nDialog(QDialog):
             item4.setForeground(QColor("#16a34a") if e.def_locale_key_present and e.locale_key_present else QColor("#dc2626"))
             item4.setFlags(item4.flags() & ~Qt.ItemIsEditable)
             table.setItem(i, 4, item4)
+        del blocker
 
-    def _on_cell_double_clicked(self, row, col):
-        if col != 1:
+    def _entries_for_table(self, table: QTableWidget) -> List[TranslationEntry]:
+        if not self.result:
+            return []
+        if table is self.tab_cities:
+            return self.result.cities
+        if table is self.tab_countries:
+            return self.result.countries
+        if table is self.tab_ferries:
+            return self.result.ferries
+        if table is self.tab_hints:
+            return self.result.hints
+        return []
+
+    def _on_translation_item_changed(self, table: QTableWidget, item: QTableWidgetItem):
+        """Persist a translation after the user commits the editable cell."""
+        if item.column() != 1:
             return
-        table = self.tabs.currentWidget()
-        item = table.item(row, 1)
-        if not item:
+        entries = self._entries_for_table(table)
+        row = item.row()
+        if row < 0 or row >= len(entries):
             return
+        source = entries[row].source
         new_text = item.text().strip()
-        source_item = table.item(row, 0)
-        if not source_item:
-            return
-        source = source_item.text()
         if new_text:
             self.l10n.update_translation(source, new_text)
-            status_item = table.item(row, 3)
-            if status_item:
-                status_item.setText(self.STATUS_LABELS["local"])
-                status_item.setForeground(self.STATUS_COLORS["local"])
-            item.setForeground(self.STATUS_COLORS["local"])
             for e in self._entries:
                 if e.source == source:
                     e.translated = new_text
                     e.status = "local"
-                    break
+            message = f"已保存手动翻译: {source}"
+        else:
+            self.l10n.clear_translation(source)
+            for e in self._entries:
+                if e.source != source:
+                    continue
+                resolved = self.l10n.translate(
+                    e.source, e.category, e.source_mod, allow_api=False,
+                    locale_key=e.locale_key,
+                    def_locale_key_present=e.def_locale_key_present,
+                    unit_name=e.unit_name,
+                )
+                e.translated = resolved.translated
+                e.status = resolved.status
+                e.locale_key_present = resolved.locale_key_present
+            message = f"已清空翻译，可重新填写: {source}"
+
+        for target_table, target_entries in (
+            (self.tab_cities, self.result.cities),
+            (self.tab_countries, self.result.countries),
+            (self.tab_ferries, self.result.ferries),
+            (self.tab_hints, self.result.hints),
+        ):
+            blocker = QSignalBlocker(target_table)
+            for target_row, entry in enumerate(target_entries):
+                if entry.source != source:
+                    continue
+                value_item = target_table.item(target_row, 1)
+                status_item = target_table.item(target_row, 3)
+                if value_item:
+                    value_item.setText(entry.translated)
+                    value_item.setForeground(self.STATUS_COLORS.get(entry.status, QColor("#999")))
+                if status_item:
+                    status_item.setText(self.STATUS_LABELS.get(entry.status, entry.status))
+                    status_item.setForeground(self.STATUS_COLORS.get(entry.status, QColor("#999")))
+            del blocker
+
+        pending = self.result.pending_count
+        self.btn_translate.setText(f"翻译未翻译项 ({pending})")
+        self.btn_translate.setEnabled(pending > 0)
+        self.status_label.setText(message)
 
     def _do_translate(self):
-        pending = [e for e in self._entries if e.status in ("pending", "failed", "missing_locale")]
+        pending = [e for e in self._entries if e.status in ("pending", "failed", "missing_value", "missing_locale")]
         if not pending:
             return
         self.btn_translate.setEnabled(False)
@@ -482,7 +532,7 @@ class L10nDialog(QDialog):
             self.btn_translate.setEnabled(True)
             return
         translated = sum(1 for e in self._entries if e.status == "api")
-        still_failed = sum(1 for e in self._entries if e.status in ("failed", "missing_locale"))
+        still_failed = sum(1 for e in self._entries if e.status in ("failed", "missing_value", "missing_locale"))
         self.status_label.setText(
             f"翻译完成: API翻译{translated}项"
             + (f", 仍有{still_failed}项需手动补全" if still_failed else "")
