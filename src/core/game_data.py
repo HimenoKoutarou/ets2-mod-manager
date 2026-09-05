@@ -13,6 +13,13 @@ from .sii_parser import parse_sii, SiiUnit
 from .scs_archive import ScsArchiveReader
 
 
+def _unwrap_locale_key(value: str) -> str:
+    value = str(value or "").strip()
+    if value.startswith("@@") and value.endswith("@@"):
+        return value[2:-2].strip()
+    return value
+
+
 @dataclass
 class CityData:
     unit_name: str = ""
@@ -24,10 +31,7 @@ class CityData:
 
     @property
     def locale_key(self) -> str:
-        value = (self.city_name_localized or "").strip()
-        if value.startswith("@@") and value.endswith("@@"):
-            return value[2:-2].strip()
-        return value
+        return _unwrap_locale_key(self.city_name_localized or self.city_name)
 
 
 @dataclass
@@ -40,10 +44,7 @@ class CountryData:
 
     @property
     def locale_key(self) -> str:
-        value = (self.name_localized or "").strip()
-        if value.startswith("@@") and value.endswith("@@"):
-            return value[2:-2].strip()
-        return value
+        return _unwrap_locale_key(self.name_localized or self.name)
 
 
 @dataclass
@@ -55,10 +56,7 @@ class FerryData:
 
     @property
     def locale_key(self) -> str:
-        value = (self.ferry_name_localized or "").strip()
-        if value.startswith("@@") and value.endswith("@@"):
-            return value[2:-2].strip()
-        return value
+        return _unwrap_locale_key(self.ferry_name_localized or self.ferry_name)
 
 
 @dataclass
@@ -171,6 +169,14 @@ def _extract_hint_texts_from_text(text: str, source_mod: str) -> List[HintTextDa
                 continue
             if value.startswith(("/", "@", "<")) or value.isdigit():
                 continue
+            # Strip layout tags only for classification. Meaningful labels
+            # such as ``Ourense<br>Vigo`` remain translatable, while road
+            # numbers such as ``A<sub scale=0.4> </sub>1`` reduce to ``A1``
+            # and are excluded below.
+            visible_text = re.sub(r"<\s*/?\s*[a-z][^>]*>", "", value, flags=re.IGNORECASE)
+            compact = re.sub(r"[\s._/-]+", "", visible_text)
+            if re.fullmatch(r"[A-Za-z]{1,3}\d{1,4}[A-Za-z]?", compact):
+                continue
             if not any(ch.isalpha() for ch in value):
                 continue
             seen.add(value)
@@ -281,26 +287,43 @@ def _parse_localization_db(text: str) -> List[Tuple[str, str]]:
         keys.append(_unescape_locale(m.group(1)))
     for m in re.finditer(r'val\[\]\s*:\s*"((?:[^"\\]|\\.)*)"', text):
         vals.append(_unescape_locale(m.group(1)))
-    for i in range(min(len(keys), len(vals))):
-        pairs.append((keys[i], vals[i]))
+    for i, key in enumerate(keys):
+        # Malformed community locale files sometimes end with key[] entries
+        # that have no matching val[]. Preserve them with an empty value so
+        # the translation UI can expose a fillable row instead of losing data.
+        pairs.append((key, vals[i] if i < len(vals) else ""))
     return pairs
 
 
 def _find_locale_files(reader: ScsArchiveReader, target_locale: str) -> List[str]:
-    """按 target_locale 查找 locale/{target_locale}/local_module.*.sii"""
+    """按 target_locale 查找 Mod 自带的本地化数据库文件。
+
+    社区 Mod 通常使用 ``local_module.*.sii``，但也有作者使用自定义
+    文件名或 ``.sui`` 后缀；只要文件位于目标语言目录下，就应该纳入扫描。
+    """
     found: List[str] = []
+    target = str(target_locale or "").strip().strip("/").lower()
+    if not target:
+        return found
+
+    def is_target_file(name: str) -> bool:
+        norm = str(name or "").replace("\\", "/").lstrip("./").lower()
+        prefix = f"locale/{target}/"
+        return norm.startswith(prefix) and norm.endswith((".sii", ".sui"))
+
     if reader._mode == "zip" and reader._zf:
         for name in reader._zf.namelist():
-            lower = name.lower()
-            prefix = f"locale/{target_locale}/local_module.".lower()
-            if lower.startswith(prefix) and lower.endswith(".sii"):
+            if is_target_file(name):
                 found.append(name)
     elif reader._mode == "dir":
-        locale_dir = reader.path / "locale" / target_locale
+        locale_dir = reader.path / "locale" / target
         if locale_dir.exists():
-            for p in locale_dir.iterdir():
-                if p.is_file() and p.name.lower().startswith("local_module.") and p.name.lower().endswith(".sii"):
-                    found.append(f"locale/{target_locale}/{p.name}")
+            for p in locale_dir.rglob("*"):
+                if p.is_file():
+                    rel = p.relative_to(reader.path).as_posix()
+                    if is_target_file(rel):
+                        found.append(rel)
+    found.sort(key=lambda value: str(value).replace("\\", "/").lower())
     return found
 
 
@@ -312,7 +335,9 @@ def _extract_native_locale(reader: ScsArchiveReader, target_locale: str = "zh_cn
         if not text:
             continue
         for k, v in _parse_localization_db(text):
-            if k and v and k not in result:
+            # Keep an explicitly empty val[] so the UI can distinguish
+            # "locale key exists but has no value" from a missing key.
+            if k and k not in result:
                 result[k] = v
     return result
 
@@ -410,7 +435,7 @@ def merge_game_data(
                 result.ferries.append(f)
                 result.ferry_names.append(f.ferry_name)
         for k, v in native_locale.items():
-            if k and v and k not in result.native_locale_dict:
+            if k and k not in result.native_locale_dict:
                 result.native_locale_dict[k] = v
 
     return result
@@ -471,16 +496,14 @@ def collect_all_def_files(
                     ]
                 else:
                     all_files = []
-                locale_pattern = re.compile(
-                    r"^locale/([^/]+)/local_module\.[^/]+\.sii$", re.IGNORECASE
-                )
                 for fname in all_files:
                     if should_stop and should_stop():
                         return def_files_dict, native_locale_by_lang
-                    fname_norm = fname.replace("\\", "/")
+                    read_name = fname
+                    fname_norm = fname.replace("\\", "/").lstrip("./")
                     if _is_l10n_def_path(fname_norm):
                         if fname_norm not in def_files_dict:
-                            text = reader.read_text(fname_norm)
+                            text = reader.read_text(read_name)
                             if text is not None:
                                 def_files_dict[fname_norm] = FileWithPriority(
                                     file_path=fname_norm,
@@ -489,14 +512,21 @@ def collect_all_def_files(
                                     priority=priority,
                                 )
                     else:
-                        match = locale_pattern.match(fname_norm)
-                        if match:
-                            lang = match.group(1).lower()
+                        parts = fname_norm.split("/")
+                        if (
+                            len(parts) >= 3
+                            and parts[0].lower() == "locale"
+                            and parts[1].strip()
+                            and fname_norm.lower().endswith((".sii", ".sui"))
+                        ):
+                            lang = parts[1].lower()
                             values = native_locale_by_lang.setdefault(lang, {})
-                            text = reader.read_text(fname_norm)
+                            text = reader.read_text(read_name)
                             if text:
                                 for key, value in _parse_localization_db(text):
-                                    if key and value and key not in values:
+                                    # An empty value from a higher-priority
+                                    # Mod must also shadow lower-priority data.
+                                    if key and key not in values:
                                         values[key] = value
             finally:
                 reader.close()
@@ -534,6 +564,14 @@ def _parse_sii_base_with_infix(
         infix_files.append(fp)
     infix_files.sort()
     index_files.extend(infix_files)
+    # Parse lower-priority packages first so a shared unit_name is finally
+    # replaced by priority 0. Within one priority, base.sii still precedes its
+    # infix files, matching the game's normal base/infix order.
+    index_files.sort(key=lambda fp: (
+        -merged_def_files[fp].priority,
+        0 if fp == base_file else 1,
+        fp,
+    ))
 
     for idx_file in index_files:
         fw = merged_def_files[idx_file]
@@ -620,7 +658,11 @@ def parse_from_merged_files(
     for base in ("city", "country", "ferry"):
         parsed_paths.add(f"def/{base}.sii")
         parsed_paths.update(p for p in merged_def_files if p.startswith(f"def/{base}.") and "/" not in p[len("def/"):])
-    for path, fw in merged_def_files.items():
+    remaining_files = sorted(
+        merged_def_files.items(),
+        key=lambda item: (-item[1].priority, item[0]),
+    )
+    for path, fw in remaining_files:
         if path in parsed_paths or not path.lower().endswith((".sii", ".sui")):
             continue
         text = fw.file_text
