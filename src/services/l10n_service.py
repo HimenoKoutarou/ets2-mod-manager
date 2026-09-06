@@ -30,6 +30,11 @@ class TranslationEntry:
     def_locale_key_present: bool = True
     locale_key: str = ""
     unit_name: str = ""
+    # Community defs may spell the same locale identifier using the display
+    # name (or a different punctuation/diacritic form).  Keep those aliases
+    # for lookup only; ``source`` remains the canonical key written to SII.
+    lookup_candidates: List[str] = field(default_factory=list)
+    matched_key: str = ""
 
 
 @dataclass
@@ -116,10 +121,16 @@ class L10nService:
         self._config_dir = config_dir
         self._dict_path = config_dir / "l10n_dict.json"
         self._ufl_path: Optional[Path] = None
+        self._ufl_paths: List[Path] = []
         self._local_dict: Dict[str, str] = {}
         self._ufl_dict: Dict[str, str] = {}
         self._native_locale_dict: Dict[str, str] = {}
         self._native_locale_folded: Dict[str, str] = {}
+        self._local_dict_folded: Dict[str, str] = {}
+        self._ufl_dict_folded: Dict[str, str] = {}
+        self._native_locale_compact: Dict[str, Optional[str]] = {}
+        self._local_dict_compact: Dict[str, Optional[str]] = {}
+        self._ufl_dict_compact: Dict[str, Optional[str]] = {}
         self._target_locale = target_locale if target_locale in self.SUPPORTED_LOCALES else "zh_cn"
         self._load_local_dict()
 
@@ -138,6 +149,7 @@ class L10nService:
                 if candidate:
                     folded[candidate.casefold()] = value
         self._native_locale_folded = folded
+        self._native_locale_compact = self._build_compact_index(self._native_locale_dict)
 
     @staticmethod
     def _normalize_locale_key(value: str) -> str:
@@ -147,18 +159,97 @@ class L10nService:
         text = unicodedata.normalize("NFKC", text)
         return " ".join(text.split())
 
+    @classmethod
+    def _compact_locale_key(cls, value: str) -> str:
+        """Fold harmless punctuation/diacritic differences as a last resort."""
+        text = unicodedata.normalize("NFKD", cls._normalize_locale_key(value)).casefold()
+        text = "".join(ch for ch in text if not unicodedata.combining(ch))
+        return "".join(ch for ch in text if ch.isalnum())
+
+    @classmethod
+    def _build_folded_index(cls, values: Dict[str, str]) -> Dict[str, str]:
+        folded: Dict[str, str] = {}
+        for key, value in (values or {}).items():
+            normalized = cls._normalize_locale_key(key)
+            if normalized:
+                folded[normalized.casefold()] = value
+        return folded
+
+    @classmethod
+    def _build_compact_index(cls, values: Dict[str, str]) -> Dict[str, Optional[str]]:
+        compact: Dict[str, Optional[str]] = {}
+        for key in (values or {}):
+            normalized = cls._compact_locale_key(key)
+            if not normalized:
+                continue
+            if normalized in compact and compact[normalized] != key:
+                # Do not guess when two keys collapse to the same spelling.
+                compact[normalized] = None
+            else:
+                compact[normalized] = key
+        return compact
+
+    @classmethod
+    def _unique_lookup_candidates(cls, source: str, candidates: Optional[List[str]]) -> List[str]:
+        result: List[str] = []
+        seen: set[str] = set()
+        for value in [source, *(candidates or [])]:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            normalized = cls._normalize_locale_key(text)
+            folded = normalized.casefold()
+            if not folded or folded in seen:
+                continue
+            seen.add(folded)
+            result.append(text)
+        return result
+
+    @classmethod
+    def _lookup_index(
+        cls,
+        values: Dict[str, str],
+        folded: Dict[str, str],
+        compact: Dict[str, Optional[str]],
+        candidates: List[str],
+    ) -> Tuple[bool, str, str]:
+        for candidate in candidates:
+            normalized = cls._normalize_locale_key(candidate)
+            folded_key = normalized.casefold()
+            if folded_key in folded:
+                return True, candidate, str(folded[folded_key] or "")
+        for candidate in candidates:
+            compact_key = cls._compact_locale_key(candidate)
+            original = compact.get(compact_key) if compact_key else None
+            if original:
+                return True, original, str(values.get(original, "") or "")
+        return False, "", ""
+
     def set_ufl_mod(self, ufl_mod_path: Path):
         """设置 UFL 汉化 mod 路径并加载翻译字典"""
-        self._ufl_path = ufl_mod_path
-        self._ufl_dict = self._extract_ufl_translations(ufl_mod_path)
+        self.set_ufl_mods([ufl_mod_path] if ufl_mod_path else [])
+
+    def set_ufl_mods(self, ufl_mod_paths: List[Path]) -> None:
+        """Load and merge several installed UFL/localization packages."""
+        paths = [Path(path) for path in (ufl_mod_paths or []) if path]
+        self._ufl_paths = paths
+        self._ufl_path = paths[-1] if paths else None
+        merged: Dict[str, str] = {}
+        for path in paths:
+            for key, value in self._extract_ufl_translations(path).items():
+                if key:
+                    merged[key] = value
+        self._ufl_dict = merged
+        self._ufl_dict_folded = self._build_folded_index(self._ufl_dict)
+        self._ufl_dict_compact = self._build_compact_index(self._ufl_dict)
 
     def set_target_locale(self, locale: str) -> bool:
         """切换目标语言。若成功则重新加载 UFL 翻译。返回是否成功。"""
         if locale not in self.SUPPORTED_LOCALES:
             return False
         self._target_locale = locale
-        if self._ufl_path:
-            self._ufl_dict = self._extract_ufl_translations(self._ufl_path)
+        if self._ufl_paths:
+            self.set_ufl_mods(self._ufl_paths)
         return True
 
     def get_target_locale(self) -> str:
@@ -178,6 +269,8 @@ class L10nService:
                     self._local_dict = json.load(f)
             except Exception:
                 self._local_dict = {}
+        self._local_dict_folded = self._build_folded_index(self._local_dict)
+        self._local_dict_compact = self._build_compact_index(self._local_dict)
 
     def save_local_dict(self):
         self._config_dir.mkdir(parents=True, exist_ok=True)
@@ -189,13 +282,14 @@ class L10nService:
         result: Dict[str, str] = {}
         if not ufl_path or not ufl_path.exists():
             return result
-        prefix = f"locale/{self._target_locale}/local_module."
+        prefix = f"locale/{self._target_locale}/"
         try:
             with zipfile.ZipFile(ufl_path, "r") as zf:
                 for name in zf.namelist():
-                    if not name.startswith(prefix):
+                    normalized_name = str(name or "").replace("\\", "/").lstrip("./").casefold()
+                    if not normalized_name.startswith(prefix.casefold()):
                         continue
-                    if not name.endswith(".sii"):
+                    if not normalized_name.endswith((".sii", ".sui")):
                         continue
                     try:
                         data = zf.read(name)
@@ -246,7 +340,8 @@ class L10nService:
 
     def translate(self, source: str, category: str = "city", source_mod: str = "",
                  allow_api: bool = False, *, locale_key: str = "",
-                 def_locale_key_present: bool = True, unit_name: str = "") -> TranslationEntry:
+                 def_locale_key_present: bool = True, unit_name: str = "",
+                 lookup_candidates: Optional[List[str]] = None) -> TranslationEntry:
         """Resolve one entry from local/native dictionaries.
 
         Online translation is opt-in.  The dialog uses this method while
@@ -258,13 +353,14 @@ class L10nService:
 
         normalized_source = self._normalize_locale_key(source)
         folded_source = normalized_source.casefold()
+        candidates = self._unique_lookup_candidates(source, lookup_candidates)
         locale_key_present = (
             source in self._native_locale_dict
             or source.casefold() in self._native_locale_folded
             or folded_source in self._native_locale_folded
         )
 
-        def entry(status: str, translated: str = "") -> TranslationEntry:
+        def entry(status: str, translated: str = "", matched_key: str = "") -> TranslationEntry:
             return TranslationEntry(
                 source=source,
                 translated=translated,
@@ -275,16 +371,22 @@ class L10nService:
                 def_locale_key_present=def_locale_key_present,
                 locale_key=locale_key or source,
                 unit_name=unit_name,
+                lookup_candidates=candidates,
+                matched_key=matched_key,
             )
 
         # 0. mod 内置原生翻译（最高优先级）
         # The game treats locale keys case-insensitively in practice.  Prefer
         # the folded table because it also preserves the last (highest
         # priority) spelling encountered while merging Mod locale files.
-        native_raw = self._native_locale_folded.get(folded_source, "")
-        native_value = str(native_raw or "")
-        if locale_key_present and native_value.strip():
-            return entry("native", native_value)
+        native_found, native_key, native_value = self._lookup_index(
+            self._native_locale_dict,
+            self._native_locale_folded,
+            self._native_locale_compact,
+            candidates,
+        )
+        if native_found and native_value.strip():
+            return entry("native", native_value, native_key)
 
         # Some map definitions contain a literal Chinese city/country name
         # instead of an @@locale_key@@ reference.  The game displays that text
@@ -294,12 +396,24 @@ class L10nService:
             return entry("native", source)
 
         # 1. 本地字典
-        if source in self._local_dict:
-            return entry("local", self._local_dict[source])
+        local_found, local_key, local_value = self._lookup_index(
+            self._local_dict,
+            self._local_dict_folded,
+            self._local_dict_compact,
+            candidates,
+        )
+        if local_found:
+            return entry("local", local_value, local_key)
 
         # 2. UFL内置库
-        if source in self._ufl_dict:
-            return entry("ufl", self._ufl_dict[source])
+        ufl_found, ufl_key, ufl_value = self._lookup_index(
+            self._ufl_dict,
+            self._ufl_dict_folded,
+            self._ufl_dict_compact,
+            candidates,
+        )
+        if ufl_found and ufl_value.strip():
+            return entry("ufl", ufl_value, ufl_key)
 
         # 3. MyMemory API (only when explicitly requested by a caller)
         if allow_api:
@@ -333,12 +447,16 @@ class L10nService:
         """用户手动修正翻译，写入本地字典"""
         if source and translated:
             self._local_dict[source] = translated
+            self._local_dict_folded = self._build_folded_index(self._local_dict)
+            self._local_dict_compact = self._build_compact_index(self._local_dict)
             self.save_local_dict()
 
     def clear_translation(self, source: str) -> None:
         """删除手动翻译，让条目恢复为原生/UFL/待填写状态。"""
         if source and source in self._local_dict:
             del self._local_dict[source]
+            self._local_dict_folded = self._build_folded_index(self._local_dict)
+            self._local_dict_compact = self._build_compact_index(self._local_dict)
             self.save_local_dict()
 
     def batch_translate(self, entries: List[TranslationEntry], progress_callback=None,
@@ -355,32 +473,29 @@ class L10nService:
                 continue
             if not entry.source:
                 continue
-            normalized_source = self._normalize_locale_key(entry.source)
-            folded_source = normalized_source.casefold()
-            native_key_present = (
-                entry.source in self._native_locale_dict
-                or folded_source in self._native_locale_folded
-                or entry.source.casefold() in self._native_locale_folded
+            resolved = self.translate(
+                entry.source,
+                entry.category,
+                entry.source_mod,
+                allow_api=False,
+                locale_key=entry.locale_key,
+                def_locale_key_present=entry.def_locale_key_present,
+                unit_name=entry.unit_name,
+                lookup_candidates=entry.lookup_candidates,
             )
-            entry.locale_key_present = native_key_present
-            native_value = str(self._native_locale_folded.get(folded_source, "") or "")
-            if native_value.strip():
-                entry.translated = native_value
-                entry.status = "native"
-                continue
-            if entry.source in self._local_dict:
-                entry.translated = self._local_dict[entry.source]
-                entry.status = "local"
-                continue
-            if entry.source in self._ufl_dict:
-                entry.translated = self._ufl_dict[entry.source]
-                entry.status = "ufl"
+            entry.locale_key_present = resolved.locale_key_present
+            entry.matched_key = resolved.matched_key
+            if resolved.status in ("native", "local", "ufl"):
+                entry.translated = resolved.translated
+                entry.status = resolved.status
                 continue
             api_result = self._translate_via_api(entry.source)
             if api_result:
                 entry.translated = api_result
                 entry.status = "api"
                 self._local_dict[entry.source] = api_result
+                self._local_dict_folded = self._build_folded_index(self._local_dict)
+                self._local_dict_compact = self._build_compact_index(self._local_dict)
                 changed = True
             else:
                 entry.status = "missing_value" if entry.locale_key_present else "missing_locale"
@@ -546,6 +661,8 @@ class L10nService:
 
         if merge:
             self._local_dict.update(valid_pairs)
+            self._local_dict_folded = self._build_folded_index(self._local_dict)
+            self._local_dict_compact = self._build_compact_index(self._local_dict)
             try:
                 self.save_local_dict()
             except Exception as e:

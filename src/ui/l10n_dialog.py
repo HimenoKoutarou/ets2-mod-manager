@@ -125,6 +125,45 @@ class L10nDialog(QDialog):
         "missing_locale": "缺少 locale key",
     }
 
+    @staticmethod
+    def _lookup_candidates(item, category: str) -> List[str]:
+        """Return canonical and legacy spellings for one map definition."""
+        values: List[str] = []
+        if category == "city":
+            values.extend((getattr(item, "locale_key", ""),
+                           getattr(item, "city_name", ""),
+                           getattr(item, "short_name", "")))
+            prefixes = ("city.",)
+        elif category == "country":
+            values.extend((getattr(item, "locale_key", ""),
+                           getattr(item, "name", "")))
+            prefixes = ("country.",)
+        elif category == "ferry":
+            values.extend((getattr(item, "locale_key", ""),
+                           getattr(item, "ferry_name", "")))
+            prefixes = ("ferry.",)
+        else:
+            values.append(getattr(item, "text", ""))
+            prefixes = ()
+        unit_name = str(getattr(item, "unit_name", "") or "")
+        values.append(unit_name)
+        for prefix in prefixes:
+            if unit_name.casefold().startswith(prefix):
+                values.append(unit_name[len(prefix):])
+                break
+        result: List[str] = []
+        seen: set[str] = set()
+        for value in values:
+            value = str(value or "").strip()
+            if not value:
+                continue
+            folded = value.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            result.append(value)
+        return result
+
     def __init__(self, l10n_service: L10nService, parent=None):
         super().__init__(parent)
         self.l10n = l10n_service
@@ -300,6 +339,7 @@ class L10nDialog(QDialog):
                 or getattr(item, "ferry_name_localized", "")
             ) if category in ("city", "country", "ferry") else True,
             unit_name=getattr(item, "unit_name", ""),
+            lookup_candidates=self._lookup_candidates(item, category),
         )
         target_list.append(entry)
         self._entries.append(entry)
@@ -311,7 +351,7 @@ class L10nDialog(QDialog):
         blocker = QSignalBlocker(table)
         row = table.rowCount()
         table.insertRow(row)
-        key_state = ("有" if entry.def_locale_key_present else "缺少 def 字段") + "/" + ("有" if entry.locale_key_present else "缺少 locale")
+        key_state = self._key_state(entry)
         values = (entry.source, entry.translated, entry.source_mod,
                   self.STATUS_LABELS.get(entry.status, entry.status), key_state)
         for column, value in enumerate(values):
@@ -321,7 +361,7 @@ class L10nDialog(QDialog):
             if column in (1, 3):
                 cell.setForeground(self.STATUS_COLORS.get(entry.status, QColor("#999")))
             elif column == 4:
-                cell.setForeground(QColor("#16a34a") if entry.def_locale_key_present and entry.locale_key_present else QColor("#dc2626"))
+                cell.setForeground(QColor("#16a34a") if entry.def_locale_key_present and (entry.locale_key_present or entry.matched_key) else QColor("#dc2626"))
             table.setItem(row, column, cell)
         del blocker
 
@@ -359,6 +399,7 @@ class L10nDialog(QDialog):
                 locale_key=source,
                 def_locale_key_present=bool(c.city_name_localized),
                 unit_name=c.unit_name,
+                lookup_candidates=self._lookup_candidates(c, "city"),
             )
             self.result.cities.append(e)
             self._entries.append(e)
@@ -369,6 +410,7 @@ class L10nDialog(QDialog):
                 locale_key=source,
                 def_locale_key_present=bool(c.name_localized),
                 unit_name=c.unit_name,
+                lookup_candidates=self._lookup_candidates(c, "country"),
             )
             self.result.countries.append(e)
             self._entries.append(e)
@@ -379,6 +421,7 @@ class L10nDialog(QDialog):
                 locale_key=source,
                 def_locale_key_present=bool(f.ferry_name_localized),
                 unit_name=f.unit_name,
+                lookup_candidates=self._lookup_candidates(f, "ferry"),
             )
             self.result.ferries.append(e)
             self._entries.append(e)
@@ -426,12 +469,22 @@ class L10nDialog(QDialog):
             item3.setFlags(item3.flags() & ~Qt.ItemIsEditable)
             table.setItem(i, 3, item3)
 
-            key_state = ("有" if e.def_locale_key_present else "缺少 def 字段") + "/" + ("有" if e.locale_key_present else "缺少 locale")
+            key_state = self._key_state(e)
             item4 = QTableWidgetItem(key_state)
-            item4.setForeground(QColor("#16a34a") if e.def_locale_key_present and e.locale_key_present else QColor("#dc2626"))
+            item4.setForeground(QColor("#16a34a") if e.def_locale_key_present and (e.locale_key_present or e.matched_key) else QColor("#dc2626"))
             item4.setFlags(item4.flags() & ~Qt.ItemIsEditable)
             table.setItem(i, 4, item4)
         del blocker
+
+    @staticmethod
+    def _key_state(entry: TranslationEntry) -> str:
+        def_state = "有" if entry.def_locale_key_present else "缺少 def 字段"
+        if entry.matched_key and entry.locale_key:
+            canonical = L10nService._normalize_locale_key(entry.locale_key).casefold()
+            matched = L10nService._normalize_locale_key(entry.matched_key).casefold()
+            if canonical != matched:
+                return f"{def_state}/别名匹配"
+        return def_state + "/" + ("有" if entry.locale_key_present else "缺少 locale")
 
     def _entries_for_table(self, table: QTableWidget) -> List[TranslationEntry]:
         if not self.result:
@@ -473,10 +526,12 @@ class L10nDialog(QDialog):
                     locale_key=e.locale_key,
                     def_locale_key_present=e.def_locale_key_present,
                     unit_name=e.unit_name,
+                    lookup_candidates=e.lookup_candidates,
                 )
                 e.translated = resolved.translated
                 e.status = resolved.status
                 e.locale_key_present = resolved.locale_key_present
+                e.matched_key = resolved.matched_key
             message = f"已清空翻译，可重新填写: {source}"
 
         for target_table, target_entries in (
@@ -593,10 +648,12 @@ class L10nDialog(QDialog):
                     locale_key=e.locale_key,
                     def_locale_key_present=e.def_locale_key_present,
                     unit_name=e.unit_name,
+                    lookup_candidates=e.lookup_candidates,
                 )
                 e.translated = new_entry.translated
                 e.status = new_entry.status
                 e.locale_key_present = new_entry.locale_key_present
+                e.matched_key = new_entry.matched_key
 
         refresh_list(self.result.cities)
         refresh_list(self.result.countries)

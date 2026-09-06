@@ -91,6 +91,31 @@ def resolve_asset(rel: str) -> Path:
     return (project_root / relp).resolve()
 
 
+def resolve_runtime_path(rel: str) -> Path:
+    """Resolve writable release data (for example ``config``)."""
+    relp = Path(rel)
+    if getattr(sys, "frozen", False):
+        return (Path(sys.executable).resolve().parent / relp).resolve()
+    return (Path(__file__).resolve().parents[2] / relp).resolve()
+
+
+def _discover_local_l10n_sources(mod_dir: Path) -> List[Path]:
+    """Find optional installed UFL/localization packages without unpacking mods."""
+    markers = ("ufl", "localization", "translation", "chinese", "汉化", "中文", "language")
+    found: List[Path] = []
+    try:
+        items = sorted(mod_dir.iterdir(), key=lambda p: p.name.casefold())
+    except OSError:
+        return found
+    for path in items:
+        if not path.is_file() or path.suffix.casefold() not in {".scs", ".zip"}:
+            continue
+        name = path.name.casefold()
+        if any(marker in name for marker in markers):
+            found.append(path.resolve())
+    return found
+
+
 def _write_startup_error(message: str) -> None:
     """Persist bootstrap failures so windowed builds never fail silently."""
     import traceback as _traceback
@@ -217,10 +242,18 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self._build_ui()
         self._build_toolbar()
         # 汉化服务
-        self._l10n_service = L10nService(Path("config"))
-        ufl_path = Path("assets/bin/himeno_sena.ufl.scs")
-        if ufl_path.exists():
-            self._l10n_service.set_ufl_mod(ufl_path)
+        self._l10n_service = L10nService(resolve_runtime_path("config"))
+        # Keep the bundled dictionary as a fallback, then merge any newer
+        # UFL/localization package already present in the user's mod folder.
+        ufl_sources: List[Path] = []
+        bundled_ufl = resolve_asset("assets/bin/himeno_sena.ufl.scs")
+        if bundled_ufl.is_file():
+            ufl_sources.append(bundled_ufl)
+        for installed in _discover_local_l10n_sources(self.paths.mod_dir):
+            if installed not in ufl_sources:
+                ufl_sources.append(installed)
+        if ufl_sources:
+            self._l10n_service.set_ufl_mods(ufl_sources)
         self._build_menubar()
         self.setStatusBar(QStatusBar(self))
         self.statusBar().showMessage(_("ui.sb_ets2_doc_dir", dir=str(self.paths.documents_dir)))

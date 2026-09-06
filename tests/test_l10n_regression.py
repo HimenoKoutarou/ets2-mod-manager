@@ -76,6 +76,38 @@ def main() -> int:
         assert normalized.status == "native"
         assert normalized.translated == "咖啡馆"
 
+        # Community map defs sometimes use an internal key while the locale
+        # package stores the display spelling.  The canonical def key remains
+        # the output key, but the existing translation must still be found.
+        service.set_native_locale({"A Coruña": "阿科鲁尼亚"})
+        alias = service.translate(
+            "a_coruna", "city", "map", allow_api=False,
+            lookup_candidates=["A Coruña"],
+        )
+        assert alias.status == "native"
+        assert alias.translated == "阿科鲁尼亚"
+        assert alias.matched_key == "A Coruña"
+        assert not alias.locale_key_present
+
+        # Multiple installed UFL packages are merged in order, so a local
+        # update can override the bundled fallback without losing older keys.
+        first_ufl = Path(tmp) / "first.ufl.scs"
+        second_ufl = Path(tmp) / "second.ufl.scs"
+        for path, key, value in (
+            (first_ufl, "Legacy City", "旧城市"),
+            (second_ufl, "New City", "新城市"),
+        ):
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr(
+                    "locale/zh_cn/local_module.test.sii",
+                    'SiiNunit { localization_db : .localization { '
+                    f'key[]: "{key}" val[]: "{value}" }}',
+                )
+        service.set_native_locale({})
+        service.set_ufl_mods([first_ufl, second_ufl])
+        assert service.translate("Legacy City").translated == "旧城市"
+        assert service.translate("New City").translated == "新城市"
+
         # Some definitions bypass locale keys and store the Chinese display
         # value directly.  This is visible as translated in-game and should
         # not be offered to the online translator again.
