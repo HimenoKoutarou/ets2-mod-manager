@@ -115,6 +115,64 @@ def find_game_locale_path(exe_path: Optional[Path] = None) -> Optional[Path]:
     return None
 
 
+def find_game_install_dir(exe_path: Optional[Path] = None) -> Optional[Path]:
+    """Return the game root containing ``locale.scs``/base archives."""
+    exe = Path(exe_path) if exe_path else find_game_exe()
+    if exe is None:
+        return None
+    try:
+        roots = (exe.parent, *exe.parents)
+    except (OSError, TypeError):
+        return None
+    for root in roots:
+        try:
+            if (root / "locale.scs").is_file() or (root / "def.scs").is_file():
+                return root.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def find_game_localization_sources(
+    exe_path: Optional[Path] = None,
+) -> list[tuple[str, str]]:
+    """Discover game base archives in low-to-high load order.
+
+    Only base/map archives are included. Cosmetic and vehicle DLCs do not
+    contribute city/country/ferry definitions and would make extraction much
+    slower without changing localization results.
+    """
+    game_dir = find_game_install_dir(exe_path)
+    if game_dir is None:
+        return []
+
+    sources: list[tuple[str, str]] = []
+    for name in ("base.scs", "base_map.scs", "def.scs"):
+        path = game_dir / name
+        if path.is_file():
+            sources.append((str(path), f"ETS2 本体 ({name})"))
+
+    map_dlc_stems = {
+        # Current ETS2 map expansions and legacy aliases.
+        "dlc_balt", "dlc_balkan_e", "dlc_balkan_w", "dlc_east",
+        "dlc_fr", "dlc_greece", "dlc_iberia", "dlc_it", "dlc_north",
+        "dlc_west", "dlc_scandinavia",
+    }
+    try:
+        dlc_paths = sorted(game_dir.glob("dlc_*.scs"), key=lambda p: p.name.casefold())
+    except OSError:
+        dlc_paths = []
+    for path in dlc_paths:
+        stem = path.stem.casefold()
+        if stem in map_dlc_stems:
+            sources.append((str(path), f"ETS2 DLC ({path.name})"))
+
+    locale = game_dir / "locale.scs"
+    if locale.is_file():
+        sources.append((str(locale), "ETS2 官方语言包 (locale.scs)"))
+    return sources
+
+
 def find_game_docs_dir() -> Optional[Path]:
     """发现 ETS2 Documents 目录（用于 crash.txt / log.txt 定位）。"""
     userprofile = os.environ.get("USERPROFILE")

@@ -589,6 +589,7 @@ def collect_all_def_files(
     should_stop=None,
     progress=None,
     official_locale_path: str | Path | None = None,
+    base_game_sources: List[Tuple[str, str]] | None = None,
 ) -> Tuple[Dict[str, FileWithPriority], Dict[str, Dict[str, str]]]:
     """
     扫描所有已启用mod，收集def文件和locale翻译文件。
@@ -597,6 +598,8 @@ def collect_all_def_files(
 
     Args:
         active_mods: [(mod_path, display_name), ...] 已按优先级排序（0为最高）
+        base_game_sources: [(archive_path, display_name), ...] 游戏本体/DLC
+            基底，按游戏覆盖顺序从低到高排列。
 
     Returns:
         (def_files_dict: {file_path: FileWithPriority},
@@ -605,11 +608,16 @@ def collect_all_def_files(
     def_files_dict: Dict[str, FileWithPriority] = {}
     native_locale_by_lang: Dict[str, Dict[str, str]] = {}
 
-    scan_mods = list(active_mods)
+    # ``active_mods`` is ordered high -> low in the UI. Base archives are
+    # supplied low -> high, so reverse them before combining the lists. The
+    # reversed enumerate below then visits base-low ... base-high, followed by
+    # mod-low ... mod-high, matching the game's overlay semantics.
+    base_sources = list(base_game_sources or [])
     if official_locale_path and Path(official_locale_path).is_file():
-        # UI order is high -> low, so append the official language archive as
-        # the lowest-priority source. Every enabled Mod may override it.
-        scan_mods.append((str(official_locale_path), "ETS2 官方语言包"))
+        official = (str(official_locale_path), "ETS2 官方语言包")
+        if not any(Path(path) == Path(official[0]) for path, _name in base_sources):
+            base_sources.append(official)
+    scan_mods = list(active_mods) + list(reversed(base_sources))
     total_mods = len(scan_mods)
     # UI order is high -> low; filesystem/game merge order is low -> high.
     for scan_index, (priority, (mod_path, display_name)) in enumerate(
@@ -894,6 +902,7 @@ def extract_game_data_for_active_mods(
     progress=None,
     item_callback=None,
     official_locale_path: str | Path | None = None,
+    base_game_sources: List[Tuple[str, str]] | None = None,
 ) -> GameDataResult:
     """
     生产环境主入口
@@ -905,6 +914,7 @@ def extract_game_data_for_active_mods(
         should_stop=should_stop,
         progress=progress,
         official_locale_path=official_locale_path,
+        base_game_sources=base_game_sources,
     )
     if should_stop and should_stop():
         return GameDataResult()

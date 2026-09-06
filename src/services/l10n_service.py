@@ -753,7 +753,10 @@ class L10nService:
         )
         for label, folder, entries, unit_type, localized_field in def_specs:
             for e in entries:
-                if not e.translated or e.def_locale_key_present or not e.unit_name:
+                # Add the missing localized field even before a translation is
+                # entered. The UI then lets the user fill the locale value by
+                # hand; automatic translation is deliberately not involved.
+                if e.def_locale_key_present or not e.unit_name:
                     continue
                 key = e.locale_key or e.source
                 if key:

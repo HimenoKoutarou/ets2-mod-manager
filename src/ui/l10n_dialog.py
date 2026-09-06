@@ -23,12 +23,20 @@ class _ExtractThread(QThread):
     canceled = Signal()
 
     def __init__(self, active_mods: list, mod_dir: str, target_locale: str = "zh_cn",
-                 official_locale_path: str = "", parent=None):
+                 official_locale_path: str = "", base_game_sources: list | None = None,
+                 parent=None):
         super().__init__(parent)
         self._active_mods = active_mods
         self._mod_dir = mod_dir
         self._target_locale = target_locale
         self._official_locale_path = official_locale_path
+        self._base_game_sources = list(base_game_sources or [])
+        if official_locale_path:
+            official_path = Path(official_locale_path)
+            if official_path.is_file() and not any(
+                Path(path) == official_path for path, _name in self._base_game_sources
+            ):
+                self._base_game_sources.append((str(official_path), "ETS2 官方语言包"))
         self._stop_requested = False
 
     def stop(self):
@@ -40,7 +48,7 @@ class _ExtractThread(QThread):
 
     def run(self):
         from core.game_data import extract_game_data_for_active_mods
-        total = len(self._active_mods)
+        total = len(self._active_mods) + len(self._base_game_sources)
         self.progress.emit(0, total, "扫描中...")
         error_text = ""
         try:
@@ -62,6 +70,7 @@ class _ExtractThread(QThread):
                 progress=progress_cb,
                 item_callback=lambda category, item: self.item_ready.emit(category, item),
                 official_locale_path=self._official_locale_path or None,
+                base_game_sources=self._base_game_sources,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -244,10 +253,18 @@ class L10nDialog(QDialog):
         self.tabs.addTab(table, name)
         return table
 
-    def start_extract(self, active_mods: list, mod_dir: str, official_locale_path: str = ""):
+    def start_extract(self, active_mods: list, mod_dir: str, official_locale_path: str = "",
+                      base_game_sources: list | None = None):
         self.current_locale = self.l10n.get_target_locale()
         self.progress_bar.setVisible(True)
-        scan_total = len(active_mods) + (1 if official_locale_path else 0)
+        self._base_game_sources = list(base_game_sources or [])
+        if official_locale_path:
+            official_path = Path(official_locale_path)
+            if official_path.is_file() and not any(
+                Path(path) == official_path for path, _name in self._base_game_sources
+            ):
+                self._base_game_sources.append((str(official_path), "ETS2 官方语言包"))
+        scan_total = len(active_mods) + len(self._base_game_sources)
         self.progress_bar.setRange(0, max(1, scan_total))
         self.status_label.setText(f"正在提取已启用mod的数据 (0/{len(active_mods)})...")
         self.locale_combo.setEnabled(False)
@@ -260,7 +277,8 @@ class L10nDialog(QDialog):
         for i, label in enumerate(("城市", "国家", "港口", "提示文本")):
             self.tabs.setTabText(i, f"{label} (0)")
         self._extract_thread = _ExtractThread(
-            active_mods, mod_dir, self.current_locale, official_locale_path, self
+            active_mods, mod_dir, self.current_locale, official_locale_path,
+            self._base_game_sources, self
         )
         self._extract_thread.progress.connect(self._on_extract_progress)
         self._extract_thread.item_ready.connect(self._on_extract_item)
@@ -295,7 +313,7 @@ class L10nDialog(QDialog):
         self.tabs.setTabText(1, "国家")
         self.tabs.setTabText(2, "港口")
         self.tabs.setTabText(3, "提示文本")
-        self.btn_translate.setText("翻译未翻译项")
+        self.btn_translate.setText("自动翻译已禁用，请手动填写")
         self.btn_translate.setEnabled(False)
         display = L10nService.LOCALE_DISPLAY_NAMES.get(new_locale, new_locale)
         self.status_label.setText(f"目标语言已切换为 {display}，请重新提取 mod 数据以获取翻译结果")
@@ -389,6 +407,15 @@ class L10nDialog(QDialog):
                 "天气、车辆、加油站等功能 Mod 不会产生城市列表。"
             )
 
+        # Streaming rows are useful for feedback, but the final merged result
+        # is authoritative. Rebuild the entries from that result so a unit
+        # observed in an intermediate source is not duplicated or left with a
+        # lower-priority definition/translation state.
+        self._entries = []
+        self._stream_seen = set()
+        for table in (self.tab_cities, self.tab_countries, self.tab_ferries, self.tab_hints):
+            table.setRowCount(0)
+
         self.l10n.set_native_locale(game_data.native_locale_dict)
 
         self.result = L10nResult()
@@ -441,8 +468,8 @@ class L10nDialog(QDialog):
         self.tabs.setTabText(3, f"提示文本 ({len(game_data.hints)})")
 
         pending = self.result.pending_count
-        self.btn_translate.setText(f"翻译未翻译项 ({pending})")
-        self.btn_translate.setEnabled(pending > 0)
+        self.btn_translate.setText(f"自动翻译已禁用，待手动填写 ({pending})")
+        self.btn_translate.setEnabled(False)
 
     def _on_extract_canceled(self):
         self.progress_bar.setVisible(False)
@@ -555,23 +582,14 @@ class L10nDialog(QDialog):
             del blocker
 
         pending = self.result.pending_count
-        self.btn_translate.setText(f"翻译未翻译项 ({pending})")
-        self.btn_translate.setEnabled(pending > 0)
+        self.btn_translate.setText(f"自动翻译已禁用，待手动填写 ({pending})")
+        self.btn_translate.setEnabled(False)
         self.status_label.setText(message)
 
     def _do_translate(self):
-        pending = [e for e in self._entries if e.status in ("pending", "failed", "missing_value", "missing_locale")]
-        if not pending:
-            return
-        self.btn_translate.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, len(pending))
-        self.status_label.setText(f"正在翻译 ({len(pending)}项)...")
-        self._translate_thread = _TranslateThread(self.l10n, pending, self)
-        self._translate_thread.progress.connect(self._on_translate_progress)
-        self._translate_thread.result_ready.connect(self._on_translate_done)
-        self._translate_thread.finished.connect(self._on_translate_thread_finished)
-        self._translate_thread.start()
+        # Automatic/network translation is intentionally disabled. Missing
+        # locale values are edited directly in the table's second column.
+        return
 
     def _on_translate_thread_finished(self):
         worker = self._translate_thread
@@ -601,8 +619,8 @@ class L10nDialog(QDialog):
         self._fill_table(self.tab_ferries, self.result.ferries)
         self._fill_table(self.tab_hints, self.result.hints)
         pending = self.result.pending_count
-        self.btn_translate.setText(f"翻译未翻译项 ({pending})")
-        self.btn_translate.setEnabled(pending > 0)
+        self.btn_translate.setText(f"自动翻译已禁用，待手动填写 ({pending})")
+        self.btn_translate.setEnabled(False)
 
     def _do_import_dict(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -666,11 +684,15 @@ class L10nDialog(QDialog):
         self._fill_table(self.tab_hints, self.result.hints)
 
         pending = self.result.pending_count
-        self.btn_translate.setText(f"翻译未翻译项 ({pending})")
-        self.btn_translate.setEnabled(pending > 0)
+        self.btn_translate.setText(f"自动翻译已禁用，待手动填写 ({pending})")
+        self.btn_translate.setEnabled(False)
 
     def _do_export(self):
-        if not self.result or self.result.translated_count == 0:
+        has_missing_def_keys = bool(self.result and any(
+            e.unit_name and not e.def_locale_key_present
+            for e in self.result.all_entries
+        ))
+        if not self.result or (self.result.translated_count == 0 and not has_missing_def_keys):
             self.status_label.setText("没有可导出的翻译内容")
             return
         default_name = "himeno_sena.generated.scs"
