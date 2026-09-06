@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Tuple
 class TranslationEntry:
     source: str = ""
     translated: str = ""
-    status: str = "pending"  # native/local/ufl/api/pending/failed/missing_locale
+    status: str = "pending"  # native/local/ufl/api/pending/failed/missing_value/missing_locale
     source_mod: str = ""
     category: str = "city"
     # Whether the active target locale already contains this key in the
@@ -48,7 +48,7 @@ class L10nResult:
 
     @property
     def pending_count(self) -> int:
-        return sum(1 for e in self.all_entries if e.status in ("pending", "failed", "missing_locale"))
+        return sum(1 for e in self.all_entries if e.status in ("pending", "failed", "missing_value", "missing_locale"))
 
     @property
     def all_entries(self) -> List[TranslationEntry]:
@@ -118,12 +118,18 @@ class L10nService:
         self._local_dict: Dict[str, str] = {}
         self._ufl_dict: Dict[str, str] = {}
         self._native_locale_dict: Dict[str, str] = {}
+        self._native_locale_folded: Dict[str, str] = {}
         self._target_locale = target_locale if target_locale in self.SUPPORTED_LOCALES else "zh_cn"
         self._load_local_dict()
 
     def set_native_locale(self, native_dict: Dict[str, str]):
         """设置 mod 内置原生翻译字典（最高优先级）"""
         self._native_locale_dict = dict(native_dict) if native_dict else {}
+        self._native_locale_folded = {
+            str(key).casefold(): value
+            for key, value in self._native_locale_dict.items()
+            if str(key)
+        }
 
     def set_ufl_mod(self, ufl_mod_path: Path):
         """设置 UFL 汉化 mod 路径并加载翻译字典"""
@@ -141,6 +147,13 @@ class L10nService:
 
     def get_target_locale(self) -> str:
         return self._target_locale
+
+    def _is_direct_target_text(self, value: str) -> bool:
+        """Whether a literal def value is already written in the target language."""
+        text = str(value or "")
+        if self._target_locale in ("zh_cn", "zh_tw"):
+            return bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text))
+        return False
 
     def _load_local_dict(self):
         if self._dict_path.exists():
@@ -190,8 +203,8 @@ class L10nService:
             keys.append(self._unescape(m.group(1)))
         for m in re.finditer(r'val\[\]\s*:\s*"((?:[^"\\]|\\.)*)"', text):
             vals.append(self._unescape(m.group(1)))
-        for i in range(min(len(keys), len(vals))):
-            pairs.append((keys[i], vals[i]))
+        for i, key in enumerate(keys):
+            pairs.append((key, vals[i] if i < len(vals) else ""))
         return pairs
 
     def _unescape(self, s: str) -> str:
@@ -227,7 +240,11 @@ class L10nService:
         if not source or not source.strip():
             return TranslationEntry(source=source, status="pending", category=category, source_mod=source_mod)
 
-        locale_key_present = source in self._native_locale_dict
+        folded_source = source.casefold()
+        locale_key_present = (
+            source in self._native_locale_dict
+            or folded_source in self._native_locale_folded
+        )
 
         def entry(status: str, translated: str = "") -> TranslationEntry:
             return TranslationEntry(
@@ -243,8 +260,20 @@ class L10nService:
             )
 
         # 0. mod 内置原生翻译（最高优先级）
-        if source in self._native_locale_dict:
-            return entry("native", self._native_locale_dict[source])
+        # The game treats locale keys case-insensitively in practice.  Prefer
+        # the folded table because it also preserves the last (highest
+        # priority) spelling encountered while merging Mod locale files.
+        native_raw = self._native_locale_folded.get(folded_source, "")
+        native_value = str(native_raw or "")
+        if locale_key_present and native_value.strip():
+            return entry("native", native_value)
+
+        # Some map definitions contain a literal Chinese city/country name
+        # instead of an @@locale_key@@ reference.  The game displays that text
+        # directly, so it is already localized even though no locale entry
+        # exists to merge.
+        if self._is_direct_target_text(source):
+            return entry("native", source)
 
         # 1. 本地字典
         if source in self._local_dict:
@@ -261,7 +290,7 @@ class L10nService:
                 return entry("api", api_result)
 
         # 4. 翻译失败
-        return entry("failed" if locale_key_present else "missing_locale")
+        return entry("missing_value" if locale_key_present else "missing_locale")
 
     def _translate_via_api(self, text: str) -> Optional[str]:
         """调用 MyMemory 翻译 API（根据 target_locale 自动确定目标语言）"""
@@ -288,6 +317,12 @@ class L10nService:
             self._local_dict[source] = translated
             self.save_local_dict()
 
+    def clear_translation(self, source: str) -> None:
+        """删除手动翻译，让条目恢复为原生/UFL/待填写状态。"""
+        if source and source in self._local_dict:
+            del self._local_dict[source]
+            self.save_local_dict()
+
     def batch_translate(self, entries: List[TranslationEntry], progress_callback=None,
                         should_stop=None) -> None:
         """批量翻译"""
@@ -302,8 +337,15 @@ class L10nService:
                 continue
             if not entry.source:
                 continue
-            if entry.source in self._native_locale_dict:
-                entry.translated = self._native_locale_dict[entry.source]
+            folded_source = entry.source.casefold()
+            native_key_present = (
+                entry.source in self._native_locale_dict
+                or folded_source in self._native_locale_folded
+            )
+            entry.locale_key_present = native_key_present
+            native_value = str(self._native_locale_folded.get(folded_source, "") or "")
+            if native_value.strip():
+                entry.translated = native_value
                 entry.status = "native"
                 continue
             if entry.source in self._local_dict:
@@ -321,7 +363,7 @@ class L10nService:
                 self._local_dict[entry.source] = api_result
                 changed = True
             else:
-                entry.status = "failed" if entry.locale_key_present else "missing_locale"
+                entry.status = "missing_value" if entry.locale_key_present else "missing_locale"
         if progress_callback:
             progress_callback(total, total, "")
         if changed:
@@ -492,41 +534,65 @@ class L10nService:
         return (success_count, skip_count, messages)
 
     def generate_l10n_mod(self, result: L10nResult, output_path: Path, mod_name: str = "Generated L10n") -> Path:
-        """生成汉化 mod .scs 文件（按 target_locale 输出目录和显示名）"""
+        """生成汉化 mod .scs 文件。
+
+        Locale 按来源 Mod 拆分为多个 SII，便于审阅和维护。对于 def 中
+        缺少 localized 字段的城市，同时生成一个最小 city_data 覆盖定义，
+        将 ``city_name_localized`` 补成 ``@@Key@@``。
+        """
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         display_name_suffix = self.LOCALE_DISPLAY_NAMES.get(self._target_locale, self._target_locale)
         full_mod_name = f"{mod_name} ({display_name_suffix})"
 
-        lines = ['SiiNunit', '{', 'localization_db : .localization', '{']
+        def _safe_name(value: str) -> str:
+            value = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value or '').strip())
+            return (value.strip('._-') or 'unknown_mod')[:80]
 
-        lines.append('\t# Cities')
-        for e in result.cities:
-            if e.translated:
-                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
-                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
+        def _group_entries(entries):
+            groups = {}
+            for e in entries:
+                if not e.translated:
+                    continue
+                groups.setdefault(e.source_mod or 'unknown_mod', []).append(e)
+            return groups
 
-        lines.append('\t# Countries')
-        for e in result.countries:
-            if e.translated:
-                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
-                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
+        grouped = {}
+        for category, entries in (
+            ('Cities', result.cities),
+            ('Countries', result.countries),
+            ('Ferries', result.ferries),
+            ('Hints', result.hints),
+        ):
+            for source_mod, values in _group_entries(entries).items():
+                grouped.setdefault(source_mod, {}).setdefault(category, []).extend(values)
 
-        lines.append('\t# Ferries')
-        for e in result.ferries:
-            if e.translated:
-                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
-                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
+        locale_files = []
+        for source_mod, categories in grouped.items():
+            lines = ['SiiNunit', '{', 'localization_db : .localization', '{']
+            for category in ('Cities', 'Countries', 'Ferries', 'Hints'):
+                values = categories.get(category, [])
+                if not values:
+                    continue
+                lines.append(f'\t# {_safe_name(source_mod)} {category}')
+                for e in values:
+                    lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
+                    lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
+            lines.extend(['}', '}'])
+            filename = (
+                'local_module.generated.sii'
+                if len(grouped) == 1
+                else f'local_module.{_safe_name(source_mod)}.sii'
+            )
+            locale_files.append((f'locale/{self._target_locale}/{filename}', '\n'.join(lines)))
 
-        lines.append('\t# Sign and prompt texts')
-        for e in result.hints:
-            if e.translated:
-                lines.append(f'\tkey[]: "{self._escape_sii(e.source)}"')
-                lines.append(f'\tval[]: "{self._escape_sii(e.translated)}"')
-
-        lines.append('}')
-        lines.append('}')
-        sii_content = '\n'.join(lines)
+        # Fallback file keeps the output valid even when every entry is still
+        # untranslated. Normally grouped contains at least one source Mod.
+        if not locale_files:
+            locale_files.append((
+                f'locale/{self._target_locale}/local_module.generated.sii',
+                'SiiNunit\n{\nlocalization_db : .localization\n{\n}\n}',
+            ))
 
         manifest = (
             'SiiNunit\n{\nmod_package : .unnamed\n{\n'
@@ -540,10 +606,42 @@ class L10nService:
 
         desc = f"{full_mod_name}\n由 ETS2 Mod Manager 自动生成\n"
 
-        sii_file_path = f"locale/{self._target_locale}/local_module.generated.sii"
+        # Generate def overrides for units that had no localized field.
+        # Keep each source Mod and entity type in its own SII file.
+        def_groups = {}
+        def_specs = (
+            ('Cities', 'city', result.cities, 'city_data', 'city_name_localized'),
+            ('Countries', 'country', result.countries, 'country_data', 'name_localized'),
+            ('Ferries', 'ferry', result.ferries, 'ferry_data', 'ferry_name_localized'),
+        )
+        for label, folder, entries, unit_type, localized_field in def_specs:
+            for e in entries:
+                if not e.translated or e.def_locale_key_present or not e.unit_name:
+                    continue
+                key = e.locale_key or e.source
+                if key:
+                    def_groups.setdefault((folder, label, e.source_mod or 'unknown_mod'), []).append((e, key, unit_type, localized_field))
+
+        def_files = {}
+        for (folder, label, source_mod), entries in def_groups.items():
+            lines = ['SiiNunit', '{', f'# {_safe_name(source_mod)} {label}']
+            for e, key, unit_type, localized_field in entries:
+                lines.extend([
+                    # unit_name comes from the SII parser's identifier token
+                    # and must stay unquoted so it overrides the original.
+                    f'{unit_type} : {e.unit_name}',
+                    '{',
+                    f'\t{localized_field}: "@@{self._escape_sii(key)}@@"',
+                    '}',
+                ])
+            lines.append('}')
+            def_files[f'def/{folder}/generated_{_safe_name(source_mod)}.sii'] = '\n'.join(lines) + '\n'
 
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(sii_file_path, sii_content)
+            for path, content in locale_files:
+                zf.writestr(path, content)
+            for path, content in def_files.items():
+                zf.writestr(path, content)
             zf.writestr("manifest.sii", manifest)
             zf.writestr("description.txt", desc)
 

@@ -58,6 +58,26 @@ def main() -> int:
         service.set_native_locale({'Road"Name': "原生道路名"})
         native = service.translate('Road"Name', "city", "map", allow_api=False)
         assert native.status == "native" and native.locale_key_present
+
+        # Locale keys in real map packages are not consistently cased.  Both
+        # the initial render and the explicit batch path must resolve them.
+        service.set_native_locale({'poti': "波季"})
+        folded = service.translate("Poti", "city", "map", allow_api=False)
+        assert folded.status == "native" and folded.translated == "波季"
+        folded_batch = TranslationEntry(source="POTI", status="missing_locale")
+        service.batch_translate([folded_batch])
+        assert folded_batch.status == "native"
+        assert folded_batch.translated == "波季"
+        assert folded_batch.locale_key_present
+
+        # Some definitions bypass locale keys and store the Chinese display
+        # value directly.  This is visible as translated in-game and should
+        # not be offered to the online translator again.
+        service.set_native_locale({})
+        direct_chinese = service.translate("南宁", "city", "map", allow_api=False)
+        assert direct_chinese.status == "native"
+        assert direct_chinese.translated == "南宁"
+        assert not direct_chinese.locale_key_present
         service.set_native_locale({})
 
         # ETS2 map defs may carry the locale key in city_name_localized as
@@ -196,6 +216,48 @@ def main() -> int:
             [(str(custom_locale_mod), "Custom Locale")]
         )
         assert custom_locales["zh_cn"]["CustomKey"] == "模组自带翻译"
+
+        # A standalone localization package may contain no def tree at all.
+        # It still contributes translations for definitions from another Mod.
+        locale_only_mod = Path(tmp) / "locale_only.scs"
+        with zipfile.ZipFile(locale_only_mod, "w") as zf:
+            zf.writestr(
+                "locale/zh_cn/local_module.translation.sii",
+                'SiiNunit { localization_db : .localization { '
+                'key[]: "MapCity" val[]: "地图城市" } }',
+            )
+        locale_only_defs, locale_only_values = collect_all_def_files(
+            [(str(locale_only_mod), "Localization Only")]
+        )
+        assert locale_only_defs == {}
+        assert locale_only_values["zh_cn"]["MapCity"] == "地图城市"
+
+        # The official language archive supplies base-game translations at
+        # the lowest priority.  Any active Mod locale must be able to replace
+        # it, including when the key spelling differs only by case.
+        official_locale = Path(tmp) / "official_locale.scs"
+        with zipfile.ZipFile(official_locale, "w") as zf:
+            zf.writestr(
+                "locale/zh_cn/local_module.base.sii",
+                'SiiNunit { localization_db : .localization { '
+                'key[]: "BaseCity" val[]: "官方城市" '
+                'key[]: "Poti" val[]: "官方波季" } }',
+            )
+        override_locale = Path(tmp) / "override_locale.scs"
+        with zipfile.ZipFile(override_locale, "w") as zf:
+            zf.writestr(
+                "locale/zh_cn/local_module.override.sii",
+                'SiiNunit { localization_db : .localization { '
+                'key[]: "poti" val[]: "模组波季" } }',
+            )
+        _, combined_locales = collect_all_def_files(
+            [(str(override_locale), "Override Locale")],
+            official_locale_path=official_locale,
+        )
+        combined_service = L10nService(Path(tmp) / "combined")
+        combined_service.set_native_locale(combined_locales["zh_cn"])
+        assert combined_service.translate("BaseCity").translated == "官方城市"
+        assert combined_service.translate("POTI").translated == "模组波季"
 
         # Active mod order is priority order (index 0 is highest). For a
         # colliding logical def path, the high-priority package must win.

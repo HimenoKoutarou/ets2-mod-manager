@@ -22,11 +22,13 @@ class _ExtractThread(QThread):
     result_ready = Signal(object)
     canceled = Signal()
 
-    def __init__(self, active_mods: list, mod_dir: str, target_locale: str = "zh_cn", parent=None):
+    def __init__(self, active_mods: list, mod_dir: str, target_locale: str = "zh_cn",
+                 official_locale_path: str = "", parent=None):
         super().__init__(parent)
         self._active_mods = active_mods
         self._mod_dir = mod_dir
         self._target_locale = target_locale
+        self._official_locale_path = official_locale_path
         self._stop_requested = False
 
     def stop(self):
@@ -59,6 +61,7 @@ class _ExtractThread(QThread):
                 should_stop=self.should_stop,
                 progress=progress_cb,
                 item_callback=lambda category, item: self.item_ready.emit(category, item),
+                official_locale_path=self._official_locale_path or None,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -202,10 +205,11 @@ class L10nDialog(QDialog):
         self.tabs.addTab(table, name)
         return table
 
-    def start_extract(self, active_mods: list, mod_dir: str):
+    def start_extract(self, active_mods: list, mod_dir: str, official_locale_path: str = ""):
         self.current_locale = self.l10n.get_target_locale()
         self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, max(1, len(active_mods)))
+        scan_total = len(active_mods) + (1 if official_locale_path else 0)
+        self.progress_bar.setRange(0, max(1, scan_total))
         self.status_label.setText(f"正在提取已启用mod的数据 (0/{len(active_mods)})...")
         self.locale_combo.setEnabled(False)
         self.btn_close.setEnabled(True)
@@ -217,7 +221,7 @@ class L10nDialog(QDialog):
         for i, label in enumerate(("城市", "国家", "港口", "提示文本")):
             self.tabs.setTabText(i, f"{label} (0)")
         self._extract_thread = _ExtractThread(
-            active_mods, mod_dir, self.current_locale, self
+            active_mods, mod_dir, self.current_locale, official_locale_path, self
         )
         self._extract_thread.progress.connect(self._on_extract_progress)
         self._extract_thread.item_ready.connect(self._on_extract_item)

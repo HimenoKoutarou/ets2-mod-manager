@@ -573,8 +573,18 @@ class _ToolbarMixin:
             )
             return
 
+        official_locale_path = ""
+        try:
+            from services.game_launcher_service import find_game_exe
+            game_exe = find_game_exe()
+            if game_exe is not None:
+                candidate = game_exe.parents[2] / "locale.scs"
+                if candidate.is_file():
+                    official_locale_path = str(candidate)
+        except Exception:
+            pass
         dialog = L10nDialog(self._l10n_service, self)
-        dialog.start_extract(mod_list, self.paths.mod_dir)
+        dialog.start_extract(mod_list, self.paths.mod_dir, official_locale_path)
         dialog.exec()
 
     def _build_menubar(self):

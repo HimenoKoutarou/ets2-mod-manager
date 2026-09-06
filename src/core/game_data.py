@@ -17,6 +17,7 @@ from .scs_archive import ScsArchiveReader
 _def_tree_presence_cache: Dict[str, bool] = {}
 _def_tree_presence_lock = threading.Lock()
 _l10n_def_presence_cache: Dict[str, bool] = {}
+_target_locale_presence_cache: Dict[str, bool] = {}
 
 
 def _unwrap_locale_key(value: str) -> str:
@@ -220,6 +221,49 @@ def _source_has_l10n_defs(source_path: Path) -> bool:
         found = False
     with _def_tree_presence_lock:
         _l10n_def_presence_cache[cache_key] = found
+    return found
+
+
+def _source_has_target_locale(source_path: Path, target_locale: str) -> bool:
+    """Return True when a package contributes the requested locale tree."""
+    locale = str(target_locale or "").strip("/\\").casefold()
+    if not locale:
+        return False
+    try:
+        stat = source_path.stat()
+        cache_key = f"{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{locale}"
+    except OSError:
+        cache_key = f"{source_path}|{locale}"
+    with _def_tree_presence_lock:
+        cached = _target_locale_presence_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    prefix = f"locale/{locale}/"
+    found = False
+    try:
+        if source_path.is_dir():
+            found = (source_path / "locale" / locale).is_dir()
+        else:
+            reader = ScsArchiveReader(source_path)
+            try:
+                if reader._mode == "zip" and reader._zf:
+                    found = any(
+                        str(name).replace("\\", "/").lstrip("./").casefold().startswith(prefix)
+                        for name in reader._zf.namelist()
+                    )
+                elif reader._mode == "external":
+                    from services.external_extractor_service import list_external_entries
+                    found = any(
+                        str(name).replace("\\", "/").lstrip("./").casefold().startswith(prefix)
+                        for name in list_external_entries(source_path)
+                    )
+            finally:
+                reader.close()
+    except Exception:
+        found = False
+    with _def_tree_presence_lock:
+        _target_locale_presence_cache[cache_key] = found
     return found
 
 
@@ -537,6 +581,7 @@ def collect_all_def_files(
     target_locale: str = "zh_cn",
     should_stop=None,
     progress=None,
+    official_locale_path: str | Path | None = None,
 ) -> Tuple[Dict[str, FileWithPriority], Dict[str, Dict[str, str]]]:
     """
     扫描所有已启用mod，收集def文件和locale翻译文件。
@@ -553,17 +598,25 @@ def collect_all_def_files(
     def_files_dict: Dict[str, FileWithPriority] = {}
     native_locale_by_lang: Dict[str, Dict[str, str]] = {}
 
-    total_mods = len(active_mods)
+    scan_mods = list(active_mods)
+    if official_locale_path and Path(official_locale_path).is_file():
+        # UI order is high -> low, so append the official language archive as
+        # the lowest-priority source. Every enabled Mod may override it.
+        scan_mods.append((str(official_locale_path), "ETS2 官方语言包"))
+    total_mods = len(scan_mods)
     # UI order is high -> low; filesystem/game merge order is low -> high.
     for scan_index, (priority, (mod_path, display_name)) in enumerate(
-        reversed(list(enumerate(active_mods)))
+        reversed(list(enumerate(scan_mods)))
     ):
         if should_stop and should_stop():
             break
         source_mod = display_name or mod_path
         source_paths = [
             source_path for source_path in _expand_mod_sources(mod_path)
-            if _source_has_l10n_defs(source_path)
+            if (
+                _source_has_l10n_defs(source_path)
+                or _source_has_target_locale(source_path, target_locale)
+            )
         ]
         if not source_paths:
             continue
@@ -833,6 +886,7 @@ def extract_game_data_for_active_mods(
     should_stop=None,
     progress=None,
     item_callback=None,
+    official_locale_path: str | Path | None = None,
 ) -> GameDataResult:
     """
     生产环境主入口
@@ -843,6 +897,7 @@ def extract_game_data_for_active_mods(
         target_locale=target_locale,
         should_stop=should_stop,
         progress=progress,
+        official_locale_path=official_locale_path,
     )
     if should_stop and should_stop():
         return GameDataResult()
