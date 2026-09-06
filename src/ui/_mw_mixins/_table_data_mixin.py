@@ -820,6 +820,9 @@ class _TableDataMixin:
     def _move(self, kind: str):
         if not self._ensure_profile_editable():
             return
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            self.statusBar().showMessage("请在“已启用模组”页调整优先级。", 3000)
+            return
         selected_rows = self.table.selected_rows()
         rows = self._selected_worklist_indices()
         if not rows: return
@@ -853,6 +856,9 @@ class _TableDataMixin:
     def _move_delta(self, delta: int):
         """在启用列表中，将选中的行往前(-)/后(+)移动 delta 个优先级（单位是 enabled-list 的 index，而非表格行）。"""
         if not self._ensure_profile_editable():
+            return
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            self.statusBar().showMessage("请在“已启用模组”页调整优先级。", 3000)
             return
         tbl = getattr(self, "table", None)
         if tbl is None: return
@@ -1170,6 +1176,9 @@ class _TableDataMixin:
         """按 package_set 整体上移分类（保持块内相对顺序）。"""
         if not self._ensure_profile_editable():
             return
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            self.statusBar().showMessage("请在“已启用模组”页调整分类优先级。", 3000)
+            return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -1191,6 +1200,9 @@ class _TableDataMixin:
     def _move_cat_down(self, cat_key: str, steps: int = 1):
         """按 package_set 整体下移分类（保持块内相对顺序）。"""
         if not self._ensure_profile_editable():
+            return
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            self.statusBar().showMessage("请在“已启用模组”页调整分类优先级。", 3000)
             return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
@@ -1214,6 +1226,9 @@ class _TableDataMixin:
         """把分类整体置顶（保持块内相对顺序）。"""
         if not self._ensure_profile_editable():
             return
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            self.statusBar().showMessage("请在“已启用模组”页调整分类优先级。", 3000)
+            return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))
             return
@@ -1235,6 +1250,9 @@ class _TableDataMixin:
     def _cat_bottom(self, cat_key: str):
         """把分类整体置底（保持块内相对顺序）。"""
         if not self._ensure_profile_editable():
+            return
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            self.statusBar().showMessage("请在“已启用模组”页调整分类优先级。", 3000)
             return
         if not self.current_profile or not self.priority_svc:
             QMessageBox.information(self, _("dlg.hint_title"), _("ui.sb_cat_no_profile"))

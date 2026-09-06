@@ -1068,8 +1068,12 @@ class _ToolbarMixin:
             mods_btn.setToolTip("仅本地存档可修改" if not editable else "")
         priority_btn = getattr(self, "_btn_priority", None)
         if priority_btn is not None:
-            priority_btn.setEnabled(editable)
-            priority_btn.setToolTip("仅本地存档可修改" if not editable else "")
+            in_priority_tab = getattr(self, "_current_mod_tab", "all") == "active"
+            priority_btn.setEnabled(editable and in_priority_tab)
+            priority_btn.setToolTip(
+                "全部模组页不可调整优先级" if editable and not in_priority_tab
+                else "仅本地存档可修改" if not editable else ""
+            )
         action = getattr(self, "_action_save_editor", None)
         if action is not None:
             action.setEnabled(editable)

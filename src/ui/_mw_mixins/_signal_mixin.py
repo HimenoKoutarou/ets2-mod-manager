@@ -1175,6 +1175,33 @@ class _SignalMixin:
             left = new_pkg.split("|", 1)[0].strip()
             if left and left != new_pkg:
                 self.all_mods_by_pkg.setdefault(left, m)
+        # Keep the O(1) canonical indexes in sync when asynchronous parsing
+        # replaces quick-scan fallback names with real manifest metadata.
+        aliases = (
+            mod_id,
+            new_pkg,
+            getattr(m.manifest, "display_name", "") or "",
+            getattr(m, "display_title", "") or "",
+        )
+        canonical_index = getattr(self, "_all_mods_by_canonical", None)
+        if isinstance(canonical_index, dict):
+            for alias in aliases:
+                key = self._canonical_mod_lookup_key(alias)
+                if key:
+                    canonical_index.setdefault(key, m)
+        priority_svc = getattr(self, "priority_svc", None)
+        if priority_svc is not None:
+            for alias in aliases:
+                raw = str(alias or "").strip()
+                if not raw:
+                    continue
+                priority_svc.by_name.setdefault(raw, m)
+                left = raw.split("|", 1)[0].strip()
+                if left:
+                    priority_svc.by_name.setdefault(left, m)
+                key = priority_svc._canonical_key(raw)
+                if key:
+                    priority_svc.by_canonical.setdefault(key, m)
         # During startup parsing, avoid rebuilding rows for every package. The
         # complete table refresh is performed once when the worker finishes.
         if not getattr(self, "_async_parse_batch_refresh", False):
@@ -1453,6 +1480,18 @@ class _SignalMixin:
             return
         try:
             prof.mod_count = len(active)
+            name = (
+                getattr(prof, "display_name", "")
+                or getattr(prof, "save_name", "")
+                or getattr(prof, "company_name", "")
+                or getattr(prof, "profile_id", "")
+            )
+            pid = str(getattr(prof, "profile_sii", "") or getattr(prof, "profile_id", ""))
+            self._update_profile_tree_label(
+                pid,
+                f"{name}（本地，已启用 {len(active)} 个 Mod）",
+                prof,
+            )
             self._fill_table_for_profile(prof, active_override=active, defer_render=True)
             self._start_profile_table_render(token)
             self.statusBar().showMessage(
@@ -1558,6 +1597,10 @@ class _SignalMixin:
     def _on_table_order_changed(self):
         if not self._ensure_profile_editable():
             return
+        # The all-mods table is an inventory/category source only.  Ignore any
+        # stale Qt order signal so it can never mutate priority state.
+        if getattr(self, "_current_mod_tab", "all") != "active":
+            return
         if getattr(self, "table", None) is getattr(self, "table_active", None):
             self._sync_active_group_order_from_table()
         else:
@@ -1622,6 +1665,14 @@ class _SignalMixin:
     def _on_mod_tab_changed(self, idx: int):
         self._current_mod_tab = "active" if idx == 1 else "all"
         self.table = self.table_active if idx == 1 else self.table_all
+        priority_btn = getattr(self, "_btn_priority", None)
+        if priority_btn is not None:
+            editable = bool(getattr(self, "_profile_editable", True))
+            priority_btn.setEnabled(editable and self._current_mod_tab == "active")
+            priority_btn.setToolTip(
+                "全部模组页不可调整优先级"
+                if editable and self._current_mod_tab != "active" else ""
+            )
         # 两张表本来就是同一份内存工作列表的投影。切 Tab 时不要重建
         # 573 行表格；重建会同步阻塞 GUI 数百毫秒，让用户感觉“点不动”。
         # 只有在表格尚未填充（例如扫描完成后首次切换）时才补一次完整渲染。
