@@ -20,6 +20,7 @@ from core.game_data import (
     _extract_ferries_from_text,
     _extract_hint_texts_from_text,
     _source_has_def_tree,
+    _source_has_l10n_defs,
     collect_all_def_files,
     parse_from_merged_files,
 )
@@ -224,6 +225,19 @@ def main() -> int:
         with zipfile.ZipFile(no_def, "w") as zf:
             zf.writestr("manifest.sii", "SiiNunit {}")
         assert _source_has_def_tree(no_def) is False
+        assert _source_has_l10n_defs(no_def) is False
+        skipped_progress = []
+        collect_all_def_files(
+            [(str(no_def), "Not a map")],
+            progress=lambda *_args: skipped_progress.append(_args),
+        )
+        assert skipped_progress == []
+
+        non_map_def = Path(tmp) / "non_map_def.scs"
+        with zipfile.ZipFile(non_map_def, "w") as zf:
+            zf.writestr("def/vehicle/truck/example.sii", "SiiNunit {}")
+        assert _source_has_def_tree(non_map_def) is True
+        assert _source_has_l10n_defs(non_map_def) is False
 
         promods_component = Mod(
             mod_id="promods-eu-model1-v282",
@@ -247,6 +261,25 @@ def main() -> int:
             ),
         )
         assert _is_l10n_candidate_mod(truck_mod) is False
+        misleading_name = Mod(
+            mod_id="navigation_map_zoom",
+            package_path=str(no_def),
+            package_type="scs",
+            manifest=ModManifest(categories=["ui"]),
+        )
+        assert _is_l10n_candidate_mod(misleading_name) is False
+        unknown_traffic = Mod(
+            mod_id="ai_traffic_pack_by_jazzycat",
+            package_path=str(no_def),
+            package_type="scs",
+        )
+        assert _is_l10n_candidate_mod(unknown_traffic) is False
+        ambiguous_map = Mod(
+            mod_id="KazakhstanTgsRC",
+            package_path=str(no_def),
+            package_type="scs",
+        )
+        assert _is_l10n_candidate_mod(ambiguous_map) is True
 
         directory_mod = Path(tmp) / "directory_mod"
         (directory_mod / "def" / "city").mkdir(parents=True)

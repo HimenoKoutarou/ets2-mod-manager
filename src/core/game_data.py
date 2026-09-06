@@ -16,6 +16,7 @@ from .scs_archive import ScsArchiveReader
 
 _def_tree_presence_cache: Dict[str, bool] = {}
 _def_tree_presence_lock = threading.Lock()
+_l10n_def_presence_cache: Dict[str, bool] = {}
 
 
 def _unwrap_locale_key(value: str) -> str:
@@ -174,6 +175,54 @@ def _source_has_def_tree(source_path: Path) -> bool:
     with _def_tree_presence_lock:
         _def_tree_presence_cache[cache_key] = found
     return found
+
+
+def _source_has_l10n_defs(source_path: Path) -> bool:
+    """Return True only when a package has localization-relevant def files."""
+    try:
+        stat = source_path.stat()
+        cache_key = f"{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    except OSError:
+        cache_key = str(source_path)
+    with _def_tree_presence_lock:
+        cached = _l10n_def_presence_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    found = False
+    try:
+        if source_path.is_dir():
+            def_root = source_path / "def"
+            if def_root.is_dir():
+                for root_name in ("city", "country", "ferry"):
+                    if (def_root / f"{root_name}.sii").is_file():
+                        found = True
+                        break
+                    if (def_root / root_name).is_dir():
+                        found = True
+                        break
+                    if any(def_root.glob(f"{root_name}.*.sii")):
+                        found = True
+                        break
+                if not found and (def_root / "sign").is_dir():
+                    found = True
+        else:
+            reader = ScsArchiveReader(source_path)
+            try:
+                if reader._mode == "zip" and reader._zf:
+                    found = any(_is_l10n_def_path(name) for name in reader._zf.namelist())
+                elif reader._mode == "external":
+                    from services.external_extractor_service import list_external_entries
+                    found = any(_is_l10n_def_path(name) for name in list_external_entries(source_path))
+            finally:
+                reader.close()
+    except Exception:
+        found = False
+    with _def_tree_presence_lock:
+        _l10n_def_presence_cache[cache_key] = found
+    return found
+
+
 def _is_l10n_def_path(path: str) -> bool:
     """Whether a logical archive path can contain city/country/ferry data.
 
@@ -181,7 +230,7 @@ def _is_l10n_def_path(path: str) -> bool:
     these roots avoids opening thousands of unrelated vehicle/company/material
     definitions in large map packages.
     """
-    value = str(path or "").replace("\\", "/").lstrip("/").lower()
+    value = str(path or "").replace("\\", "/").lstrip("./").lower()
     if not value.startswith("def/") or not value.endswith((".sii", ".sui")):
         return False
     rel = value[4:]
@@ -511,14 +560,18 @@ def collect_all_def_files(
     ):
         if should_stop and should_stop():
             break
+        source_mod = display_name or mod_path
+        source_paths = [
+            source_path for source_path in _expand_mod_sources(mod_path)
+            if _source_has_l10n_defs(source_path)
+        ]
+        if not source_paths:
+            continue
         if progress:
             progress(scan_index, total_mods, display_name or mod_path)
-        source_mod = display_name or mod_path
-        for source_path in _expand_mod_sources(mod_path):
+        for source_path in source_paths:
             if should_stop and should_stop():
                 return def_files_dict, native_locale_by_lang
-            if not _source_has_def_tree(source_path):
-                continue
             tmp_root = None
             try:
                 reader = ScsArchiveReader(source_path)

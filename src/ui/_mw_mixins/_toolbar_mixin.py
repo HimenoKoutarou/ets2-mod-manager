@@ -52,9 +52,6 @@ def _is_l10n_candidate_mod(mod) -> bool:
         for value in getattr(manifest, "categories", [])
         if str(value or "").strip()
     }
-    if not categories or any(value == "map" or value.startswith("map_") for value in categories):
-        return True
-
     names = " ".join(
         str(value or "")
         for value in (
@@ -66,9 +63,21 @@ def _is_l10n_candidate_mod(mod) -> bool:
     ).casefold().replace("_", " ").replace("-", " ")
     markers = (
         "promod", "rusmap", "sibir", "volga map", "road to aral",
-        "aral", "map", "rebuild", "map project",
+        "aral", "rebuild", "map project",
     )
-    return any(marker in names for marker in markers)
+    if any(marker in names for marker in markers):
+        return True
+    if categories:
+        return any(value == "map" or value.startswith("map_") for value in categories)
+
+    obvious_non_map = (
+        "traffic pack", "ai traffic", "bus traffic", "motorcycle traffic",
+        "truck", "trailer", "cargo pack", "sound", "weather", "skybox",
+        "graphic", "paint job", "skin pack", "physics", "interior", "tuning",
+    )
+    if any(marker in names for marker in obvious_non_map):
+        return False
+    return True
 
 
 class _ToolbarMixin:
