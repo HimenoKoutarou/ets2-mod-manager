@@ -583,12 +583,10 @@ class _ToolbarMixin:
 
         official_locale_path = ""
         try:
-            from services.game_launcher_service import find_game_exe
-            game_exe = find_game_exe()
-            if game_exe is not None:
-                candidate = game_exe.parents[2] / "locale.scs"
-                if candidate.is_file():
-                    official_locale_path = str(candidate)
+            from services.game_launcher_service import find_game_locale_path
+            candidate = find_game_locale_path()
+            if candidate is not None:
+                official_locale_path = str(candidate)
         except Exception:
             pass
         dialog = L10nDialog(self._l10n_service, self)

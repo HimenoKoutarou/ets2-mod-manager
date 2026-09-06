@@ -81,6 +81,40 @@ def find_game_exe() -> Optional[Path]:
     return None
 
 
+def find_game_locale_path(exe_path: Optional[Path] = None) -> Optional[Path]:
+    """Find the game's bundled ``locale.scs`` next to the selected game.
+
+    Steam installations normally place the executable under
+    ``<game>/bin/win_x64``.  Some users (or portable/test layouts) keep the
+    executable at a different depth, so resolve the locale by walking from
+    the executable directory toward its parents instead of relying on one
+    fixed ``parents[n]`` index.
+    """
+    exe = Path(exe_path) if exe_path else find_game_exe()
+    if exe is None:
+        return None
+    try:
+        roots = (exe.parent, *exe.parents)
+    except (OSError, TypeError):
+        return None
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            root = root.resolve()
+        except OSError:
+            pass
+        if root in seen:
+            continue
+        seen.add(root)
+        candidate = root / "locale.scs"
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def find_game_docs_dir() -> Optional[Path]:
     """发现 ETS2 Documents 目录（用于 crash.txt / log.txt 定位）。"""
     userprofile = os.environ.get("USERPROFILE")
