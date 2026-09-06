@@ -395,18 +395,64 @@ def _run_extractor(scs_path: Path, dest: Path, partial: str | None = "/manifest.
     return False
 
 
-def _run_extractor_capture(scs_path: Path, extra_args: list[str], timeout_seconds: float):
+def _run_capture_command(cmd_args: list[str], timeout_seconds: float, should_stop=None):
+    """Run a listing command while allowing the UI to cancel it."""
+    output_file = None
+    proc = None
+    try:
+        output_file = tempfile.TemporaryFile(mode="w+b")
+        proc = subprocess.Popen(
+            list(cmd_args),
+            stdout=output_file,
+            stderr=subprocess.DEVNULL,
+            creationflags=_SP_HIDE,
+            startupinfo=_SP_STARTUPINFO,
+        )
+        deadline = time.monotonic() + max(1.0, float(timeout_seconds or _TIMEOUT_SECONDS))
+        while proc.poll() is None:
+            if should_stop and should_stop():
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                return None
+            if time.monotonic() >= deadline:
+                proc.kill()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+                return None
+            time.sleep(0.05)
+        output_file.seek(0)
+        stdout = output_file.read().decode("utf-8", errors="replace")
+        return subprocess.CompletedProcess(cmd_args, proc.returncode, stdout=stdout, stderr="")
+    except OSError:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        return None
+    finally:
+        if output_file is not None:
+            output_file.close()
+
+
+def _run_extractor_capture(scs_path: Path, extra_args: list[str], timeout_seconds: float,
+                           should_stop=None):
     """Run a listing-style command with the selected engine and fallback."""
     candidates = _extractor_candidates()
     for extractor in candidates:
-        try:
-            result = _sp_run(
-                [str(extractor), str(scs_path), *extra_args],
-                capture_output=True,
-                timeout=timeout_seconds,
-                text=True,
-            )
-        except (subprocess.TimeoutExpired, OSError):
+        result = _run_capture_command(
+            [str(extractor), str(scs_path), *extra_args],
+            timeout_seconds,
+            should_stop=should_stop,
+        )
+        if result is None:
+            if should_stop and should_stop():
+                return None
             continue
         if result.returncode == 0 and (
             len(candidates) == 1 or bool((result.stdout or "").strip())
@@ -843,7 +889,7 @@ def extract_l10n_tree_to_directory(archive_path, destination, target_locale: str
         return True
 
     # Fallback for older SXC builds that do not expand wildcards.
-    listed = list_external_entries(path)
+    listed = list_external_entries(path, should_stop=should_stop)
     selected = [n for n in listed if n.lower().startswith(("def/", f"locale/{locale.lower()}/"))]
     if not selected:
         return False
@@ -872,7 +918,7 @@ def extract_l10n_tree_to_directory(archive_path, destination, target_locale: str
     return False
 
 
-def list_external_entries(archive_path) -> list[str]:
+def list_external_entries(archive_path, should_stop=None) -> list[str]:
     """List logical paths from an encrypted archive for selective workflows.
 
     SXC can enumerate encrypted ZIP/AEM packages without extracting their
@@ -881,6 +927,8 @@ def list_external_entries(archive_path) -> list[str]:
     """
     path = Path(archive_path)
     if not path.is_file():
+        return []
+    if should_stop and should_stop():
         return []
     key = _cache_key(path)
     cache = _load_entry_cache()
@@ -901,15 +949,16 @@ def list_external_entries(archive_path) -> list[str]:
     else:
         return []
     if magic == "scs_hashfs":
-        result = _run_extractor_capture(path, ["--deep", "--list"], timeout)
+        result = _run_extractor_capture(
+            path, ["--deep", "--list"], timeout, should_stop=should_stop
+        )
         if result is None:
             return []
     else:
         if not tool.exists():
             return []
-        try:
-            result = _sp_run(args, capture_output=True, timeout=timeout, text=True)
-        except (subprocess.TimeoutExpired, OSError):
+        result = _run_capture_command(args, timeout, should_stop=should_stop)
+        if result is None:
             return []
     import re as _re
     out: list[str] = []

@@ -137,7 +137,7 @@ def _expand_mod_sources(mod_path: str | Path) -> List[Path]:
     return [children[0]]
 
 
-def _source_has_def_tree(source_path: Path) -> bool:
+def _source_has_def_tree(source_path: Path, should_stop=None) -> bool:
     """快速确认包内是否存在 def/，没有则避免任何汉化解包。"""
     try:
         stat = source_path.stat()
@@ -167,7 +167,7 @@ def _source_has_def_tree(source_path: Path) -> bool:
                     from services.external_extractor_service import list_external_entries
                     found = any(
                         str(name).replace("\\", "/").lstrip("/./").lower().startswith("def/")
-                        for name in list_external_entries(source_path)
+                        for name in list_external_entries(source_path, should_stop=should_stop)
                     )
             finally:
                 reader.close()
@@ -178,7 +178,7 @@ def _source_has_def_tree(source_path: Path) -> bool:
     return found
 
 
-def _source_has_l10n_defs(source_path: Path) -> bool:
+def _source_has_l10n_defs(source_path: Path, should_stop=None) -> bool:
     """Return True only when a package has localization-relevant def files."""
     try:
         stat = source_path.stat()
@@ -212,7 +212,10 @@ def _source_has_l10n_defs(source_path: Path) -> bool:
                     found = any(_is_l10n_def_path(name) for name in reader._zf.namelist())
                 elif reader._mode == "external":
                     from services.external_extractor_service import list_external_entries
-                    found = any(_is_l10n_def_path(name) for name in list_external_entries(source_path))
+                    found = any(
+                        _is_l10n_def_path(name)
+                        for name in list_external_entries(source_path, should_stop=should_stop)
+                    )
             finally:
                 reader.close()
     except Exception:
@@ -222,7 +225,7 @@ def _source_has_l10n_defs(source_path: Path) -> bool:
     return found
 
 
-def _source_has_target_locale(source_path: Path, target_locale: str) -> bool:
+def _source_has_target_locale(source_path: Path, target_locale: str, should_stop=None) -> bool:
     """Return True when a package contributes the requested locale tree."""
     locale = str(target_locale or "").strip("/\\").casefold()
     if not locale:
@@ -254,7 +257,7 @@ def _source_has_target_locale(source_path: Path, target_locale: str) -> bool:
                     from services.external_extractor_service import list_external_entries
                     found = any(
                         str(name).replace("\\", "/").lstrip("./").casefold().startswith(prefix)
-                        for name in list_external_entries(source_path)
+                        for name in list_external_entries(source_path, should_stop=should_stop)
                     )
             finally:
                 reader.close()
@@ -634,8 +637,8 @@ def collect_all_def_files(
         source_paths = [
             source_path for source_path in _expand_mod_sources(mod_path)
             if (
-                _source_has_l10n_defs(source_path)
-                or _source_has_target_locale(source_path, target_locale)
+                _source_has_l10n_defs(source_path, should_stop=should_stop)
+                or _source_has_target_locale(source_path, target_locale, should_stop=should_stop)
             )
         ]
         if not source_paths:

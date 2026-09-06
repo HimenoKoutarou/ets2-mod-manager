@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, QSignalBlocker, QThread, Signal, QTimer
@@ -181,6 +182,8 @@ class L10nDialog(QDialog):
         self._extract_thread: Optional[_ExtractThread] = None
         self._translate_thread: Optional[_TranslateThread] = None
         self._closing_for_workers = False
+        self._close_started_at = 0.0
+        self._close_force_timer: Optional[QTimer] = None
         self.current_locale: str = l10n_service.get_target_locale()
 
         self.setWindowTitle("汉化管理")
@@ -234,7 +237,7 @@ class L10nDialog(QDialog):
 
         btn_layout.addStretch()
         self.btn_close = QPushButton("关闭")
-        self.btn_close.clicked.connect(self.close)
+        self.btn_close.clicked.connect(self._request_close)
         btn_layout.addWidget(self.btn_close)
         layout.addLayout(btn_layout)
 
@@ -691,13 +694,21 @@ class L10nDialog(QDialog):
         self.btn_translate.setEnabled(False)
 
     def _do_export(self):
-        has_missing_def_keys = bool(self.result and any(
-            e.unit_name and not e.def_locale_key_present
-            for e in self.result.all_entries
-        ))
-        if not self.result or (self.result.translated_count == 0 and not has_missing_def_keys):
+        if not self.result or not self.result.all_entries:
             self.status_label.setText("没有可导出的翻译内容")
             return
+        pending = self.result.pending_count
+        if pending:
+            choice = QMessageBox.question(
+                self,
+                "仍有项目未汉化",
+                f"当前还有 {pending} 项未汉化。仍然导出已完成的内容吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if choice != QMessageBox.Yes:
+                self.status_label.setText(f"已取消导出，仍有 {pending} 项未汉化")
+                return
         default_name = "himeno_sena.generated.scs"
         file_path, _ = QFileDialog.getSaveFileName(
             self, "导出汉化mod", default_name, "SCS Mod (*.scs);;ZIP (*.zip)"
@@ -717,22 +728,58 @@ class L10nDialog(QDialog):
 
     def reject(self):
         # Esc and the window close button must use the same safe shutdown path.
-        self.close()
+        self._request_close()
+
+    def _request_close(self):
+        """Cancel workers and close even if an external extractor is slow."""
+        if self._closing_for_workers:
+            return
+        self._closing_for_workers = True
+        self.btn_close.setEnabled(False)
+        self.setEnabled(False)
+        self.status_label.setText("正在停止扫描，请稍候…")
+        workers = [self._extract_thread, self._translate_thread]
+        running = [w for w in workers if w is not None and w.isRunning()]
+        if not running:
+            self._close_window_now()
+            return
+        self._close_started_at = time.monotonic()
+        for worker in running:
+            stop = getattr(worker, "stop", None)
+            if stop:
+                stop()
+        if self._close_force_timer is None:
+            self._close_force_timer = QTimer(self)
+            self._close_force_timer.setSingleShot(True)
+            self._close_force_timer.timeout.connect(self._force_close_workers)
+        self._close_force_timer.start(1500)
+        QTimer.singleShot(50, self._retry_close_after_workers)
+
+    def _force_close_workers(self):
+        workers = [self._extract_thread, self._translate_thread]
+        for worker in workers:
+            if worker is None or not worker.isRunning():
+                continue
+            try:
+                worker.terminate()
+                worker.wait(500)
+            except Exception:
+                pass
+        self._close_window_now()
+
+    def _close_window_now(self):
+        if self._close_force_timer is not None:
+            self._close_force_timer.stop()
+        self._closing_for_workers = False
+        self.setEnabled(True)
+        self.done(QDialog.Rejected)
 
     def closeEvent(self, event):
         workers = [self._extract_thread, self._translate_thread]
         running = [w for w in workers if w is not None and w.isRunning()]
         if running:
             event.ignore()
-            if not self._closing_for_workers:
-                self._closing_for_workers = True
-                self.setEnabled(False)
-                self.status_label.setText("正在取消扫描，请稍候…")
-                for worker in running:
-                    stop = getattr(worker, "stop", None)
-                    if stop:
-                        stop()
-            QTimer.singleShot(100, self._retry_close_after_workers)
+            self._request_close()
             return
         super().closeEvent(event)
 
@@ -741,6 +788,4 @@ class L10nDialog(QDialog):
         if any(w is not None and w.isRunning() for w in workers):
             QTimer.singleShot(100, self._retry_close_after_workers)
             return
-        self._closing_for_workers = False
-        self.setEnabled(True)
-        super().accept()
+        self._close_window_now()
