@@ -278,10 +278,19 @@ def _is_l10n_def_path(path: str) -> bool:
     if not value.startswith("def/") or not value.endswith((".sii", ".sui")):
         return False
     rel = value[4:]
-    return rel == "city.sii" or rel.startswith((
+    if rel == "city.sii" or rel.startswith((
         "city.", "city/", "country.sii", "country.", "country/",
         "ferry.sii", "ferry.", "ferry/", "sign/",
-    ))
+    )):
+        return True
+    # Some map authors nest these definitions under a project folder, e.g.
+    # ``def/world/city/*.sui``.  Include those paths without scanning all of
+    # def/company or def/vehicle.
+    parts = rel.split("/")
+    if any(part in {"city", "country", "ferry", "sign"} for part in parts[:-1]):
+        return True
+    stem = parts[-1].rsplit(".", 1)[0]
+    return stem.startswith(("city", "country", "ferry"))
 
 
 def _extract_hint_texts_from_text(text: str, source_mod: str) -> List[HintTextData]:

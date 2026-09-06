@@ -602,6 +602,9 @@ class ModTable(QTableWidget):
         # Read-only profiles remain browsable; this flag controls edit
         # affordances such as checkboxes and drag/drop only.
         self._editable = True
+        # The all-mods projection can remain a drag source for category
+        # assignment without allowing an internal priority reorder.
+        self._allow_reorder = True
         self._expanded_folders: set[str] = set()
         self.setHorizontalHeaderLabels([_("tbl.col_check"), _("tbl.col_name"), _("tbl.col_source"), _("tbl.col_size"), _("tbl.col_version"), _("tbl.col_order"), "(pkg)"])
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -624,10 +627,13 @@ class ModTable(QTableWidget):
         """Toggle editing without disabling selection, scrolling, or search."""
         self._editable = bool(editable)
         self.setDragDropMode(
-            QAbstractItemView.InternalMove if self._editable
+            QAbstractItemView.InternalMove
+            if self._editable and self._allow_reorder
+            else QAbstractItemView.DragOnly
+            if self._editable
             else QAbstractItemView.NoDragDrop
         )
-        self.setAcceptDrops(self._editable)
+        self.setAcceptDrops(self._editable and self._allow_reorder)
         was_blocked = self.signalsBlocked()
         self.blockSignals(True)
         try:
@@ -648,6 +654,19 @@ class ModTable(QTableWidget):
         finally:
             self.blockSignals(was_blocked)
 
+    def set_reorder_enabled(self, enabled: bool) -> None:
+        """Enable priority reordering independently from external dragging."""
+        self._allow_reorder = bool(enabled)
+        if not self._editable:
+            self.setDragDropMode(QAbstractItemView.NoDragDrop)
+            self.setAcceptDrops(False)
+            return
+        self.setDragDropMode(
+            QAbstractItemView.InternalMove if self._allow_reorder
+            else QAbstractItemView.DragOnly
+        )
+        self.setAcceptDrops(self._allow_reorder)
+
     def startDrag(self, supported_actions):
         """保留表格内部排序 MIME，同时标记可拖到左侧分类树。"""
         if not self._editable:
@@ -667,7 +686,7 @@ class ModTable(QTableWidget):
         drag.exec(supported_actions)
 
     def dropEvent(self, event):
-        if not self._editable:
+        if not self._editable or not self._allow_reorder:
             event.ignore()
             return
         # 不使用 QTableWidget::InternalMove：已启用页包含被隐藏的禁用行，

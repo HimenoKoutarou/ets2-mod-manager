@@ -7,6 +7,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
@@ -125,11 +126,26 @@ class L10nService:
     def set_native_locale(self, native_dict: Dict[str, str]):
         """设置 mod 内置原生翻译字典（最高优先级）"""
         self._native_locale_dict = dict(native_dict) if native_dict else {}
-        self._native_locale_folded = {
-            str(key).casefold(): value
-            for key, value in self._native_locale_dict.items()
-            if str(key)
-        }
+        folded: Dict[str, str] = {}
+        for key, value in self._native_locale_dict.items():
+            raw = str(key or "").strip()
+            if not raw:
+                continue
+            # Keep both a plain casefolded key and a Unicode-normalized form.
+            # Community Mods differ in NFC/NFD spelling and occasionally leave
+            # harmless whitespace or @@ wrappers around locale identifiers.
+            for candidate in (raw, self._normalize_locale_key(raw)):
+                if candidate:
+                    folded[candidate.casefold()] = value
+        self._native_locale_folded = folded
+
+    @staticmethod
+    def _normalize_locale_key(value: str) -> str:
+        text = str(value or "").strip()
+        if text.startswith("@@") and text.endswith("@@"):
+            text = text[2:-2].strip()
+        text = unicodedata.normalize("NFKC", text)
+        return " ".join(text.split())
 
     def set_ufl_mod(self, ufl_mod_path: Path):
         """设置 UFL 汉化 mod 路径并加载翻译字典"""
@@ -240,9 +256,11 @@ class L10nService:
         if not source or not source.strip():
             return TranslationEntry(source=source, status="pending", category=category, source_mod=source_mod)
 
-        folded_source = source.casefold()
+        normalized_source = self._normalize_locale_key(source)
+        folded_source = normalized_source.casefold()
         locale_key_present = (
             source in self._native_locale_dict
+            or source.casefold() in self._native_locale_folded
             or folded_source in self._native_locale_folded
         )
 
@@ -337,10 +355,12 @@ class L10nService:
                 continue
             if not entry.source:
                 continue
-            folded_source = entry.source.casefold()
+            normalized_source = self._normalize_locale_key(entry.source)
+            folded_source = normalized_source.casefold()
             native_key_present = (
                 entry.source in self._native_locale_dict
                 or folded_source in self._native_locale_folded
+                or entry.source.casefold() in self._native_locale_folded
             )
             entry.locale_key_present = native_key_present
             native_value = str(self._native_locale_folded.get(folded_source, "") or "")

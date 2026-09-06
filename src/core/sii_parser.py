@@ -137,30 +137,18 @@ class _SiiLexer:
                     buf.append(ch)
                     j += 1
                 raw = "".join(buf)
-                if any(ord(ch) >= 128 for ch in raw):
-                    out_chars = []
-                    k = 0
-                    raw_n = len(raw)
-                    while k < raw_n:
-                        if ord(raw[k]) >= 128:
-                            m = k
-                            while m < raw_n and ord(raw[m]) >= 128:
-                                m += 1
-                            if m - k >= 2:
-                                try:
-                                    b = raw[k:m].encode('latin-1')
-                                    out_chars.append(b.decode('utf-8', errors='replace'))
-                                except Exception:
-                                    out_chars.append(raw[k:m])
-                            else:
-                                out_chars.append(raw[k:m])
-                            k = m
-                        else:
-                            out_chars.append(raw[k])
-                            k += 1
-                    final_str = "".join(out_chars)
-                else:
-                    final_str = raw
+                # read_text() already decodes UTF-8/legacy code pages.  The
+                # old unconditional latin-1 repair corrupted valid names such
+                # as ``Kasepää`` and ``Åre`` into replacement glyphs.  Repair
+                # only unmistakable UTF-8-as-latin-1 mojibake markers.
+                final_str = raw
+                if any(marker in raw for marker in ("Ã", "Â", "â", "ð", "�")):
+                    try:
+                        repaired = raw.encode("latin-1").decode("utf-8")
+                        if "�" not in repaired:
+                            final_str = repaired
+                    except (UnicodeEncodeError, UnicodeDecodeError):
+                        pass
                 self._tokens.append((self.T_STR, final_str))
                 i = j + 1
                 continue

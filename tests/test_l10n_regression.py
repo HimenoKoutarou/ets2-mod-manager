@@ -21,6 +21,7 @@ from core.game_data import (
     _extract_hint_texts_from_text,
     _source_has_def_tree,
     _source_has_l10n_defs,
+    _is_l10n_def_path,
     collect_all_def_files,
     parse_from_merged_files,
 )
@@ -70,6 +71,11 @@ def main() -> int:
         assert folded_batch.translated == "波季"
         assert folded_batch.locale_key_present
 
+        service.set_native_locale({"  @@Cafe\u0301 @@  ": "咖啡馆"})
+        normalized = service.translate("Café", "city", "map", allow_api=False)
+        assert normalized.status == "native"
+        assert normalized.translated == "咖啡馆"
+
         # Some definitions bypass locale keys and store the Chinese display
         # value directly.  This is visible as translated in-game and should
         # not be offered to the online translator again.
@@ -79,6 +85,18 @@ def main() -> int:
         assert direct_chinese.translated == "南宁"
         assert not direct_chinese.locale_key_present
         service.set_native_locale({})
+
+        # Valid UTF-8 names with diacritics must survive SII tokenization.
+        accented = _extract_cities_from_text(
+            'SiiNunit { city_data : city.kasepaa { city_name: "Kasepää" '
+            'city_name_localized: "@@Kasepää@@" } }', "sample"
+        )[0]
+        assert accented.locale_key == "Kasepää"
+        norwegian = _extract_cities_from_text(
+            'SiiNunit { city_data : city.are { city_name: "Åre" '
+            'city_name_localized: "@@Åre@@" } }', "sample"
+        )[0]
+        assert norwegian.locale_key == "Åre"
 
         # ETS2 map defs may carry the locale key in city_name_localized as
         # @@Key@@. The scanner must expose the unwrapped key rather than the
@@ -300,6 +318,30 @@ def main() -> int:
             zf.writestr("def/vehicle/truck/example.sii", "SiiNunit {}")
         assert _source_has_def_tree(non_map_def) is True
         assert _source_has_l10n_defs(non_map_def) is False
+        assert _is_l10n_def_path("def/world/city/hidden.sui") is True
+
+        translation_mod = Mod(
+            mod_id="community_translation_pack",
+            package_path=str(locale_only_mod),
+            package_type="scs",
+            manifest=ModManifest(
+                package_name="community_translation_pack",
+                display_name="Community Chinese Translation",
+                categories=["other"],
+            ),
+        )
+        assert _is_l10n_candidate_mod(translation_mod) is True
+        category_translation_mod = Mod(
+            mod_id="generic_pack",
+            package_path=str(locale_only_mod),
+            package_type="scs",
+            manifest=ModManifest(
+                package_name="generic_pack",
+                display_name="Generic Pack",
+                categories=["localization"],
+            ),
+        )
+        assert _is_l10n_candidate_mod(category_translation_mod) is True
 
         promods_component = Mod(
             mod_id="promods-eu-model1-v282",

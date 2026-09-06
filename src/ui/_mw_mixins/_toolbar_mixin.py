@@ -63,12 +63,17 @@ def _is_l10n_candidate_mod(mod) -> bool:
     ).casefold().replace("_", " ").replace("-", " ")
     markers = (
         "promod", "rusmap", "sibir", "volga map", "road to aral",
-        "aral", "rebuild", "map project",
+        "aral", "rebuild", "map project", "localization", "translation",
+        "chinese", "language pack", "汉化", "中文", "ufl",
     )
     if any(marker in names for marker in markers):
         return True
     if categories:
-        return any(value == "map" or value.startswith("map_") for value in categories)
+        return any(
+            value == "map" or value.startswith("map_")
+            or value in {"localization", "translation", "language", "language_pack", "chinese"}
+            for value in categories
+        )
 
     obvious_non_map = (
         "traffic pack", "ai traffic", "bus traffic", "motorcycle traffic",
@@ -208,6 +213,9 @@ class _ToolbarMixin:
         self._tab_page_all = QWidget()
         lay_all = QVBoxLayout(self._tab_page_all); lay_all.setContentsMargins(0, 0, 0, 0)
         self.table_all = ModTable()
+        # The inventory tab is not a priority editor.  It remains draggable
+        # as a source for dropping Mods onto the category tree.
+        self.table_all.set_reorder_enabled(False)
         self.table_all.order_changed.connect(self._on_table_order_changed)
         self.table_all.itemSelectionChanged.connect(lambda: self._on_selection_changed(self.table_all))
         self.table_all.itemChanged.connect(self._on_check_changed)
