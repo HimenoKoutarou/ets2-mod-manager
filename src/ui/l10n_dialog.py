@@ -319,6 +319,9 @@ class L10nDialog(QDialog):
         self.status_label.setText(f"目标语言已切换为 {display}，请重新提取 mod 数据以获取翻译结果")
 
     def _on_extract_progress(self, current, total, name):
+        total = max(1, int(total or 0))
+        current = max(0, min(int(current or 0), total - 1))
+        self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(current)
         self.status_label.setText(f"正在提取 ({current}/{total}): {name}")
 

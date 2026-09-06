@@ -339,9 +339,11 @@ def main() -> int:
         scan_order = []
         collect_all_def_files(
             [(str(high), "High"), (str(low), "Low")],
-            progress=lambda _cur, _total, name: scan_order.append(name),
+            progress=lambda _cur, _total, name: scan_order.append((_cur, _total, name)),
         )
-        assert scan_order == ["Low", "High"]
+        assert [name for _cur, _total, name in scan_order if name.startswith("读取包:")] == [
+            "读取包: Low", "读取包: High"
+        ]
 
         no_def = Path(tmp) / "no_def.scs"
         with zipfile.ZipFile(no_def, "w") as zf:
@@ -353,7 +355,7 @@ def main() -> int:
             [(str(no_def), "Not a map")],
             progress=lambda *_args: skipped_progress.append(_args),
         )
-        assert skipped_progress == []
+        assert skipped_progress and skipped_progress[0][2].startswith("检查包:")
 
         non_map_def = Path(tmp) / "non_map_def.scs"
         with zipfile.ZipFile(non_map_def, "w") as zf:
@@ -376,7 +378,7 @@ def main() -> int:
             progress=lambda *_args: sign_progress.append(_args),
         )
         assert sign_defs == {}
-        assert sign_progress == []
+        assert sign_progress and sign_progress[0][2].startswith("检查包:")
 
         translation_mod = Mod(
             mod_id="community_translation_pack",

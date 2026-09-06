@@ -626,6 +626,11 @@ def collect_all_def_files(
         if should_stop and should_stop():
             break
         source_mod = display_name or mod_path
+        # Report before probing archive contents.  External HashFS/AEM
+        # archives may spend a long time listing entries; delaying this
+        # callback until after the probe made the UI appear frozen.
+        if progress:
+            progress(scan_index, total_mods, f"检查包: {source_mod}")
         source_paths = [
             source_path for source_path in _expand_mod_sources(mod_path)
             if (
@@ -636,7 +641,7 @@ def collect_all_def_files(
         if not source_paths:
             continue
         if progress:
-            progress(scan_index, total_mods, display_name or mod_path)
+            progress(scan_index, total_mods, f"读取包: {source_mod}")
         for source_path in source_paths:
             if should_stop and should_stop():
                 return def_files_dict, native_locale_by_lang
