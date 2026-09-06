@@ -143,6 +143,16 @@ def main() -> int:
         hints = _extract_hint_texts_from_text(sign_text, "sample")
         assert [hint.text for hint in hints] == ["Ourense<br>Vigo", "City centre"]
 
+        # Some legacy sign files contain UTF-8 bytes that were previously
+        # expanded as latin-1 (Ð/Ñ mojibake).  They must be repaired before
+        # becoming editable hint entries.
+        mojibake_sign = (
+            'SiiNunit { sign_template_text : sign.rus { '
+            'text: "Ð¥Ð\x90Ð\x91Ð\x90Ð\xa0Ð\x9eÐ\x92Ð¡Ð\x9a" } }'
+        )
+        repaired_hints = _extract_hint_texts_from_text(mojibake_sign, "sample")
+        assert repaired_hints and repaired_hints[0].text == "ХАБАРОВСК"
+
         # Explicit batch translation may call the network and persists results.
         service.batch_translate([entry])
         assert entry.status == "api" and calls == ['Road"Name']
@@ -319,6 +329,22 @@ def main() -> int:
         assert _source_has_def_tree(non_map_def) is True
         assert _source_has_l10n_defs(non_map_def) is False
         assert _is_l10n_def_path("def/world/city/hidden.sui") is True
+        assert _is_l10n_def_path("def/world/sign/road_sign.sii") is False
+
+        sign_only = Path(tmp) / "sign_only.scs"
+        with zipfile.ZipFile(sign_only, "w") as zf:
+            zf.writestr(
+                "def/sign/road.sii",
+                'SiiNunit { sign_template_text : sign.road { '
+                'text: "Road sign text" } }',
+            )
+        sign_progress = []
+        sign_defs, _ = collect_all_def_files(
+            [(str(sign_only), "Road Signs")],
+            progress=lambda *_args: sign_progress.append(_args),
+        )
+        assert sign_defs == {}
+        assert sign_progress == []
 
         translation_mod = Mod(
             mod_id="community_translation_pack",

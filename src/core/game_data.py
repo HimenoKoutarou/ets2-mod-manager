@@ -205,8 +205,6 @@ def _source_has_l10n_defs(source_path: Path) -> bool:
                     if any(def_root.glob(f"{root_name}.*.sii")):
                         found = True
                         break
-                if not found and (def_root / "sign").is_dir():
-                    found = True
         else:
             reader = ScsArchiveReader(source_path)
             try:
@@ -280,14 +278,14 @@ def _is_l10n_def_path(path: str) -> bool:
     rel = value[4:]
     if rel == "city.sii" or rel.startswith((
         "city.", "city/", "country.sii", "country.", "country/",
-        "ferry.sii", "ferry.", "ferry/", "sign/",
+        "ferry.sii", "ferry.", "ferry/",
     )):
         return True
     # Some map authors nest these definitions under a project folder, e.g.
     # ``def/world/city/*.sui``.  Include those paths without scanning all of
     # def/company or def/vehicle.
     parts = rel.split("/")
-    if any(part in {"city", "country", "ferry", "sign"} for part in parts[:-1]):
+    if any(part in {"city", "country", "ferry"} for part in parts[:-1]):
         return True
     stem = parts[-1].rsplit(".", 1)[0]
     return stem.startswith(("city", "country", "ferry"))
