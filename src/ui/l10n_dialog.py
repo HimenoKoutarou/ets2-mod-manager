@@ -366,12 +366,20 @@ class L10nDialog(QDialog):
                 initial_dir = str(candidate_dir)
         except (OSError, TypeError, ValueError):
             pass
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "选择已有汉化 mod 作为基准",
-            initial_dir,
-            "SCS Mod (*.scs *.zip);;所有文件 (*.*)",
-        )
+        # Use an explicit dialog rather than the static helper. On Windows the
+        # static native picker can fail to surface when this modal window has a
+        # running scan worker or recently changed focus.
+        picker = QFileDialog(self, "选择已有汉化 mod 作为基准")
+        picker.setAcceptMode(QFileDialog.AcceptOpen)
+        picker.setFileMode(QFileDialog.ExistingFile)
+        picker.setNameFilter("SCS Mod (*.scs *.zip);;所有文件 (*.*)")
+        if initial_dir:
+            picker.setDirectory(initial_dir)
+        picker.setWindowModality(Qt.WindowModal)
+        if picker.exec() != QDialog.Accepted:
+            return
+        selected = picker.selectedFiles()
+        file_path = selected[0] if selected else ""
         if not file_path:
             return
         ok, error = self.l10n.set_baseline_mod(Path(file_path))

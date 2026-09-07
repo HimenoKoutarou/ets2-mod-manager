@@ -581,6 +581,22 @@ class _ToolbarMixin:
             )
             return
 
+        # Opening the localization tool must not immediately launch a costly
+        # scan. Give the user a clear second confirmation with the number of
+        # packages that will be inspected; choosing No leaves the main window
+        # untouched and no worker thread is started.
+        from PySide6.QtWidgets import QMessageBox
+        confirm = QMessageBox.question(
+            self,
+            "汉化管理",
+            f"即将扫描 {len(mod_list)} 个已启用 Mod 的城市、国家、港口和提示文本。\n\n"
+            "扫描可能需要一些时间，是否开始？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
         official_locale_path = ""
         base_game_sources = []
         try:
