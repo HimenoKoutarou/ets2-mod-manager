@@ -357,10 +357,19 @@ class L10nDialog(QDialog):
         self.btn_clear_baseline.setEnabled(True)
 
     def _choose_baseline_mod(self) -> None:
+        # The baseline is normally an installed mod, so start in the actual
+        # mod directory instead of the process working directory.
+        initial_dir = ""
+        try:
+            candidate_dir = Path(self._mod_dir).expanduser()
+            if candidate_dir.is_dir():
+                initial_dir = str(candidate_dir)
+        except (OSError, TypeError, ValueError):
+            pass
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择已有汉化 mod 作为基准",
-            "",
+            initial_dir,
             "SCS Mod (*.scs *.zip);;所有文件 (*.*)",
         )
         if not file_path:
