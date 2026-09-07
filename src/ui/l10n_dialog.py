@@ -189,6 +189,8 @@ class L10nDialog(QDialog):
         self._closing_for_workers = False
         self._close_started_at = 0.0
         self._close_force_timer: Optional[QTimer] = None
+        self._pending_extract_args = None
+        self._extract_started = False
         self.current_locale: str = l10n_service.get_target_locale()
 
         self.setWindowTitle("汉化管理")
@@ -232,6 +234,7 @@ class L10nDialog(QDialog):
         layout.addWidget(self.progress_bar)
 
         self.tabs = QTabWidget()
+        self.tabs.setEnabled(False)
         layout.addWidget(self.tabs, 1)
 
         self.tab_cities = self._create_tab("城市")
@@ -240,6 +243,10 @@ class L10nDialog(QDialog):
         self.tab_hints = self._create_tab("提示文本")
 
         btn_layout = QHBoxLayout()
+        self.btn_start = QPushButton("开始扫描")
+        self.btn_start.clicked.connect(self._start_pending_extract)
+        btn_layout.addWidget(self.btn_start)
+
         self.btn_translate = QPushButton("翻译未翻译项")
         self.btn_translate.clicked.connect(self._do_translate)
         btn_layout.addWidget(self.btn_translate)
@@ -274,9 +281,45 @@ class L10nDialog(QDialog):
         self.tabs.addTab(table, name)
         return table
 
+    def prepare_extract(self, active_mods: list, mod_dir: str, official_locale_path: str = "",
+                        base_game_sources: list | None = None):
+        """Prepare the dialog without starting the expensive scan."""
+        self._pending_extract_args = (
+            list(active_mods or []), str(mod_dir or ""), str(official_locale_path or ""),
+            list(base_game_sources or []),
+        )
+        self._mod_dir = str(mod_dir or "")
+        self._extract_started = False
+        self.progress_bar.setVisible(False)
+        self.status_label.setText(
+            f"已准备扫描 {len(active_mods or [])} 个已启用 Mod，点击“开始扫描”后开始"
+        )
+        self.btn_start.setEnabled(True)
+        self.btn_close.setEnabled(True)
+        self.locale_combo.setEnabled(True)
+        self.btn_baseline.setEnabled(True)
+        self.btn_clear_baseline.setEnabled(self.l10n.baseline_path is not None)
+        self.tabs.setEnabled(False)
+
+    def _start_pending_extract(self):
+        if self._extract_started or not self._pending_extract_args:
+            return
+        self._extract_started = True
+        self.btn_start.setEnabled(False)
+        self.tabs.setEnabled(True)
+        active_mods, mod_dir, official_locale_path, base_game_sources = self._pending_extract_args
+        self.start_extract(active_mods, mod_dir, official_locale_path, base_game_sources)
+
     def start_extract(self, active_mods: list, mod_dir: str, official_locale_path: str = "",
                       base_game_sources: list | None = None):
+        """Start scanning immediately; retained for programmatic callers/tests."""
         self.current_locale = self.l10n.get_target_locale()
+        self._mod_dir = str(mod_dir or "")
+        self._pending_extract_args = (
+            list(active_mods or []), str(mod_dir or ""), str(official_locale_path or ""),
+            list(base_game_sources or []),
+        )
+        self._extract_started = True
         self.progress_bar.setVisible(True)
         self._base_game_sources = list(base_game_sources or [])
         if official_locale_path:
@@ -289,6 +332,8 @@ class L10nDialog(QDialog):
         self.progress_bar.setRange(0, max(1, scan_total))
         self.status_label.setText(f"正在提取已启用mod的数据 (0/{len(active_mods)})...")
         self.locale_combo.setEnabled(False)
+        self.btn_baseline.setEnabled(False)
+        self.btn_clear_baseline.setEnabled(False)
         self.btn_close.setEnabled(True)
         self.result = L10nResult()
         self._entries = []
@@ -312,6 +357,12 @@ class L10nDialog(QDialog):
         worker = self._extract_thread
         self._extract_thread = None
         self.locale_combo.setEnabled(True)
+        self.btn_baseline.setEnabled(True)
+        self.btn_clear_baseline.setEnabled(self.l10n.baseline_path is not None)
+        self.btn_start.setEnabled(True)
+        self.btn_start.setText("重新扫描")
+        self._extract_started = False
+        self.tabs.setEnabled(True)
         if worker is not None:
             worker.deleteLater()
 
