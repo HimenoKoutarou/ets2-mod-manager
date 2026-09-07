@@ -7,6 +7,9 @@ import re
 import tempfile
 import shutil
 import threading
+import json
+import hashlib
+import os
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -91,6 +94,148 @@ class FileWithPriority:
     file_text: str
     source_mod: str
     priority: int
+
+
+def _scan_cache_key(
+    active_mods: List[Tuple[str, str]],
+    target_locale: str,
+    official_locale_path: str | Path | None,
+    base_game_sources: List[Tuple[str, str]] | None,
+) -> str:
+    """Build a stable cache key from package paths and their current stamps."""
+    packages = list(active_mods or []) + list(base_game_sources or [])
+    if official_locale_path:
+        official = (str(official_locale_path), "ETS2 官方语言包")
+        if not any(str(path) == official[0] for path, _name in packages):
+            packages.append(official)
+    signature = {"version": 3, "locale": str(target_locale or "zh_cn").lower(), "packages": []}
+    for path, name in packages:
+        package_path = Path(path)
+        expanded = _expand_mod_sources(package_path) if package_path.is_dir() else [package_path]
+        if not expanded:
+            expanded = [package_path]
+        for source_path in expanded:
+            item = {"path": str(source_path), "name": str(name or "")}
+            try:
+                stat = source_path.stat()
+                is_dir = source_path.is_dir()
+                item.update({"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns), "is_dir": is_dir})
+                if is_dir:
+                    # Directory mods do not necessarily update the root
+                    # directory timestamp when a nested def/locale file is
+                    # edited. Include relevant file stamps so the cache never
+                    # serves stale localization data after a manual edit.
+                    files = []
+                    for tree in (source_path / "def", source_path / "locale" / str(target_locale or "zh_cn")):
+                        if not tree.is_dir():
+                            continue
+                        for child in tree.rglob("*"):
+                            if not child.is_file():
+                                continue
+                            try:
+                                child_stat = child.stat()
+                                files.append((child.relative_to(source_path).as_posix(), int(child_stat.st_size), int(child_stat.st_mtime_ns)))
+                            except (OSError, ValueError):
+                                continue
+                    item["tree_hash"] = hashlib.sha256(
+                        json.dumps(sorted(files), separators=(",", ":")).encode("utf-8")
+                    ).hexdigest()
+            except OSError:
+                item.update({"size": -1, "mtime_ns": 0, "is_dir": False})
+            signature["packages"].append(item)
+    raw = json.dumps(signature, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _game_data_to_payload(result: GameDataResult) -> dict:
+    """Serialize the final merged scan result for the persistent cache."""
+    from dataclasses import asdict
+    return {
+        "cities": [asdict(x) for x in result.cities],
+        "countries": [asdict(x) for x in result.countries],
+        "ferries": [asdict(x) for x in result.ferries],
+        "hints": [asdict(x) for x in result.hints],
+        "native_locale_dict": dict(result.native_locale_dict or {}),
+    }
+
+
+def _game_data_from_payload(payload: dict) -> GameDataResult:
+    result = GameDataResult()
+    for value in payload.get("cities", []) or []:
+        if isinstance(value, dict):
+            result.cities.append(CityData(**{k: value.get(k, "") for k in CityData.__dataclass_fields__}))
+    for value in payload.get("countries", []) or []:
+        if isinstance(value, dict):
+            result.countries.append(CountryData(**{k: value.get(k, "") for k in CountryData.__dataclass_fields__}))
+    for value in payload.get("ferries", []) or []:
+        if isinstance(value, dict):
+            result.ferries.append(FerryData(**{k: value.get(k, "") for k in FerryData.__dataclass_fields__}))
+    for value in payload.get("hints", []) or []:
+        if isinstance(value, dict):
+            result.hints.append(HintTextData(**{k: value.get(k, "") for k in HintTextData.__dataclass_fields__}))
+    result.city_names = [x.city_name for x in result.cities]
+    result.country_names = [x.name for x in result.countries]
+    result.ferry_names = [x.ferry_name for x in result.ferries]
+    result.hint_texts = [x.text for x in result.hints]
+    native = payload.get("native_locale_dict", {})
+    result.native_locale_dict = dict(native) if isinstance(native, dict) else {}
+    return result
+
+
+def _load_scan_cache(cache_path: str | Path | None, cache_key: str) -> Optional[GameDataResult]:
+    if not cache_path:
+        return None
+    path = Path(cache_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("version") == 3:
+            entries = payload.get("entries")
+            record = entries.get(cache_key) if isinstance(entries, dict) else None
+            data = record.get("result") if isinstance(record, dict) else None
+            return _game_data_from_payload(data) if isinstance(data, dict) else None
+        # Read the previous single-entry format once so existing users do not
+        # lose a valid cache during the format upgrade.
+        if payload.get("version") == 2 and payload.get("key") == cache_key:
+            data = payload.get("result")
+            return _game_data_from_payload(data) if isinstance(data, dict) else None
+        return None
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _save_scan_cache(cache_path: str | Path | None, cache_key: str, result: GameDataResult) -> None:
+    if not cache_path:
+        return
+    path = Path(cache_path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entries: dict = {}
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if existing.get("version") == 3 and isinstance(existing.get("entries"), dict):
+                entries.update(existing["entries"])
+            elif existing.get("version") == 2 and existing.get("key") and isinstance(existing.get("result"), dict):
+                entries[str(existing["key"])] = {
+                    "saved_at": existing.get("saved_at", 0),
+                    "result": existing["result"],
+                }
+        except (OSError, ValueError, TypeError):
+            entries = {}
+        entries[cache_key] = {
+            "saved_at": int(__import__("time").time()),
+            "result": _game_data_to_payload(result),
+        }
+        # Keep the cache bounded while allowing several profiles/mod sets to
+        # share the same persistent file.
+        if len(entries) > 8:
+            ordered = sorted(entries.items(), key=lambda item: int((item[1] or {}).get("saved_at", 0)))
+            entries = dict(ordered[-8:])
+        payload = {"version": 3, "entries": entries}
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, TypeError, ValueError):
+        pass
 
 
 def _expand_mod_sources(mod_path: str | Path) -> List[Path]:
@@ -911,11 +1056,25 @@ def extract_game_data_for_active_mods(
     item_callback=None,
     official_locale_path: str | Path | None = None,
     base_game_sources: List[Tuple[str, str]] | None = None,
+    cache_path: str | Path | None = None,
 ) -> GameDataResult:
     """
     生产环境主入口
     流程：按优先级扫描所有mod -> 路径冲突时高优先级覆盖 -> 解析def -> 最终按unit_name去重
     """
+    cache_key = _scan_cache_key(
+        active_mods,
+        target_locale,
+        official_locale_path,
+        base_game_sources,
+    )
+    cached = _load_scan_cache(cache_path, cache_key)
+    if cached is not None:
+        if progress:
+            total = max(1, len(active_mods or []) + len(base_game_sources or []))
+            progress(total, total, "恢复汉化扫描缓存")
+        return cached
+
     def_files, locales_by_lang = collect_all_def_files(
         active_mods,
         target_locale=target_locale,
@@ -928,4 +1087,5 @@ def extract_game_data_for_active_mods(
         return GameDataResult()
     native_locale = locales_by_lang.get(target_locale, {})
     result = parse_from_merged_files(def_files, native_locale, item_callback=item_callback)
+    _save_scan_cache(cache_path, cache_key, result)
     return result

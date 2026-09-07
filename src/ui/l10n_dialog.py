@@ -25,6 +25,7 @@ class _ExtractThread(QThread):
 
     def __init__(self, active_mods: list, mod_dir: str, target_locale: str = "zh_cn",
                  official_locale_path: str = "", base_game_sources: list | None = None,
+                 cache_path: str = "",
                  parent=None):
         super().__init__(parent)
         self._active_mods = active_mods
@@ -32,6 +33,7 @@ class _ExtractThread(QThread):
         self._target_locale = target_locale
         self._official_locale_path = official_locale_path
         self._base_game_sources = list(base_game_sources or [])
+        self._cache_path = cache_path
         if official_locale_path:
             official_path = Path(official_locale_path)
             if official_path.is_file() and not any(
@@ -72,6 +74,7 @@ class _ExtractThread(QThread):
                 item_callback=lambda category, item: self.item_ready.emit(category, item),
                 official_locale_path=self._official_locale_path or None,
                 base_game_sources=self._base_game_sources,
+                cache_path=self._cache_path or None,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -116,6 +119,7 @@ class _TranslateThread(QThread):
 class L10nDialog(QDialog):
     STATUS_COLORS = {
         "native":  QColor("#16a34a"),
+        "baseline": QColor("#0ea5e9"),
         "local":   QColor("#22c55e"),
         "ufl":     QColor("#3b82f6"),
         "api":     QColor("#a855f7"),
@@ -126,6 +130,7 @@ class L10nDialog(QDialog):
     }
     STATUS_LABELS = {
         "native":  "原生",
+        "baseline": "基准 mod",
         "local":   "已确认",
         "ufl":     "UFL",
         "api":     "AI翻译",
@@ -205,7 +210,19 @@ class L10nDialog(QDialog):
         self.locale_combo.currentIndexChanged.connect(self._on_locale_changed)
         top_layout.addWidget(self.locale_combo, 1)
 
+        self.btn_baseline = QPushButton("选择基准汉化 mod")
+        self.btn_baseline.clicked.connect(self._choose_baseline_mod)
+        top_layout.addWidget(self.btn_baseline)
+        self.btn_clear_baseline = QPushButton("清除基准")
+        self.btn_clear_baseline.clicked.connect(self._clear_baseline_mod)
+        self.btn_clear_baseline.setEnabled(False)
+        top_layout.addWidget(self.btn_clear_baseline)
+
         layout.addLayout(top_layout)
+
+        self.baseline_label = QLabel("基准：未选择（使用词典/UFL）")
+        self.baseline_label.setStyleSheet("color: #64748b;")
+        layout.addWidget(self.baseline_label)
 
         self.status_label = QLabel("准备提取已启用mod的数据...")
         layout.addWidget(self.status_label)
@@ -240,6 +257,7 @@ class L10nDialog(QDialog):
         self.btn_close.clicked.connect(self._request_close)
         btn_layout.addWidget(self.btn_close)
         layout.addLayout(btn_layout)
+        self._update_baseline_label()
 
     def _create_tab(self, name: str) -> QTableWidget:
         table = QTableWidget(0, 5)
@@ -281,7 +299,7 @@ class L10nDialog(QDialog):
             self.tabs.setTabText(i, f"{label} (0)")
         self._extract_thread = _ExtractThread(
             active_mods, mod_dir, self.current_locale, official_locale_path,
-            self._base_game_sources, self
+            self._base_game_sources, str(self.l10n.scan_cache_path), self
         )
         self._extract_thread.progress.connect(self._on_extract_progress)
         self._extract_thread.item_ready.connect(self._on_extract_item)
@@ -320,6 +338,48 @@ class L10nDialog(QDialog):
         self.btn_translate.setEnabled(False)
         display = L10nService.LOCALE_DISPLAY_NAMES.get(new_locale, new_locale)
         self.status_label.setText(f"目标语言已切换为 {display}，请重新提取 mod 数据以获取翻译结果")
+        if self.l10n.baseline_path is not None:
+            ok, error = self.l10n.set_baseline_mod(self.l10n.baseline_path)
+            if ok:
+                self._update_baseline_label()
+            else:
+                self.baseline_label.setText(f"基准：读取失败（{error}）")
+
+    def _update_baseline_label(self) -> None:
+        path = self.l10n.baseline_path
+        if path is None:
+            self.baseline_label.setText("基准：未选择（使用词典/UFL）")
+            self.btn_clear_baseline.setEnabled(False)
+            return
+        count = len(getattr(self.l10n, "_baseline_dict", {}) or {})
+        self.baseline_label.setText(f"基准：{path.name}（{count} 条，导出将另存为）")
+        self.baseline_label.setToolTip(str(path))
+        self.btn_clear_baseline.setEnabled(True)
+
+    def _choose_baseline_mod(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择已有汉化 mod 作为基准",
+            "",
+            "SCS Mod (*.scs *.zip);;所有文件 (*.*)",
+        )
+        if not file_path:
+            return
+        ok, error = self.l10n.set_baseline_mod(Path(file_path))
+        if not ok:
+            QMessageBox.warning(self, "基准汉化 mod", error)
+            return
+        self._update_baseline_label()
+        if self.result:
+            self._refill_with_new_dict()
+        self.status_label.setText("已加载基准汉化 mod，当前内容已按基准重新匹配")
+
+    def _clear_baseline_mod(self) -> None:
+        self.l10n.clear_baseline_mod()
+        self._update_baseline_label()
+        if self.result:
+            self._refill_with_new_dict()
+        self.status_label.setText("已清除基准汉化 mod，恢复使用词典/UFL")
 
     def _on_extract_progress(self, current, total, name):
         total = max(1, int(total or 0))
@@ -665,7 +725,7 @@ class L10nDialog(QDialog):
         """在保持 source_mod/category 的前提下，根据新字典重新翻译并刷新表格"""
         def refresh_list(lst):
             for e in lst:
-                if e.status in ("native",):
+                if e.status in ("native",) and not self.l10n.baseline_loaded:
                     continue
                 new_entry = self.l10n.translate(
                     e.source, e.category, e.source_mod, allow_api=False,
@@ -709,18 +769,36 @@ class L10nDialog(QDialog):
             if choice != QMessageBox.Yes:
                 self.status_label.setText(f"已取消导出，仍有 {pending} 项未汉化")
                 return
-        default_name = "himeno_sena.generated.scs"
+        baseline_path = self.l10n.baseline_path
+        if baseline_path is not None:
+            default_name = f"{baseline_path.stem}.corrected.{self.l10n.get_target_locale()}.scs"
+        else:
+            default_name = "himeno_sena.generated.scs"
         file_path, _ = QFileDialog.getSaveFileName(
             self, "导出汉化mod", default_name, "SCS Mod (*.scs);;ZIP (*.zip)"
         )
         if not file_path:
             return
+        if baseline_path is not None:
+            try:
+                if Path(file_path).resolve() == baseline_path.resolve():
+                    QMessageBox.warning(
+                        self,
+                        "不能覆盖基准 mod",
+                        "请选择新的文件名保存。原基准汉化 mod 将保持不变。",
+                    )
+                    return
+            except OSError:
+                pass
         try:
             display_name_suffix = L10nService.LOCALE_DISPLAY_NAMES.get(
                 self.l10n.get_target_locale(), self.l10n.get_target_locale()
             )
             self.l10n.generate_l10n_mod(
-                self.result, Path(file_path), f"Generated L10n by ETS2ModManager"
+                self.result,
+                Path(file_path),
+                "Generated L10n by ETS2ModManager",
+                baseline_path=baseline_path,
             )
             self.status_label.setText(f"已导出 ({display_name_suffix}): {file_path}")
         except Exception as e:

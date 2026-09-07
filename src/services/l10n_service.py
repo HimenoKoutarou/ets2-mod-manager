@@ -11,6 +11,8 @@ import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -50,7 +52,7 @@ class L10nResult:
 
     @property
     def translated_count(self) -> int:
-        return sum(1 for e in self.all_entries if e.status in ("native", "local", "ufl", "api"))
+        return sum(1 for e in self.all_entries if e.status in ("native", "baseline", "local", "ufl", "api"))
 
     @property
     def pending_count(self) -> int:
@@ -120,17 +122,25 @@ class L10nService:
     def __init__(self, config_dir: Path, target_locale: str = "zh_cn"):
         self._config_dir = config_dir
         self._dict_path = config_dir / "l10n_dict.json"
+        self._scan_cache_path = config_dir / "l10n_scan_cache.json"
         self._ufl_path: Optional[Path] = None
         self._ufl_paths: List[Path] = []
+        self._baseline_path: Optional[Path] = None
         self._local_dict: Dict[str, str] = {}
         self._ufl_dict: Dict[str, str] = {}
+        self._baseline_dict: Dict[str, str] = {}
+        self._baseline_alias_dict: Dict[str, str] = {}
         self._native_locale_dict: Dict[str, str] = {}
         self._native_locale_folded: Dict[str, str] = {}
         self._local_dict_folded: Dict[str, str] = {}
         self._ufl_dict_folded: Dict[str, str] = {}
+        self._baseline_dict_folded: Dict[str, str] = {}
+        self._baseline_alias_folded: Dict[str, str] = {}
         self._native_locale_compact: Dict[str, Optional[str]] = {}
         self._local_dict_compact: Dict[str, Optional[str]] = {}
         self._ufl_dict_compact: Dict[str, Optional[str]] = {}
+        self._baseline_dict_compact: Dict[str, Optional[str]] = {}
+        self._baseline_alias_compact: Dict[str, Optional[str]] = {}
         self._target_locale = target_locale if target_locale in self.SUPPORTED_LOCALES else "zh_cn"
         self._load_local_dict()
 
@@ -243,6 +253,148 @@ class L10nService:
         self._ufl_dict_folded = self._build_folded_index(self._ufl_dict)
         self._ufl_dict_compact = self._build_compact_index(self._ufl_dict)
 
+    @property
+    def scan_cache_path(self) -> Path:
+        """Persistent cache used by the localization package scan."""
+        return self._scan_cache_path
+
+    @property
+    def baseline_path(self) -> Optional[Path]:
+        return self._baseline_path
+
+    @property
+    def baseline_loaded(self) -> bool:
+        return bool(self._baseline_dict)
+
+    def set_baseline_mod(self, mod_path: Path | str | None) -> Tuple[bool, str]:
+        """Load a user's existing localization mod as the correction baseline.
+
+        The baseline remains read-only reference data. Export code must always
+        write to a separate path so the selected mod cannot be overwritten.
+        """
+        if not mod_path:
+            self.clear_baseline_mod()
+            return True, ""
+        path = Path(mod_path).expanduser()
+        if not path.exists():
+            return False, f"文件不存在: {path}"
+        try:
+            values, aliases = self._extract_locale_from_mod(path, self._target_locale)
+        except Exception as exc:
+            return False, f"读取基准汉化 mod 失败: {type(exc).__name__}: {exc}"
+        if not values:
+            return False, f"未找到 locale/{self._target_locale}/ 下的翻译内容"
+        self._baseline_path = path.resolve()
+        self._baseline_dict = values
+        self._baseline_alias_dict = aliases
+        self._baseline_dict_folded = self._build_folded_index(values)
+        self._baseline_alias_folded = self._build_folded_index(aliases)
+        self._baseline_dict_compact = self._build_compact_index(values)
+        self._baseline_alias_compact = self._build_compact_index(aliases)
+        return True, ""
+
+    def clear_baseline_mod(self) -> None:
+        self._baseline_path = None
+        self._baseline_dict = {}
+        self._baseline_alias_dict = {}
+        self._baseline_dict_folded = {}
+        self._baseline_alias_folded = {}
+        self._baseline_dict_compact = {}
+        self._baseline_alias_compact = {}
+
+    def _extract_locale_from_mod(self, mod_path: Path, target_locale: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Read locale DB files from a directory, zip/SCS archive, or encrypted SCS."""
+        target = str(target_locale or "zh_cn").strip("/\\")
+        prefix = f"locale/{target}/"
+        values: Dict[str, str] = {}
+        def_texts: List[str] = []
+        reader = None
+        temp_root: Optional[Path] = None
+        try:
+            from core.scs_archive import ScsArchiveReader
+            reader = ScsArchiveReader(mod_path)
+            if reader._mode == "external":
+                from services.external_extractor_service import extract_l10n_tree_to_directory
+                temp_root = Path(tempfile.mkdtemp(prefix="ets2mm_l10n_baseline_"))
+                if not extract_l10n_tree_to_directory(mod_path, temp_root, target_locale=target):
+                    return values, {}
+                reader.close()
+                reader = ScsArchiveReader(temp_root)
+            if reader._mode == "zip" and reader._zf is not None:
+                selected = [
+                    name for name in reader._zf.namelist()
+                    if str(name).replace("\\", "/").lstrip("/./").lower().endswith((".sii", ".sui"))
+                    and (
+                        str(name).replace("\\", "/").lstrip("/./").casefold().startswith(prefix.casefold())
+                        or str(name).replace("\\", "/").lstrip("/./").casefold().startswith("def/")
+                    )
+                ]
+                for name in selected:
+                    text = reader.read_text(name)
+                    if text:
+                        normalized = str(name).replace("\\", "/").lstrip("/./")
+                        if normalized.casefold().startswith(prefix.casefold()):
+                            for key, value in self._parse_localization_db(text):
+                                if key:
+                                    values[key] = value
+                        elif normalized.casefold().startswith("def/"):
+                            def_texts.append(text)
+            elif reader._mode == "dir":
+                root = reader.path / "locale" / target
+                if root.is_dir():
+                    for file_path in root.rglob("*"):
+                        if not file_path.is_file() or file_path.suffix.casefold() not in {".sii", ".sui"}:
+                            continue
+                        try:
+                            text = file_path.read_text(encoding="utf-8", errors="replace")
+                        except OSError:
+                            continue
+                        for key, value in self._parse_localization_db(text):
+                            if key:
+                                values[key] = value
+                def_root = reader.path / "def"
+                if def_root.is_dir():
+                    for file_path in def_root.rglob("*"):
+                        if not file_path.is_file() or file_path.suffix.casefold() not in {".sii", ".sui"}:
+                            continue
+                        try:
+                            def_texts.append(file_path.read_text(encoding="utf-8", errors="replace"))
+                        except OSError:
+                            continue
+        finally:
+            if reader is not None:
+                reader.close()
+            if temp_root is not None:
+                shutil.rmtree(temp_root, ignore_errors=True)
+        aliases: Dict[str, str] = {}
+        if def_texts and values:
+            try:
+                from core.game_data import _extract_cities_from_text, _extract_countries_from_text, _extract_ferries_from_text
+                for text in def_texts:
+                    for item in (
+                        *_extract_cities_from_text(text, "baseline"),
+                        *_extract_countries_from_text(text, "baseline"),
+                        *_extract_ferries_from_text(text, "baseline"),
+                    ):
+                        key = str(getattr(item, "locale_key", "") or "").strip()
+                        value = values.get(key, "") if key else ""
+                        if not value:
+                            continue
+                        candidates = [
+                            getattr(item, "unit_name", ""),
+                            getattr(item, "city_name", ""),
+                            getattr(item, "name", ""),
+                            getattr(item, "ferry_name", ""),
+                            key,
+                        ]
+                        for candidate in candidates:
+                            candidate = str(candidate or "").strip()
+                            if candidate:
+                                aliases[candidate] = value
+            except Exception:
+                aliases = {}
+        return values, aliases
+
     def set_target_locale(self, locale: str) -> bool:
         """切换目标语言。若成功则重新加载 UFL 翻译。返回是否成功。"""
         if locale not in self.SUPPORTED_LOCALES:
@@ -250,6 +402,19 @@ class L10nService:
         self._target_locale = locale
         if self._ufl_paths:
             self.set_ufl_mods(self._ufl_paths)
+        if self._baseline_path is not None:
+            path = self._baseline_path
+            try:
+                values, aliases = self._extract_locale_from_mod(path, locale)
+            except Exception:
+                values = {}
+                aliases = {}
+            self._baseline_dict = values
+            self._baseline_alias_dict = aliases
+            self._baseline_dict_folded = self._build_folded_index(values)
+            self._baseline_alias_folded = self._build_folded_index(aliases)
+            self._baseline_dict_compact = self._build_compact_index(values)
+            self._baseline_alias_compact = self._build_compact_index(aliases)
         return True
 
     def get_target_locale(self) -> str:
@@ -375,7 +540,29 @@ class L10nService:
                 matched_key=matched_key,
             )
 
-        # 0. mod 内置原生翻译（最高优先级）
+        # 0. 直接写入目标语言的文字不需要再查字典。
+        if self._is_direct_target_text(source):
+            return entry("native", source)
+
+        # 1. 用户选定的已有汉化 mod。它是本次修正的明确参考，优先于
+        # 当前扫描到的原生 locale、通用词典和 UFL。
+        baseline_found, baseline_key, baseline_value = self._lookup_index(
+            self._baseline_dict,
+            self._baseline_dict_folded,
+            self._baseline_dict_compact,
+            candidates,
+        )
+        if not baseline_found:
+            baseline_found, baseline_key, baseline_value = self._lookup_index(
+                self._baseline_alias_dict,
+                self._baseline_alias_folded,
+                self._baseline_alias_compact,
+                candidates,
+            )
+        if baseline_found and baseline_value.strip():
+            return entry("baseline", baseline_value, baseline_key)
+
+        # 2. mod 内置原生翻译
         # The game treats locale keys case-insensitively in practice.  Prefer
         # the folded table because it also preserves the last (highest
         # priority) spelling encountered while merging Mod locale files.
@@ -388,14 +575,7 @@ class L10nService:
         if native_found and native_value.strip():
             return entry("native", native_value, native_key)
 
-        # Some map definitions contain a literal Chinese city/country name
-        # instead of an @@locale_key@@ reference.  The game displays that text
-        # directly, so it is already localized even though no locale entry
-        # exists to merge.
-        if self._is_direct_target_text(source):
-            return entry("native", source)
-
-        # 1. 本地字典
+        # 3. 本地字典
         local_found, local_key, local_value = self._lookup_index(
             self._local_dict,
             self._local_dict_folded,
@@ -405,7 +585,7 @@ class L10nService:
         if local_found:
             return entry("local", local_value, local_key)
 
-        # 2. UFL内置库
+        # 4. UFL内置库
         ufl_found, ufl_key, ufl_value = self._lookup_index(
             self._ufl_dict,
             self._ufl_dict_folded,
@@ -415,13 +595,13 @@ class L10nService:
         if ufl_found and ufl_value.strip():
             return entry("ufl", ufl_value, ufl_key)
 
-        # 3. MyMemory API (only when explicitly requested by a caller)
+        # 5. MyMemory API (only when explicitly requested by a caller)
         if allow_api:
             api_result = self._translate_via_api(source)
             if api_result:
                 return entry("api", api_result)
 
-        # 4. 翻译失败
+        # 6. 翻译失败
         return entry("missing_value" if locale_key_present else "missing_locale")
 
     def _translate_via_api(self, text: str) -> Optional[str]:
@@ -469,7 +649,7 @@ class L10nService:
                 break
             if progress_callback:
                 progress_callback(i, total, entry.source)
-            if entry.status in ("native", "local", "ufl", "api"):
+            if entry.status in ("native", "baseline", "local", "ufl", "api"):
                 continue
             if not entry.source:
                 continue
@@ -485,7 +665,7 @@ class L10nService:
             )
             entry.locale_key_present = resolved.locale_key_present
             entry.matched_key = resolved.matched_key
-            if resolved.status in ("native", "local", "ufl"):
+            if resolved.status in ("native", "baseline", "local", "ufl"):
                 entry.translated = resolved.translated
                 entry.status = resolved.status
                 continue
@@ -670,7 +850,13 @@ class L10nService:
 
         return (success_count, skip_count, messages)
 
-    def generate_l10n_mod(self, result: L10nResult, output_path: Path, mod_name: str = "Generated L10n") -> Path:
+    def generate_l10n_mod(
+        self,
+        result: L10nResult,
+        output_path: Path,
+        mod_name: str = "Generated L10n",
+        baseline_path: Path | str | None = None,
+    ) -> Path:
         """生成汉化 mod .scs 文件。
 
         Locale 按来源 Mod 拆分为多个 SII，便于审阅和维护。对于 def 中
@@ -678,6 +864,12 @@ class L10nService:
         将 ``city_name_localized`` 补成 ``@@Key@@``。
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        if baseline_path:
+            try:
+                if Path(baseline_path).resolve() == Path(output_path).resolve():
+                    raise ValueError("输出路径不能覆盖所选基准汉化 mod")
+            except OSError:
+                pass
 
         display_name_suffix = self.LOCALE_DISPLAY_NAMES.get(self._target_locale, self._target_locale)
         full_mod_name = f"{mod_name} ({display_name_suffix})"
@@ -777,12 +969,45 @@ class L10nService:
             lines.append('}')
             def_files[f'def/{folder}/generated_{_safe_name(source_mod)}.sii'] = '\n'.join(lines) + '\n'
 
+        # Start from a readable baseline package when one was selected. This
+        # preserves translations outside the current scan while generated
+        # locale/def files below take precedence for corrected entries.
+        preserved_files: Dict[str, bytes] = {}
+        if baseline_path:
+            base = Path(baseline_path)
+            try:
+                if base.is_dir():
+                    for file_path in base.rglob("*"):
+                        if not file_path.is_file():
+                            continue
+                        rel = file_path.relative_to(base).as_posix().lstrip("/./")
+                        if rel:
+                            preserved_files[rel] = file_path.read_bytes()
+                elif base.is_file():
+                    with zipfile.ZipFile(base, "r") as base_zip:
+                        for info in base_zip.infolist():
+                            name = str(info.filename or "").replace("\\", "/").lstrip("/./")
+                            if not name or name.endswith("/"):
+                                continue
+                            try:
+                                preserved_files[name] = base_zip.read(info)
+                            except (KeyError, RuntimeError, OSError, zipfile.BadZipFile):
+                                continue
+            except (OSError, RuntimeError, zipfile.BadZipFile):
+                # Encrypted/external baselines are still usable for lookup;
+                # when their full contents cannot be read, emit a standalone
+                # generated package instead of failing the user's export.
+                preserved_files = {}
+
+        for path, content in locale_files:
+            preserved_files[path] = content.encode("utf-8")
+        for path, content in def_files.items():
+            preserved_files[path] = content.encode("utf-8")
+        preserved_files["manifest.sii"] = manifest.encode("utf-8")
+        preserved_files["description.txt"] = desc.encode("utf-8")
+
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for path, content in locale_files:
+            for path, content in preserved_files.items():
                 zf.writestr(path, content)
-            for path, content in def_files.items():
-                zf.writestr(path, content)
-            zf.writestr("manifest.sii", manifest)
-            zf.writestr("description.txt", desc)
 
         return output_path
