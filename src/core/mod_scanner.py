@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .models import Mod, ModManifest
+from domain.mod_catalog import ModCatalog
 from .scs_archive import ScsArchiveReader
 from .sii_parser import parse_mods_info
 
@@ -423,7 +424,7 @@ class ModScanner:
         如果 skip_manifest_parse=True 则不解析 .scs 内部（只得到文件名/大小/时间等基础信息），
         用于第一次快速显示列表，后续可逐个懒加载。
         """
-        mods_index: Dict[str, Mod] = {}
+        catalog = ModCatalog()
         mi_index = self.load_mods_info_index()
 
         # 1) 本地 mod 目录
@@ -435,7 +436,7 @@ class ModScanner:
                     except Exception:
                         continue
                     if mod is not None:
-                        mods_index[mod.mod_id] = mod
+                        catalog.add(mod)
             except OSError:
                 pass
 
@@ -465,17 +466,11 @@ class ModScanner:
                             mod.manifest.package_name = ws_id
                         # 强制 mod_id = ws_id 纯数字目录名（保持 workshop 识别 ID；双索引机制可正常查询）
                         mod.mod_id = ws_id
-                    if mod.mod_id not in mods_index:
-                        mods_index[mod.mod_id] = mod
-                    else:
-                        # 本地已有同名 mod：合并 Workshop 路径到已有记录
-                        existing = mods_index[mod.mod_id]
-                        existing._workshop_path = mod.package_path  # type: ignore[attr-defined]
-                        existing._has_workshop_dup = True  # type: ignore[attr-defined]
+                    catalog.add(mod)
             except OSError:
                 pass
 
-        mods_list = list(mods_index.values())
+        mods_list = [mod for mod in catalog.mods if isinstance(mod, Mod)]
         # Steam Workshop API 查询移至 main_window 后台线程执行（避免阻塞 UI）
         # 分类兜底：从 category_service 回填每个 mod 的分类（空串 = 未分类）
         if not skip_manifest_parse:

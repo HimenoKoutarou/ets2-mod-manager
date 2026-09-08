@@ -106,6 +106,28 @@ def mod_aliases(mod) -> Set[str]:
     return aliases
 
 
+def mod_identity_aliases(mod) -> Set[str]:
+    """Return strong package aliases suitable for catalog de-duplication.
+
+    Display titles are intentionally excluded: two independent packages may
+    legitimately share a human-readable title.  Package IDs, manifest unit
+    names and archive/directory stems are stable enough to merge local and
+    Workshop copies of the same Mod.
+    """
+    aliases: Set[str] = set()
+    manifest = getattr(mod, "manifest", None)
+    values: Iterable[object] = (
+        getattr(mod, "mod_id", ""),
+        getattr(manifest, "package_name", "") if manifest else "",
+    )
+    for value in values:
+        _add_alias(aliases, value)
+    package_path = str(getattr(mod, "package_path", "") or "")
+    if package_path:
+        _add_alias(aliases, Path(package_path).stem)
+    return {canonical_key(alias) for alias in aliases if canonical_key(alias)}
+
+
 def aliases_match(entry: object, mod) -> bool:
     """Return whether a Profile entry refers to the supplied Mod."""
     return bool(profile_entry_aliases(entry) & mod_aliases(mod))
