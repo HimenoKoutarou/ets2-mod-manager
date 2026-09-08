@@ -17,7 +17,6 @@ from .._mw_widgets import (
 import json
 import os
 import sys
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -1472,21 +1471,7 @@ class _TableDataMixin:
         The game can rewrite profile.sii during shutdown, so profile changes
         must never start while the game process is alive.
         """
-        try:
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            for name in ("eurotrucks2.exe", "amtrucks.exe"):
-                result = subprocess.run(
-                    ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
-                    capture_output=True, text=True,
-                    creationflags=flags, timeout=3,
-                )
-                if name.lower() in result.stdout.lower():
-                    return True
-        except Exception:
-            # If process inspection is unavailable, keep the existing save flow
-            # rather than making the manager unusable on non-Windows systems.
-            return False
-        return False
+        return bool(self.profile_svc.is_game_running())
 
     def _save_profile(self):
         if not self.current_profile:

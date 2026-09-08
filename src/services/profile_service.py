@@ -448,6 +448,10 @@ class ProfileService:
     def ensure_game_closed(self, action: str = "修改 Profile") -> None:
         require_game_closed(self.game_state, action)
 
+    def is_game_running(self) -> bool:
+        """Compatibility read API for UI code and legacy callers."""
+        return bool(self.game_state.is_running())
+
     def _auto_sii_decrypt(self) -> Optional[Path]:
         bin_dir = Path(__file__).resolve().parents[2] / "assets" / "bin"
         for name in ("SII_Decrypt.exe", "sii_core.exe"):
