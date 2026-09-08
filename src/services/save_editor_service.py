@@ -24,6 +24,7 @@ import os
 import tempfile
 import time
 import uuid
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
@@ -46,6 +47,7 @@ from services.profile_service import (
 )
 from application.profile_use_cases import require_game_closed
 from infrastructure.process.game_state import WindowsGameState
+from domain.bsii import BSIIFile, BSIIFieldValue, BSIIParseError, parse_bsii
 
 
 # =========================================================================
@@ -204,11 +206,13 @@ class SaveSlotInfo:
     _cached_bsii: Optional[bytes] = None
     _cached_magic: Optional[bytes] = None
     _field_index: Optional[Dict[str, List[Tuple[int, int, int]]]] = None
+    _cached_document: Optional[BSIIFile] = None
 
     def invalidate_cache(self) -> None:
         """写操作后调用，使解密缓存和字段索引失效。"""
         self._cached_bsii = None
         self._field_index = None
+        self._cached_document = None
         # magic 不失效：文件格式不会因修改而改变
 
 
@@ -218,8 +222,10 @@ class SaveEditorService:
     T_BOOL = 0x02
     T_F32 = 0x05
     T_F64 = 0x06
-    T_STRING = 0x27
+    T_U32 = 0x27
+    T_STRING = T_U32  # compatibility alias retained for older callers
     T_ARRAY = 0x28
+    T_I64 = 0x31
     T_STRUCT = 0x39
 
     WEAR_FIELDS = [
@@ -367,14 +373,51 @@ class SaveEditorService:
         return results
 
     def find_u32_field_value(self, bsii: bytes, field_name: str) -> List[Tuple[int, int]]:
-        """整数值尚无可靠的内联类型标记，不进行猜测式定位。"""
-        return []
+        """Find UInt32 values through the BSII schema; reject non-BSII input."""
+        try:
+            document = parse_bsii(bytes(bsii))
+        except BSIIParseError:
+            return []
+        return [
+            (value.offset, int(value.value))
+            for _, value in document.find_fields(field_name)
+            if value.type_id == self.T_U32 and value.size == 4 and isinstance(value.value, int)
+        ]
 
     def replace_float_value(self, bsii: bytearray, value_offset: int, new_value: float) -> None:
         _write_float32_at(bsii, value_offset, new_value)
 
     def replace_u32_value(self, bsii: bytearray, value_offset: int, new_value: int) -> None:
         _write_u32_at(bsii, value_offset, new_value)
+
+    @staticmethod
+    def _write_i64_value(bsii: bytearray, value_offset: int, new_value: int) -> None:
+        if value_offset < 0 or value_offset + 8 > len(bsii):
+            raise ValueError("BSII Int64 字段越界")
+        struct.pack_into("<q", bsii, value_offset, int(new_value))
+
+    def _parse_bsii_document(self, slot: SaveSlotInfo, bsii: Optional[bytes] = None) -> BSIIFile:
+        """Parse a slot's BSII once and reuse the immutable document cache."""
+        data = bytes(bsii) if bsii is not None else self.decrypt_game_sii(slot)
+        if slot._cached_document is not None and slot._cached_bsii == data:
+            return slot._cached_document
+        document = parse_bsii(data)
+        if slot._cached_bsii == data:
+            slot._cached_document = document
+        return document
+
+    @staticmethod
+    def _single_typed_field(
+        document: BSIIFile,
+        field_name: str,
+        structure_name: str,
+        type_id: int,
+    ) -> Optional[BSIIFieldValue]:
+        matches = document.find_fields(field_name, structure_names=[structure_name])
+        if len(matches) != 1:
+            return None
+        value = matches[0][1]
+        return value if value.type_id == type_id else None
 
     # ---------- 功能 3：重命名 profile ----------
 
@@ -531,62 +574,113 @@ class SaveEditorService:
 
     def set_player_money(self, slot: SaveSlotInfo, new_money: float,
                           current_money_hint: Optional[float] = None) -> bool:
-        # 解密结果走 slot._cached_bsii 缓存（写时由 _save_game_sii 失效）
+        """Set the canonical bank balance stored as a signed Int64."""
+        try:
+            requested = float(new_money)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(requested):
+            return False
+        target = int(round(requested))
+        if not -(1 << 63) <= target <= (1 << 63) - 1:
+            return False
+
         bsii = bytearray(self.decrypt_game_sii(slot))
-        modified = False
-
-        # 策略1：用字段索引查找（一次扫描建立，多次复用）
-        for fname in ("money", "money_account", "player_money", "bank_money", "account_balance"):
-            hits = self.find_float_field_value(bsii, fname)
-            for offset, val in hits:
-                if val != val or abs(val) > 1e15:
-                    continue
-                if current_money_hint is not None:
-                    if abs(val - current_money_hint) > max(1.0, abs(current_money_hint) * 0.01):
-                        continue
-                self.replace_float_value(bsii, offset, float(new_money))
-                modified = True
-
-        if modified:
-            self._save_game_sii(slot, bytes(bsii))
-        return modified
+        try:
+            document = self._parse_bsii_document(slot, bsii)
+        except BSIIParseError:
+            return False
+        field = self._single_typed_field(document, "money_account", "bank", self.T_I64)
+        if field is None or field.size != 8 or not isinstance(field.value, int):
+            return False
+        current = int(field.value)
+        if current_money_hint is not None:
+            try:
+                hint = float(current_money_hint)
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(hint):
+                return False
+            if abs(current - hint) > max(1.0, abs(hint) * 0.01):
+                return False
+        if current == target:
+            return False
+        self._write_i64_value(bsii, field.offset, target)
+        self._save_game_sii(slot, bytes(bsii))
+        return True
 
     def set_player_experience(self, slot: SaveSlotInfo, new_xp: float,
                                current_xp_hint: Optional[float] = None) -> bool:
+        """Set the canonical economy experience value stored as UInt32."""
+        try:
+            requested = float(new_xp)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(requested):
+            return False
+        target = int(round(requested))
+        if not 0 <= target <= (1 << 32) - 1:
+            return False
+
         bsii = bytearray(self.decrypt_game_sii(slot))
-        modified = False
-
-        hits = self.find_float_field_value(bsii, "experience_points")
-        for offset, val in hits:
-            if val != val or abs(val) > 1e12:
-                continue
-            if current_xp_hint is not None:
-                if abs(val - current_xp_hint) > max(1.0, abs(current_xp_hint) * 0.01):
-                    continue
-            self.replace_float_value(bsii, offset, float(new_xp))
-            modified = True
-
-        if modified:
-            self._save_game_sii(slot, bytes(bsii))
-        return modified
+        try:
+            document = self._parse_bsii_document(slot, bsii)
+        except BSIIParseError:
+            return False
+        field = self._single_typed_field(document, "experience_points", "economy", self.T_U32)
+        if field is None or field.size != 4 or not isinstance(field.value, int):
+            return False
+        current = int(field.value)
+        if current_xp_hint is not None:
+            try:
+                hint = float(current_xp_hint)
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(hint):
+                return False
+            if abs(current - hint) > max(1.0, abs(hint) * 0.01):
+                return False
+        if current == target:
+            return False
+        self.replace_u32_value(bsii, field.offset, target)
+        self._save_game_sii(slot, bytes(bsii))
+        return True
 
     def set_player_level(self, slot: SaveSlotInfo, new_level: int,
                           current_level_hint: Optional[int] = None) -> bool:
+        """Update the derived level by writing its canonical XP value.
+
+        Current BSII saves do not persist a standalone ``level`` field.  The
+        game derives it from ``economy.experience_points``.
+        """
+        try:
+            target_level = int(new_level)
+        except (TypeError, ValueError):
+            return False
+        if not 1 <= target_level <= 200:
+            return False
+
         bsii = bytearray(self.decrypt_game_sii(slot))
-        modified = False
-
-        hits = self.find_u32_field_value(bsii, "level")
-        for offset, val in hits:
-            if val > 1000:
-                continue
-            if current_level_hint is not None and val != current_level_hint:
-                continue
-            self.replace_u32_value(bsii, offset, int(new_level))
-            modified = True
-
-        if modified:
-            self._save_game_sii(slot, bytes(bsii))
-        return modified
+        try:
+            document = self._parse_bsii_document(slot, bsii)
+        except BSIIParseError:
+            return False
+        field = self._single_typed_field(document, "experience_points", "economy", self.T_U32)
+        if field is None or field.size != 4 or not isinstance(field.value, int):
+            return False
+        current_level = self._level_from_xp(int(field.value))
+        if current_level_hint is not None:
+            try:
+                if current_level != int(current_level_hint):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        target_xp = int(round(self.xp_for_level(target_level)))
+        if int(field.value) == target_xp:
+            return False
+        self.replace_u32_value(bsii, field.offset, target_xp)
+        self._save_game_sii(slot, bytes(bsii))
+        return True
 
     # ---------- 功能 6：解锁地图 / 车库 / 经销商 ----------
 
@@ -723,23 +817,22 @@ class SaveEditorService:
     def read_current_money(self, slot: SaveSlotInfo) -> Optional[float]:
         try:
             bsii = self.decrypt_game_sii(slot)
-            for fname in ("money", "money_account", "player_money"):
-                hits = self.find_float_field_value(bsii, fname)
-                for offset, val in hits:
-                    if val == val and 0 < abs(val) < 1e15:
-                        return val
-            return None
+            document = self._parse_bsii_document(slot, bsii)
+            field = self._single_typed_field(document, "money_account", "bank", self.T_I64)
+            if field is None or field.size != 8:
+                return None
+            return float(field.value)
         except Exception:
             return None
 
     def read_current_xp(self, slot: SaveSlotInfo) -> Optional[float]:
         try:
             bsii = self.decrypt_game_sii(slot)
-            hits = self.find_float_field_value(bsii, "experience_points")
-            for offset, val in hits:
-                if val == val and 0 <= val < 1e12:
-                    return val
-            return None
+            document = self._parse_bsii_document(slot, bsii)
+            field = self._single_typed_field(document, "experience_points", "economy", self.T_U32)
+            if field is None or field.size != 4:
+                return None
+            return float(field.value)
         except Exception:
             return None
 
@@ -749,20 +842,21 @@ class SaveEditorService:
             xp = self.read_current_xp(slot)
             if xp is None:
                 return None
-            # ETS2 等级公式（近似）：
-            # Level 1: 0 XP, Level 2: ~1000 XP, Level 3: ~3000 XP, ...
-            # 每级所需 = level * 1000 (累计)
-            # xp_needed(N) = N * (N-1) * 500
-            level = 1
-            while level < 200:
-                needed = level * (level - 1) * 500
-                next_needed = (level + 1) * level * 500
-                if needed <= xp < next_needed:
-                    return level
-                level += 1
-            return level
+            return self._level_from_xp(int(xp))
         except Exception:
             return None
+
+    @staticmethod
+    def _level_from_xp(xp: int) -> int:
+        xp = max(0, int(xp))
+        level = 1
+        while level < 200:
+            needed = level * (level - 1) * 500
+            next_needed = (level + 1) * level * 500
+            if needed <= xp < next_needed:
+                return level
+            level += 1
+        return level
 
     @staticmethod
     def xp_for_level(level: int) -> float:

@@ -17,11 +17,46 @@ from services.save_editor_service import (  # noqa: E402
     encrypt_scsc,
 )
 from services.profile_service import ProfileInfo  # noqa: E402
+from domain.bsii import parse_bsii  # noqa: E402
 
 
 def _field(name: str, type_byte: int, payload: bytes) -> bytes:
     raw = name.encode("ascii")
     return struct.pack("<I", len(raw)) + raw + bytes([type_byte]) + b"\x00\x00\x00" + payload
+
+
+def _encoded_string(value: str) -> bytes:
+    table = "0123456789abcdefghijklmnopqrstuvwxyz_"
+    number = sum((table.index(char) + 1) * (38 ** index) for index, char in enumerate(value))
+    return struct.pack("<Q", number)
+
+
+def _bsii_id(value: str) -> bytes:
+    return b"\x01" + _encoded_string(value)
+
+
+def _definition(structure_id: int, name: str, fields: list[tuple[str, int]]) -> bytes:
+    raw_name = name.encode("ascii")
+    data = bytearray(struct.pack("<I", 0) + b"\x01" + struct.pack("<I", structure_id))
+    data += struct.pack("<I", len(raw_name)) + raw_name
+    for field_name, type_id in fields:
+        raw_field = field_name.encode("ascii")
+        data += struct.pack("<I", type_id)
+        data += struct.pack("<I", len(raw_field)) + raw_field
+    data += struct.pack("<I", 0)
+    return bytes(data)
+
+
+def _canonical_bsii(experience: int = 279375, money: int = 1253729) -> bytes:
+    data = bytearray(b"BSII" + struct.pack("<I", 3))
+    data += _definition(1, "economy", [("bank", 0x39), ("experience_points", 0x27)])
+    data += _definition(2, "bank", [("money_account", 0x31)])
+
+    data += struct.pack("<I", 1) + _bsii_id("economy")
+    data += _bsii_id("bank") + struct.pack("<I", experience)
+    data += struct.pack("<I", 2) + _bsii_id("bank")
+    data += struct.pack("<q", money)
+    return bytes(data)
 
 
 class SaveEditorSafetyTests(unittest.TestCase):
@@ -66,6 +101,7 @@ class _BackupStub:
 
 class _ProfileServiceStub:
     backup = _BackupStub()
+    sii_decrypt_exe = None
 
     class _GameState:
         def is_running(self):
@@ -176,6 +212,61 @@ class SaveSlotCopyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 service._save_game_sii(slot, b"new")
             self.assertEqual(b"old", game_sii.read_bytes())
+
+
+class StructuredStatsEditTests(unittest.TestCase):
+    def _make_structured_slot(self, root: Path, experience=279375, money=1253729):
+        profile_dir = root / "profile"
+        slot_dir = profile_dir / "save" / "1"
+        slot_dir.mkdir(parents=True)
+        profile_sii = profile_dir / "profile.sii"
+        profile_sii.write_text("SiiNunit\n{\n}\n", encoding="utf-8")
+        profile = ProfileInfo("p", "local", profile_dir, profile_sii)
+        game_sii = slot_dir / "game.sii"
+        game_sii.write_bytes(_canonical_bsii(experience, money))
+        return SaveSlotInfo(profile, "1", slot_dir, game_sii, slot_dir / "info.sii")
+
+    def test_reads_and_writes_canonical_integer_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            slot = self._make_structured_slot(Path(td))
+            service = SaveEditorService(_ProfileServiceStub())
+
+            self.assertEqual(1253729.0, service.read_current_money(slot))
+            self.assertEqual(279375.0, service.read_current_xp(slot))
+            self.assertTrue(service.set_player_money(slot, 2000000, 1253729))
+            self.assertTrue(service.set_player_experience(slot, 6000, 279375))
+
+            parsed = parse_bsii(slot.game_sii.read_bytes())
+            self.assertEqual(2000000, parsed.find_fields("money_account", structure_names=["bank"])[0][1].value)
+            self.assertEqual(6000, parsed.find_fields("experience_points", structure_names=["economy"])[0][1].value)
+            self.assertEqual(3, parsed.version)
+
+    def test_wrong_hint_and_noop_do_not_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            slot = self._make_structured_slot(Path(td))
+            service = SaveEditorService(_ProfileServiceStub())
+            original = slot.game_sii.read_bytes()
+
+            self.assertFalse(service.set_player_money(slot, 2000000, 1))
+            self.assertEqual(original, slot.game_sii.read_bytes())
+            self.assertFalse(service.set_player_experience(slot, 279375, 279375))
+            self.assertEqual(original, slot.game_sii.read_bytes())
+
+    def test_level_edit_updates_derived_experience(self):
+        with tempfile.TemporaryDirectory() as td:
+            slot = self._make_structured_slot(Path(td), experience=1000)
+            service = SaveEditorService(_ProfileServiceStub())
+            self.assertTrue(service.set_player_level(slot, 4, current_level_hint=2))
+            self.assertEqual(6000.0, service.read_current_xp(slot))
+            self.assertEqual(4, service.read_current_level(slot))
+
+    def test_integer_edits_reject_non_bsii_data(self):
+        with tempfile.TemporaryDirectory() as td:
+            slot = self._make_structured_slot(Path(td))
+            slot.game_sii.write_bytes(b"not-a-save")
+            service = SaveEditorService(_ProfileServiceStub())
+            self.assertFalse(service.set_player_money(slot, 1))
+            self.assertFalse(service.set_player_experience(slot, 1))
 
 
 if __name__ == "__main__":
