@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from services.i18n_service import _, tr
 from core.models import Mod
+from domain.mod_identity import aliases_match, canonical_key, mod_aliases
 
 
 class _UpdateInstallWorker(QThread):
@@ -1168,25 +1169,18 @@ class _SignalMixin:
         m = self._all_mods_by_id.get(mod_id) if getattr(self, "_all_mods_by_id", None) else None
         if m is None:
             return
-        # 如果 package_name 从兜底值更新为真实 unit_name，把新 key 加到索引
-        new_pkg = getattr(m.manifest, "package_name", "") or ""
-        if new_pkg and new_pkg != mod_id and hasattr(self, 'all_mods_by_pkg') and self.all_mods_by_pkg:
-            self.all_mods_by_pkg.setdefault(new_pkg, m)
-            left = new_pkg.split("|", 1)[0].strip()
-            if left and left != new_pkg:
-                self.all_mods_by_pkg.setdefault(left, m)
+        # If async parsing replaces a quick-scan fallback with manifest data,
+        # update every shared alias index using the same Domain rule.
+        aliases = mod_aliases(m)
+        if hasattr(self, "all_mods_by_pkg") and self.all_mods_by_pkg:
+            for alias in aliases:
+                self.all_mods_by_pkg.setdefault(alias, m)
         # Keep the O(1) canonical indexes in sync when asynchronous parsing
         # replaces quick-scan fallback names with real manifest metadata.
-        aliases = (
-            mod_id,
-            new_pkg,
-            getattr(m.manifest, "display_name", "") or "",
-            getattr(m, "display_title", "") or "",
-        )
         canonical_index = getattr(self, "_all_mods_by_canonical", None)
         if isinstance(canonical_index, dict):
             for alias in aliases:
-                key = self._canonical_mod_lookup_key(alias)
+                key = canonical_key(alias)
                 if key:
                     canonical_index.setdefault(key, m)
         priority_svc = getattr(self, "priority_svc", None)
@@ -1196,9 +1190,6 @@ class _SignalMixin:
                 if not raw:
                     continue
                 priority_svc.by_name.setdefault(raw, m)
-                left = raw.split("|", 1)[0].strip()
-                if left:
-                    priority_svc.by_name.setdefault(left, m)
                 key = priority_svc._canonical_key(raw)
                 if key:
                     priority_svc.by_canonical.setdefault(key, m)
@@ -1211,18 +1202,14 @@ class _SignalMixin:
                     tbl.update_row_for_mod(row, m)
         # 详情面板刷新：当前选中行（任何一张表）的 pkg 如果和这个 mod 匹配就刷新
         try:
-            import re as _re_fr_om
             cur_tbl = getattr(self, "table", None)
             if cur_tbl is not None:
                 rs = cur_tbl.selected_rows()
                 if rs:
                     r = rs[-1]
-                    # 解析 pkg 是否匹配 mod_id / stripped
                     pkg = cur_tbl.package_at(r) if r < cur_tbl.rowCount() else None
                     if pkg:
-                        s_pkg = _re_fr_om.sub(r"_(workshop|copy\d*|local)$", "", pkg)
-                        s_mid = _re_fr_om.sub(r"_(workshop|copy\d*|local)$", "", mod_id)
-                        if pkg == mod_id or pkg == s_mid or s_pkg == mod_id or s_pkg == s_mid:
+                        if aliases_match(pkg, m) or canonical_key(pkg) == canonical_key(mod_id):
                             self._show_mod_detail(pkg, m)
         except Exception:
             pass

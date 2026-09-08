@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from core.models import Mod
-from domain.mod_identity import profile_entry_package
+from domain.mod_identity import (
+    canonical_key,
+    canonical_package_for_mod,
+    mod_aliases,
+    profile_entry_aliases,
+)
 from domain.priority_rules import profile_to_ui_order, ui_to_profile_order
 
 
@@ -79,96 +84,41 @@ class PriorityService:
         # worklist 是 list[dict]，不可哈希，用元组化签名做 key
         self._worklist_sig = None
         self._pkg_index: Optional[Dict[str, List[int]]] = None
-        import re as _re_pn
         for m in self.known_mods:
-            # manifest.package_name（unit_name 主索引）与 mod_id（文件名索引）同级 setdefault
-            # 先 manifest.package_name 左段
-            pkg_name = getattr(getattr(m, "manifest", None), "package_name", None) or ""
-            if pkg_name:
-                left = pkg_name.split("|",1)[0].strip()
-                if left:
-                    self.by_name.setdefault(left, m)
-                self.by_name.setdefault(pkg_name.strip(), m)
-            # 再 mod_id（同级权重）
-            if m.mod_id:
-                self.by_name.setdefault(m.mod_id, m)
-            # 再 workshop_id 剥后缀纯数字
-            stripped = _re_pn.sub(r"_(workshop|copy\d*|local)$", "", m.mod_id)
-            if stripped and stripped != m.mod_id and stripped.isdigit():
-                self.by_name.setdefault(stripped, m)
-            mf = getattr(m, "manifest", None)
-            for title in (
-                getattr(mf, "display_name", "") if mf else "",
-                getattr(m, "display_title", ""),
-            ):
-                title_key = str(title or "").strip().casefold()
-                if title_key and not title_key.isdigit():
-                    self.by_display_title.setdefault(title_key, m)
-            for alias in (
-                getattr(m, "mod_id", ""),
-                getattr(mf, "package_name", "") if mf else "",
-                getattr(mf, "display_name", "") if mf else "",
-                getattr(m, "display_title", ""),
-            ):
-                canonical = self._canonical_key(alias)
-                if canonical:
-                    self.by_canonical.setdefault(canonical, m)
+            # Keep one normalized alias index for package names, file names,
+            # saved display titles, suffix variants, and legacy Workshop IDs.
+            for alias in mod_aliases(m):
+                self.by_name.setdefault(alias, m)
+                normalized = canonical_key(alias)
+                if normalized:
+                    self.by_canonical.setdefault(normalized, m)
+                if alias and not alias.isdigit():
+                    self.by_display_title.setdefault(alias, m)
 
     @staticmethod
     def _canonical_key(value: object) -> str:
         """Normalize a profile/package key for duplicate detection only."""
-        import re
-        text = str(value or "").split("|", 1)[0].strip()
-        return re.sub(
-            r"_(workshop|copy\d*|local)$", "", text, flags=re.IGNORECASE
-        ).casefold()
+        return canonical_key(value)
 
     @staticmethod
     def _canonical_package_for_mod(mod: Optional[Mod]) -> str:
-        if mod is None:
-            return ""
-        mf = getattr(mod, "manifest", None)
-        package = str(getattr(mf, "package_name", "") or "").strip() if mf else ""
-        mod_id = str(getattr(mod, "mod_id", "") or "").strip()
-        if getattr(mod, "package_type", "") == "workshop" and mod_id:
-            return mod_id
-        return package or mod_id
+        return canonical_package_for_mod(mod)
 
     def _resolve_mod(self, package_name: str) -> Optional[Mod]:
         """Resolve profile/package aliases to one scanned Mod object."""
         if not package_name:
             return None
-        import re
         pn = str(package_name).strip()
-        left = profile_entry_package(pn)
-        suffix_left = re.sub(r"_(workshop|copy\d*|local)$", "", left, flags=re.IGNORECASE)
-        suffix_full = re.sub(r"_(workshop|copy\d*|local)$", "", pn, flags=re.IGNORECASE)
-        legacy_ws_id = ""
-        m_legacy = re.fullmatch(
-            r"mod_workshop_package\.0*([0-9a-f]{1,8})",
-            left,
-            flags=re.IGNORECASE,
-        )
-        if m_legacy:
-            try:
-                legacy_ws_id = str(int(m_legacy.group(1), 16))
-            except ValueError:
-                legacy_ws_id = ""
-        for key in (pn, left, suffix_left, suffix_full, legacy_ws_id):
-            if key and key in self.by_name:
-                return self.by_name[key]
-        target = self._canonical_key(pn)
-        resolved = self.by_canonical.get(target) if target else None
-        if resolved is not None:
-            return resolved
-        # Older profiles may store opaque Workshop keys such as
-        # ``mod_workshop_package.<hash>|Real Traffic Density ETS2``.
-        # The title after ``|`` is stable and is also present in the Workshop
-        # metadata cache, so use it as a final lookup key.
-        if "|" in pn:
-            title = pn.split("|", 1)[1].strip().casefold()
-            if title:
-                return self.by_display_title.get(title)
+        for alias in profile_entry_aliases(pn):
+            resolved = self.by_name.get(alias)
+            if resolved is not None:
+                return resolved
+            resolved = self.by_canonical.get(canonical_key(alias))
+            if resolved is not None:
+                return resolved
+            resolved = self.by_display_title.get(alias)
+            if resolved is not None:
+                return resolved
         return None
 
     # ---- 分类反向索引（性能优化） ----
@@ -216,23 +166,43 @@ class PriorityService:
                 key = str(e).strip()
             if key:
                 active_keys.append(key)
+        # A profile can contain the same Mod through two historical aliases.
+        # Keep the first persisted occurrence so priority indexes stay dense.
+        deduped_active_keys = []
+        seen_active_keys = set()
+        for key in active_keys:
+            normalized = canonical_key(key)
+            if not normalized or normalized in seen_active_keys:
+                continue
+            seen_active_keys.add(normalized)
+            deduped_active_keys.append(key)
+        active_keys = deduped_active_keys
         # The worklist and all UI operations are high -> low priority.
         active_keys = profile_to_ui_order(active_keys)
-        active_rank = {k: i for i, k in enumerate(active_keys)}
+        active_rank = {
+            canonical_key(key): index
+            for index, key in enumerate(active_keys)
+            if canonical_key(key)
+        }
         new_wl = []
         for row in current_worklist:
             r2 = dict(row)
             pkg = str(r2.get("package_name") or "").strip()
-            if pkg and pkg in active_rank:
+            pkg_key = canonical_key(pkg)
+            if pkg_key and pkg_key in active_rank:
                 r2["enabled"] = True
-                r2["order"] = active_rank[pkg]
-                r2["priority_index"] = active_rank[pkg]
+                r2["order"] = active_rank[pkg_key]
+                r2["priority_index"] = active_rank[pkg_key]
             else:
                 r2["enabled"] = False
                 r2["order"] = -1
                 r2["priority_index"] = None
             new_wl.append(r2)
-        seen = {str(r.get("package_name") or "").strip() for r in new_wl}
+        seen = {
+            canonical_key(str(r.get("package_name") or "").strip())
+            for r in new_wl
+            if canonical_key(str(r.get("package_name") or "").strip())
+        }
         mod_index = {}
         mods_src = (
             getattr(current_svc, "known_mods", None)
@@ -244,24 +214,26 @@ class PriorityService:
                 if key:
                     mod_index[str(key).strip()] = m
         for k in active_keys:
-            if k and k not in seen:
-                m = mod_index.get(k)
+            key = canonical_key(k)
+            if key and key not in seen:
+                m = current_svc._resolve_mod(k) if hasattr(current_svc, "_resolve_mod") else mod_index.get(k)
                 new_wl.append({
                     "mod": m,
                     "package_name": k,
                     "display_title": (getattr(m, "display_title", None) or k) if m else k,
                     "enabled": True,
-                    "order": active_rank[k],
-                    "priority_index": active_rank[k],
+                    "order": active_rank[key],
+                    "priority_index": active_rank[key],
                     "source": "",
                     "size_mb": None,
                     "compatible_versions": "",
                 })
-                seen.add(k)
+                seen.add(key)
         def _key(r):
             pkg = str(r.get("package_name") or "").strip()
-            if pkg in active_rank:
-                return (0, active_rank[pkg], pkg)
+            key = canonical_key(pkg)
+            if key in active_rank:
+                return (0, active_rank[key], pkg.casefold())
             return (1, 0, pkg)
         new_wl.sort(key=_key)
         return new_wl

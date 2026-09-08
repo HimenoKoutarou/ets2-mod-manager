@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import Mod
+from domain.mod_identity import aliases_match, canonical_key, mod_aliases, profile_entry_aliases
 from services.i18n_service import _, tr
 from ui.crash_check_dialog import CrashCheckDialog
 import weakref
@@ -1167,38 +1168,23 @@ class _ToolbarMixin:
         dlg.exec()
 
     def _find_active_entry_for_mod_id(self, mod_id: str, active: list, all_mods: list):
-        """4 层匹配 mod_id → active_mods 条目：
-        L1 active 条目 stem 直接命中 / L2 Mod.mod_id / L3 manifest.package_name / L4 display_title。
-        返回匹配到的 active_mods 条目字符串，未命中返回 None。"""
+        """Resolve a diagnostic Mod identity back to its persisted profile entry."""
         if not mod_id or not active:
             return None
-        from pathlib import Path as _P
-        # L1：active_mods 条目 stem == mod_id（直接命中）
-        for entry in active:
-            if entry == mod_id or _P(entry).stem == mod_id:
-                return entry
-        # L2~L4：通过 Mod 对象反查 package_path stem，再匹配 active 条目
-        target_stem = None
-        for m in all_mods:
-            if m.mod_id == mod_id:
-                target_stem = _P(getattr(m, "package_path", "") or "").stem or m.mod_id
+        query_aliases = profile_entry_aliases(mod_id)
+        target_mod = None
+        for candidate in all_mods:
+            if query_aliases & mod_aliases(candidate):
+                target_mod = candidate
                 break
-        if target_stem is None:
-            for m in all_mods:
-                if (getattr(m.manifest, "package_name", "") or "") == mod_id:
-                    target_stem = _P(getattr(m, "package_path", "") or "").stem or m.mod_id
-                    break
-        if target_stem is None:
-            for m in all_mods:
-                try:
-                    if (m.display_title or "") == mod_id:
-                        target_stem = _P(getattr(m, "package_path", "") or "").stem or m.mod_id
-                        break
-                except Exception:
-                    continue
-        if target_stem is not None:
+        if target_mod is not None:
             for entry in active:
-                if _P(entry).stem == target_stem:
+                if aliases_match(entry, target_mod):
+                    return entry
+        target = canonical_key(mod_id)
+        if target:
+            for entry in active:
+                if canonical_key(entry) == target:
                     return entry
         return None
 

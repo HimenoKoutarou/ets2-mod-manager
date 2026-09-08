@@ -23,6 +23,30 @@ def profile_entry_title(value: object) -> str:
     return raw.split("|", 1)[1].strip() if "|" in raw else ""
 
 
+def canonical_key(value: object) -> str:
+    """Return the stable lookup key for a package/profile alias.
+
+    The key intentionally removes only known storage suffixes.  Display
+    titles and Workshop legacy keys remain valid aliases, but are never
+    treated as distinct package identities merely because of case or a
+    ``_copyN`` suffix.
+    """
+    package = profile_entry_package(value)
+    return _PROFILE_SUFFIX_RE.sub("", package).casefold()
+
+
+def legacy_workshop_id(value: object) -> str:
+    """Convert an old hexadecimal Workshop key to its decimal ID."""
+    package = profile_entry_package(value)
+    match = _LEGACY_WORKSHOP_RE.fullmatch(package)
+    if not match:
+        return ""
+    try:
+        return str(int(match.group(1), 16))
+    except ValueError:
+        return ""
+
+
 def _add_alias(aliases: Set[str], value: object) -> None:
     text = str(value or "").strip()
     if not text:
@@ -33,12 +57,9 @@ def _add_alias(aliases: Set[str], value: object) -> None:
         aliases.add(package.casefold())
         stripped = _PROFILE_SUFFIX_RE.sub("", package)
         aliases.add(stripped.casefold())
-        legacy = _LEGACY_WORKSHOP_RE.fullmatch(package)
+        legacy = legacy_workshop_id(package)
         if legacy:
-            try:
-                aliases.add(str(int(legacy.group(1), 16)))
-            except ValueError:
-                pass
+            aliases.add(legacy)
 
 
 def profile_entry_aliases(value: object) -> Set[str]:
@@ -49,6 +70,18 @@ def profile_entry_aliases(value: object) -> Set[str]:
     if title:
         aliases.add(title.casefold())
     return aliases
+
+
+def canonical_package_for_mod(mod) -> str:
+    """Return the package spelling that should be persisted for *mod*."""
+    if mod is None:
+        return ""
+    manifest = getattr(mod, "manifest", None)
+    package = str(getattr(manifest, "package_name", "") or "").strip() if manifest else ""
+    mod_id = str(getattr(mod, "mod_id", "") or "").strip()
+    if getattr(mod, "package_type", "") == "workshop" and mod_id:
+        return mod_id
+    return package or mod_id
 
 
 def mod_aliases(mod) -> Set[str]:

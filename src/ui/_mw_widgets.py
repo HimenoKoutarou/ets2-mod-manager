@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from services.i18n_service import _, tr
 from core.models import Mod
+from domain.mod_identity import canonical_key, profile_entry_aliases
 
 class _LangSwitchDialog(QDialog):
     """语言切换期间的模态遮罩弹窗，阻止用户操作直到刷新完成。"""
@@ -957,44 +958,21 @@ class ModTable(QTableWidget):
         return raw
 
     def find_row_by_pkg(self, package_name: str) -> Optional[int]:
-        """按 package_name 查找行号（COL_PKG 隐藏列）—— 支持 workshop ID 剥后缀智能匹配 + | 左段"""
+        """Resolve a row through the shared Mod identity aliases."""
         if not package_name:
             return None
-        import re as _re_fr
-        stripped = _re_fr.sub(r"_(workshop|copy\d*|local)$", "", package_name)
-        left = package_name.split("|", 1)[0].strip()
-        for r in range(self.rowCount()):
-            it = self.item(r, COL_PKG)
-            if it and it.text() == package_name:
-                return r
-        if stripped != package_name:
-            for r in range(self.rowCount()):
-                it = self.item(r, COL_PKG)
-                if it and it.text() == stripped:
-                    return r
-        if left and left != package_name and left != stripped:
-            for r in range(self.rowCount()):
-                it = self.item(r, COL_PKG)
-                if it and it.text() == left:
-                    return r
-            s_left = _re_fr.sub(r"_(workshop|copy\d*|local)$", "", left)
-            if s_left != left:
-                for r in range(self.rowCount()):
-                    it = self.item(r, COL_PKG)
-                    if it and it.text() == s_left:
-                        return r
+        query_aliases = profile_entry_aliases(package_name)
+        query_key = canonical_key(package_name)
         for r in range(self.rowCount()):
             it = self.item(r, COL_PKG)
             if not it:
                 continue
             col = it.text()
-            col_left = col.split("|", 1)[0].strip()
-            col_stripped = _re_fr.sub(r"_(workshop|copy\d*|local)$", "", col)
-            if (col == stripped) or (col_stripped == package_name) or (col_stripped == stripped):
+            if col.casefold() == str(package_name).casefold():
                 return r
-            # 左段匹配：mod_id（短）匹配 COL_PKG 中 "短|xxx" 这种
-            if left and (col_left == package_name or col_left == stripped or col_left == left or
-                         (_re_fr.sub(r"_(workshop|copy\d*|local)$", "", col_left) == stripped)):
+            if query_aliases & profile_entry_aliases(col):
+                return r
+            if query_key and canonical_key(col) == query_key:
                 return r
         return None
 

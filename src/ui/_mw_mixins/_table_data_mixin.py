@@ -36,55 +36,26 @@ from PySide6.QtWidgets import (
 
 from services.i18n_service import _, tr
 from core.models import Mod
+from domain.mod_identity import canonical_key, mod_aliases, profile_entry_aliases
 
 
 class _TableDataMixin:
     @staticmethod
     def _canonical_mod_lookup_key(value: object) -> str:
-        import re as _re_key
-        text = str(value or "").split("|", 1)[0].strip()
-        return _re_key.sub(
-            r"_(workshop|copy\d*|local)$", "", text,
-            flags=_re_key.IGNORECASE,
-        ).casefold()
+        return canonical_key(value)
 
     def _build_mod_index(self, mods):
         idx: Dict[str, Mod] = {}
         canonical_idx: Dict[str, Mod] = {}
         title_idx: Dict[str, Mod] = {}
-        import re as _re_idx
         for m in mods:
-            # 主：manifest.package_name 左段
-            pkg_name = getattr(getattr(m, "manifest", None), "package_name", None) or ""
-            if pkg_name:
-                left = pkg_name.split("|",1)[0].strip()
-                if left:
-                    idx.setdefault(left, m)
-                idx.setdefault(pkg_name.strip(), m)
-            # 主（同级）：mod_id（文件名/目录名，快速扫描阶段 = manifest.package_name 的兜底）
-            if m.mod_id:
-                idx.setdefault(m.mod_id, m)
-            # 再 workshop_id 剥后缀纯数字
-            stripped = _re_idx.sub(r"_(workshop|copy\d*|local)$", "", m.mod_id) if m.mod_id else ""
-            if stripped and stripped != m.mod_id and stripped.isdigit():
-                idx.setdefault(stripped, m)
-            mf = getattr(m, "manifest", None)
-            for title in (
-                getattr(mf, "display_name", "") if mf else "",
-                getattr(m, "display_title", ""),
-            ):
-                title_key = str(title or "").strip().casefold()
-                if title_key and not title_key.isdigit():
-                    title_idx.setdefault(title_key, m)
-            for alias in (
-                getattr(m, "mod_id", ""),
-                getattr(mf, "package_name", "") if mf else "",
-                getattr(mf, "display_name", "") if mf else "",
-                getattr(m, "display_title", ""),
-            ):
-                canonical = self._canonical_mod_lookup_key(alias)
-                if canonical:
-                    canonical_idx.setdefault(canonical, m)
+            for alias in mod_aliases(m):
+                idx.setdefault(alias, m)
+                normalized = self._canonical_mod_lookup_key(alias)
+                if normalized:
+                    canonical_idx.setdefault(normalized, m)
+                if alias and not alias.isdigit():
+                    title_idx.setdefault(alias, m)
         self._all_mods_by_canonical = canonical_idx
         self._all_mods_by_title = title_idx
         return idx
@@ -101,40 +72,18 @@ class _TableDataMixin:
         """
         if not pkg:
             return None
-        import re as _re_lu
         index = getattr(self, "all_mods_by_pkg", None) or {}
-        if pkg in index:
-            return index[pkg]
-        left = pkg.split("|", 1)[0].strip()
-        if left and left in index:
-            return index[left]
-        s_left = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", left) if left else ""
-        if s_left and s_left != left and s_left in index:
-            return index[s_left]
-        s_pkg = _re_lu.sub(r"_(workshop|copy\d*|local)$", "", pkg)
-        if s_pkg and s_pkg != pkg and s_pkg in index:
-            return index[s_pkg]
-        m_legacy = _re_lu.fullmatch(
-            r"mod_workshop_package\.0*([0-9a-f]{1,8})",
-            left,
-            flags=_re_lu.IGNORECASE,
-        )
-        if m_legacy:
-            try:
-                legacy_ws_id = str(int(m_legacy.group(1), 16))
-            except ValueError:
-                legacy_ws_id = ""
-            if legacy_ws_id and legacy_ws_id in index:
-                return index[legacy_ws_id]
-        target = self._canonical_mod_lookup_key(pkg)
-        canonical_index = getattr(self, "_all_mods_by_canonical", None) or {}
-        resolved = canonical_index.get(target) if target else None
-        if resolved is not None:
-            return resolved
-        if "|" in str(pkg):
-            title = str(pkg).split("|", 1)[1].strip().casefold()
-            if title:
-                return (getattr(self, "_all_mods_by_title", None) or {}).get(title)
+        for alias in profile_entry_aliases(pkg):
+            resolved = index.get(alias)
+            if resolved is not None:
+                return resolved
+            target = self._canonical_mod_lookup_key(alias)
+            resolved = (getattr(self, "_all_mods_by_canonical", None) or {}).get(target)
+            if resolved is not None:
+                return resolved
+            resolved = (getattr(self, "_all_mods_by_title", None) or {}).get(alias)
+            if resolved is not None:
+                return resolved
         return None
 
     def _render_current_worklist(self) -> None:
