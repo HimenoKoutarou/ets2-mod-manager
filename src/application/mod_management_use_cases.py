@@ -1,46 +1,22 @@
 """Application boundary for the core Mod-management workflow.
 
-The UI owns selection, dialogs, and rendering.  This module owns the
-technology-neutral orchestration of a worklist and delegates the existing
-priority algorithms through a small port.  The port keeps the migration
-incremental: ``PriorityService`` remains the compatibility adapter until the
-priority implementation is moved below the application boundary.
+The UI owns selection, dialogs, and rendering.  Pure worklist transformations
+live in :mod:`domain.mod_priority_rules`; this module only orchestrates those
+rules with the scanned-Mod resolver supplied by the infrastructure adapter.
 """
 from __future__ import annotations
 
-from typing import List, Protocol, Sequence, Set
+from typing import Callable, List, Protocol, Sequence, Set
+
+from domain import mod_priority_rules as priority_rules
 
 
 class ModPriorityPort(Protocol):
-    """Operations required by the Mod-management application use case."""
+    """Mod metadata/resolution port used by Domain worklist rules."""
 
-    def build_worklist(self, active_mods: List[str], all_package_names: List[str]) -> List[dict]: ...
+    known_mods: Sequence[object]
 
-    def batch_toggle(self, worklist: List[dict], indices: Sequence[int], action: str = "toggle") -> List[dict]: ...
-
-    def move_up(self, worklist: List[dict], indices: Sequence[int], steps: int = 1) -> List[dict]: ...
-
-    def move_down(self, worklist: List[dict], indices: Sequence[int], steps: int = 1) -> List[dict]: ...
-
-    def move_top(self, worklist: List[dict], indices: Sequence[int]) -> List[dict]: ...
-
-    def move_bottom(self, worklist: List[dict], indices: Sequence[int]) -> List[dict]: ...
-
-    def move_up_by_package_set(self, worklist: List[dict], pkg_set: Set[str], steps: int = 1) -> List[dict]: ...
-
-    def move_down_by_package_set(self, worklist: List[dict], pkg_set: Set[str], steps: int = 1) -> List[dict]: ...
-
-    def move_top_by_package_set(self, worklist: List[dict], pkg_set: Set[str]) -> List[dict]: ...
-
-    def move_bottom_by_package_set(self, worklist: List[dict], pkg_set: Set[str]) -> List[dict]: ...
-
-    def apply_preset(self, worklist: List[dict]) -> List[dict]: ...
-
-    def rebuild_from_active(self, current_svc, current_worklist: List[dict], new_active_entries) -> List[dict]: ...
-
-    def worklist_to_active(self, worklist: List[dict]) -> List[str]: ...
-
-    def worklist_to_profile_active(self, worklist: List[dict]) -> List[str]: ...
+    def resolve_mod(self, package_name: str) -> object | None: ...
 
 
 class ModManagementUseCases:
@@ -59,19 +35,34 @@ class ModManagementUseCases:
         """Expose the adapter identity so UI caches can refresh after rescans."""
         return self._priority
 
+    def _resolve_mod(self) -> Callable[[str], object | None]:
+        resolver = getattr(self._priority, "resolve_mod", None)
+        if callable(resolver):
+            return resolver
+        # Compatibility with the current adapter while its public port is
+        # being introduced.
+        resolver = getattr(self._priority, "_resolve_mod", None)
+        if callable(resolver):
+            return resolver
+        return lambda _package_name: None
+
     def build_worklist(self, active_mods: List[str], all_package_names: List[str]) -> List[dict]:
-        return self._priority.build_worklist(list(active_mods), list(all_package_names))
+        return priority_rules.build_worklist(
+            list(active_mods),
+            list(all_package_names),
+            resolve_mod=self._resolve_mod(),
+        )
 
     def batch_toggle(self, worklist: List[dict], indices: Sequence[int], action: str = "toggle") -> List[dict]:
-        return self._priority.batch_toggle(worklist, list(indices), action)
+        return priority_rules.batch_toggle(worklist, list(indices), action)
 
     def move(self, worklist: List[dict], indices: Sequence[int], kind: str, *, steps: int = 1) -> List[dict]:
         """Move selected enabled entries using the requested command."""
         operation = {
-            "up": self._priority.move_up,
-            "down": self._priority.move_down,
-            "top": self._priority.move_top,
-            "bottom": self._priority.move_bottom,
+            "up": priority_rules.move_up,
+            "down": priority_rules.move_down,
+            "top": priority_rules.move_top,
+            "bottom": priority_rules.move_bottom,
         }.get(kind)
         if operation is None:
             raise ValueError(f"未知 Mod 排序操作: {kind}")
@@ -89,10 +80,10 @@ class ModManagementUseCases:
     ) -> List[dict]:
         """Move a category/package block while preserving its internal order."""
         operation = {
-            "up": self._priority.move_up_by_package_set,
-            "down": self._priority.move_down_by_package_set,
-            "top": self._priority.move_top_by_package_set,
-            "bottom": self._priority.move_bottom_by_package_set,
+            "up": priority_rules.move_up_by_package_set,
+            "down": priority_rules.move_down_by_package_set,
+            "top": priority_rules.move_top_by_package_set,
+            "bottom": priority_rules.move_bottom_by_package_set,
         }.get(kind)
         if operation is None:
             raise ValueError(f"未知 Mod 分类排序操作: {kind}")
@@ -103,32 +94,35 @@ class ModManagementUseCases:
     def move_delta(self, worklist: List[dict], indices: Sequence[int], delta: int) -> List[dict]:
         """Move selected entries by a signed number of enabled positions."""
         if delta < 0:
-            return self._priority.move_up(worklist, list(indices), steps=abs(delta))
+            return priority_rules.move_up(worklist, list(indices), steps=abs(delta))
         if delta > 0:
-            return self._priority.move_down(worklist, list(indices), steps=delta)
+            return priority_rules.move_down(worklist, list(indices), steps=delta)
         # PriorityService's movement methods also normalize order fields for a
         # no-op.  Preserve that behavior through the smallest available path.
-        return self._priority.move_up(worklist, list(indices), steps=0)
+        return priority_rules.move_up(worklist, list(indices), steps=0)
 
     def move_category_delta(self, worklist: List[dict], package_names: Set[str], delta: int) -> List[dict]:
         """Move a category block by a signed number of enabled positions."""
         if delta < 0:
-            return self._priority.move_up_by_package_set(worklist, set(package_names), steps=abs(delta))
+            return priority_rules.move_up_by_package_set(worklist, set(package_names), steps=abs(delta))
         if delta > 0:
-            return self._priority.move_down_by_package_set(worklist, set(package_names), steps=delta)
+            return priority_rules.move_down_by_package_set(worklist, set(package_names), steps=delta)
         return worklist
 
     def apply_preset(self, worklist: List[dict]) -> List[dict]:
-        return self._priority.apply_preset(worklist)
+        return priority_rules.apply_preset(worklist)
 
     def rebuild_from_active(self, current_worklist: List[dict], new_active_entries) -> List[dict]:
         """Rebuild the in-memory projection from Profile ``active_mods`` order."""
-        # ``rebuild_from_active`` is a classmethod on the legacy adapter and
-        # therefore still accepts the adapter as its first argument.
-        return self._priority.rebuild_from_active(self._priority, current_worklist, list(new_active_entries))
+        return priority_rules.rebuild_from_active(
+            current_worklist,
+            list(new_active_entries),
+            known_mods=getattr(self._priority, "known_mods", ()),
+            resolve_mod=self._resolve_mod(),
+        )
 
     def worklist_to_active(self, worklist: List[dict]) -> List[str]:
-        return self._priority.worklist_to_active(worklist)
+        return priority_rules.worklist_to_active(worklist)
 
     def worklist_to_profile_active(self, worklist: List[dict]) -> List[str]:
-        return self._priority.worklist_to_profile_active(worklist)
+        return priority_rules.worklist_to_profile_active(worklist)

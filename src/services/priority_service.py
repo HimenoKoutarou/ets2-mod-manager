@@ -10,6 +10,7 @@ from domain.mod_identity import (
     profile_entry_aliases,
 )
 from domain.priority_rules import profile_to_ui_order, ui_to_profile_order
+from domain import mod_priority_rules as priority_rules
 
 
 # ETS2 profile.sii 的 active_mods[] 是实际加载顺序：
@@ -67,11 +68,11 @@ def _mod_match(mod: Mod, rules: Sequence) -> bool:
 
 class PriorityService:
     """
-    负责：
-      - 从 Mod 列表 + 当前 active_mods 合成「完整带状态的工作列表」
-      - 批量启用 / 禁用 / 开关反转
-      - 拖拽重排 / 置顶 / 置底 / 批量上移下移
-      - 一键"套用推荐优先级预设"（地图地图在底 / 素材模型居中 / 功能AI在上）
+    Compatibility adapter for scanned Mod metadata and legacy callers.
+
+    The actual worklist transformations now live in
+    ``domain.mod_priority_rules``.  The methods retained below are thin
+    wrappers so older integrations can migrate without a flag day.
     """
 
     def __init__(self, known_mods: Iterable[Mod]):
@@ -121,6 +122,10 @@ class PriorityService:
                 return resolved
         return None
 
+    def resolve_mod(self, package_name: str) -> Optional[Mod]:
+        """Public metadata port for Domain worklist rules."""
+        return self._resolve_mod(package_name)
+
     # ---- 分类反向索引（性能优化） ----
     def _build_pkg_index(self, worklist: List[dict]) -> Dict[str, List[int]]:
         """构建 { package_name: [idx,...] } 反向索引，缓存到 self._pkg_index。
@@ -152,91 +157,13 @@ class PriorityService:
 
     @classmethod
     def rebuild_from_active(cls, current_svc, current_worklist, new_active_entries):
-        # Rebuild worklist rows from profile.sii order (low -> high priority).
-        # Mirrors build_worklist() row shape: enabled, priority_index, package_name,
-        # mod + display_title metadata carried over from current_worklist where present.
-        # Disabled rows get priority_index = None.
-        if current_worklist is None:
-            current_worklist = []
-        active_keys = []
-        for e in new_active_entries:
-            if isinstance(e, dict):
-                key = (e.get("package_name") or e.get("mod_id") or "").strip()
-            else:
-                key = str(e).strip()
-            if key:
-                active_keys.append(key)
-        # A profile can contain the same Mod through two historical aliases.
-        # Keep the first persisted occurrence so priority indexes stay dense.
-        deduped_active_keys = []
-        seen_active_keys = set()
-        for key in active_keys:
-            normalized = canonical_key(key)
-            if not normalized or normalized in seen_active_keys:
-                continue
-            seen_active_keys.add(normalized)
-            deduped_active_keys.append(key)
-        active_keys = deduped_active_keys
-        # The worklist and all UI operations are high -> low priority.
-        active_keys = profile_to_ui_order(active_keys)
-        active_rank = {
-            canonical_key(key): index
-            for index, key in enumerate(active_keys)
-            if canonical_key(key)
-        }
-        new_wl = []
-        for row in current_worklist:
-            r2 = dict(row)
-            pkg = str(r2.get("package_name") or "").strip()
-            pkg_key = canonical_key(pkg)
-            if pkg_key and pkg_key in active_rank:
-                r2["enabled"] = True
-                r2["order"] = active_rank[pkg_key]
-                r2["priority_index"] = active_rank[pkg_key]
-            else:
-                r2["enabled"] = False
-                r2["order"] = -1
-                r2["priority_index"] = None
-            new_wl.append(r2)
-        seen = {
-            canonical_key(str(r.get("package_name") or "").strip())
-            for r in new_wl
-            if canonical_key(str(r.get("package_name") or "").strip())
-        }
-        mod_index = {}
-        mods_src = (
-            getattr(current_svc, "known_mods", None)
-            or getattr(current_svc, "mods", None)
-            or []
+        resolver = getattr(current_svc, "resolve_mod", None) or getattr(current_svc, "_resolve_mod", None)
+        return priority_rules.rebuild_from_active(
+            current_worklist,
+            new_active_entries,
+            known_mods=getattr(current_svc, "known_mods", ()),
+            resolve_mod=resolver,
         )
-        for m in mods_src:
-            for key in (getattr(m, "package_name", None), getattr(m, "mod_id", None)):
-                if key:
-                    mod_index[str(key).strip()] = m
-        for k in active_keys:
-            key = canonical_key(k)
-            if key and key not in seen:
-                m = current_svc._resolve_mod(k) if hasattr(current_svc, "_resolve_mod") else mod_index.get(k)
-                new_wl.append({
-                    "mod": m,
-                    "package_name": k,
-                    "display_title": (getattr(m, "display_title", None) or k) if m else k,
-                    "enabled": True,
-                    "order": active_rank[key],
-                    "priority_index": active_rank[key],
-                    "source": "",
-                    "size_mb": None,
-                    "compatible_versions": "",
-                })
-                seen.add(key)
-        def _key(r):
-            pkg = str(r.get("package_name") or "").strip()
-            key = canonical_key(pkg)
-            if key in active_rank:
-                return (0, active_rank[key], pkg.casefold())
-            return (1, 0, pkg)
-        new_wl.sort(key=_key)
-        return new_wl
 
     def build_worklist(self, active_mods: List[str], all_package_names: List[str]) -> List[dict]:
         """
@@ -249,77 +176,21 @@ class PriorityService:
         输入 active_mods 使用 profile.sii 的低到高顺序；输出先放已启用模组，
         并转换为 UI 的高到低顺序，然后追加未启用模组。
         """
-        result: List[dict] = []
-        represented_mods: set[int] = set()
-        represented_keys: set[str] = set()
-        enabled_count = 0
-
-        def add_entry(package_name: str, enabled: bool, mod: Optional[Mod]) -> bool:
-            nonlocal enabled_count
-            pn = str(package_name or "").strip()
-            if not pn:
-                return False
-            key = self._canonical_key(pn)
-            identity = id(mod) if mod is not None else None
-            # A single scanned Mod can have several aliases (manifest name,
-            # filename, Workshop id).  Keep one worklist row per real Mod,
-            # while preserving the exact active profile spelling when enabled.
-            if identity is not None and identity in represented_mods:
-                return False
-            if key and key in represented_keys:
-                return False
-            if identity is not None:
-                represented_mods.add(identity)
-            if key:
-                represented_keys.add(key)
-            result.append({
-                "package_name": pn,
-                "enabled": bool(enabled),
-                "order": enabled_count if enabled else -1,
-                "priority_index": enabled_count if enabled else None,
-                "mod": mod,
-            })
-            if enabled:
-                enabled_count += 1
-            return True
-
-        # Retain the profile's exact spelling while reversing only the order
-        # at the persistence/UI boundary.
-        for pn in profile_to_ui_order(active_mods):
-            add_entry(pn, True, self._resolve_mod(pn))
-
-        # Then add each inactive scanned Mod once.  ``all_package_names`` is
-        # an alias index in the UI, so resolve and deduplicate by object identity.
-        for pn in sorted({str(p).strip() for p in all_package_names if str(p).strip()}):
-            mod = self._resolve_mod(pn)
-            canonical = self._canonical_package_for_mod(mod) if mod is not None else pn
-            add_entry(canonical or pn, False, mod)
-        return result
+        return priority_rules.build_worklist(
+            active_mods,
+            all_package_names,
+            resolve_mod=self.resolve_mod,
+        )
 
     # ---- 导出 UI 优先级列表：所有 enabled 条目，最高优先级在前 ----
     @staticmethod
     def worklist_to_active(worklist: List[dict]) -> List[str]:
-        active = []
-        for x in worklist:
-            if not x.get("enabled"):
-                continue
-            package_name = str(x.get("package_name") or "").strip()
-            if not package_name:
-                continue
-            # ETS2 对 Workshop 条目使用 `package_name|display_name`，仅写
-            # 数字 Workshop ID 时游戏启动后会将该条目视为无效并丢弃。
-            mod = x.get("mod")
-            if mod is not None and getattr(mod, "package_type", "") == "workshop" and "|" not in package_name:
-                title = str(getattr(mod, "display_title", "") or "").strip()
-                if title and not title.isdigit():
-                    package_name = f"{package_name}|{title}"
-            active.append(package_name)
-        return active
+        return priority_rules.worklist_to_active(worklist)
 
     @staticmethod
     def worklist_to_profile_active(worklist: List[dict]) -> List[str]:
         """Convert the UI high-to-low worklist to profile.sii low-to-high order."""
-        return ui_to_profile_order(PriorityService.worklist_to_active(worklist))
+        return priority_rules.worklist_to_profile_active(worklist)
 
     # ---- 批量：启用 / 禁用 / 反转 ----
     @staticmethod
@@ -331,29 +202,7 @@ class PriorityService:
         返回新的 worklist（不修改原引用）。
         启用时，若条目原先未启用，则 append 到已启用列表末尾。
         """
-        new = [dict(x) for x in worklist]
-        # 1) 处理 enabled 状态
-        for i in indices:
-            if i < 0 or i >= len(new):
-                continue
-            it = new[i]
-            if action == "enable":
-                it["enabled"] = True
-            elif action == "disable":
-                it["enabled"] = False
-            else:
-                it["enabled"] = not it["enabled"]
-        # 2) 维持"先启用、后禁用"顺序，保持启用条目之间的相对顺序不变
-        enabled_part = [x for x in new if x["enabled"]]
-        disabled_part = [x for x in new if not x["enabled"]]
-        # 重算 order
-        for i, x in enumerate(enabled_part):
-            x["order"] = i
-            x["priority_index"] = i
-        for x in disabled_part:
-            x["order"] = -1
-            x["priority_index"] = None
-        return enabled_part + disabled_part
+        return priority_rules.batch_toggle(worklist, indices, action)
 
     # ---- 拖拽重排（把若干 index 移到某个目标位置之前） ----
     @staticmethod
@@ -365,142 +214,28 @@ class PriorityService:
         把 indices 指定的条目，整体移到 target_before_index 所指条目之前。
         scope_enabled_only=True：只调整"已启用"条目（通常用户只关心启用的加载顺序）。
         """
-        new = [dict(x) for x in worklist]
-        if scope_enabled_only:
-            enabled = [(i, x) for i, x in enumerate(new) if x["enabled"]]
-        else:
-            enabled = list(enumerate(new))
-        # 把 indices 限制在 enabled 所在的条目子集里找
-        to_move: List[tuple] = []
-        target_sub_i = None
-        # 建立 "全局 idx → 子列表 i" 映射
-        sub_to_global = [g for g, _ in enabled]
-        global_to_sub = {g: i for i, g in enumerate(sub_to_global)}
-        for gi in indices:
-            if gi in global_to_sub:
-                to_move.append(global_to_sub[gi])
-        if target_before_index in global_to_sub:
-            target_sub_i = global_to_sub[target_before_index]
-        if not to_move:
-            return new
-        # 先按升序排列 to_move，保证相对顺序
-        to_move.sort()
-        sub_entries = [x for _, x in enabled]
-        moved_entries = [sub_entries[i] for i in to_move]
-        remain_entries = [sub_entries[i] for i in range(len(sub_entries)) if i not in set(to_move)]
-        # 插回到 target_sub_i 之前（注意 target_sub_i 应该是 remain 里的位置）
-        if target_sub_i is None:
-            # 没有 target → 末尾
-            merged = remain_entries + moved_entries
-        else:
-            # target_sub_i 是原 sub_entries 中的 index → 计算在 remain 中应该插入的位置
-            # 思路：原 target 在 moved 之后 → 插入到 remain 中 target_sub_i - (moved<target 的数量)
-            n_smaller = sum(1 for m in to_move if m < target_sub_i)
-            remain_pos = target_sub_i - n_smaller
-            merged = remain_entries[:remain_pos] + moved_entries + remain_entries[remain_pos:]
-        if scope_enabled_only:
-            # 把 merged 按顺序塞回 new 中已启用条目所在的位置
-            for new_val, (g_pos, _) in zip(merged, enabled):
-                new[g_pos] = new_val
-            # 重算 order
-            o = 0
-            for x in new:
-                if x["enabled"]:
-                    x["order"] = o
-                    x["priority_index"] = o
-                    o += 1
-                else:
-                    x["order"] = -1
-                    x["priority_index"] = None
-            return new
-        # 非 enabled-only 模式：直接把 merged 替换掉对应位置
-        # 把 disabled 保留并放最后
-        disabled = [x for x in new if not x["enabled"]]
-        for x in merged:
-            x["order"] = new.index(x) if x.get("enabled") else -1
-        # 重新编号 enabled
-        result = []
-        for i, x in enumerate(merged):
-            y = dict(x); y["order"] = i; y["priority_index"] = i; result.append(y)
-        for x in disabled:
-            y = dict(x); y["order"] = -1; y["priority_index"] = None; result.append(y)
-        return result
+        return priority_rules.reorder_before(
+            worklist, indices, target_before_index, scope_enabled_only
+        )
 
     # ---- 批量上移 / 下移 / 置顶 / 置底 ----
     def move_up(self, worklist: List[dict], indices: Sequence[int], steps: int = 1) -> List[dict]:
         """整体上移 steps 位（保持 indices 指定条目之间的相对顺序）。"""
-        if not indices or steps <= 0:
-            return self._renumber(worklist)
-        # 映射：全局下标 → 在 enabled 段中的 sub index
-        enabled = [(i, x) for i, x in enumerate(worklist) if x["enabled"]]
-        global_to_sub = {g: s for s, (g, _) in enumerate(enabled)}
-        sub_ids = sorted(global_to_sub[g] for g in indices if g in global_to_sub)
-        if not sub_ids:
-            return self._renumber(worklist)
-        first_sub = sub_ids[0]
-        target_sub = max(0, first_sub - steps)
-        if target_sub == first_sub:
-            return self._renumber(worklist)
-        # reorder_before 需要"目标全局下标（在其之前插入）"
-        target_global = enabled[target_sub][0]
-        return self.reorder_before(worklist, list(indices), target_global)
+        return priority_rules.move_up(worklist, indices, steps)
 
     def move_down(self, worklist: List[dict], indices: Sequence[int], steps: int = 1) -> List[dict]:
         """整体下移 steps 位（保持 indices 指定条目之间的相对顺序）。"""
-        if not indices or steps <= 0:
-            return self._renumber(worklist)
-        enabled = [(i, x) for i, x in enumerate(worklist) if x["enabled"]]
-        global_to_sub = {g: s for s, (g, _) in enumerate(enabled)}
-        sub_ids = sorted(global_to_sub[g] for g in indices if g in global_to_sub)
-        if not sub_ids:
-            return self._renumber(worklist)
-        last_sub = sub_ids[-1]
-        # 下移 steps 后：块尾应该落在 last_sub + steps，插入点 = last_sub + steps + 1（插在 target 条目前）
-        target_sub = last_sub + 1 + steps
-        if target_sub >= len(enabled):
-            # 超出末尾 → 直接置底
-            return self.move_bottom(worklist, list(indices))
-        if target_sub == last_sub + 1:
-            return self._renumber(worklist)
-        target_global = enabled[target_sub][0]
-        return self.reorder_before(worklist, list(indices), target_global)
+        return priority_rules.move_down(worklist, indices, steps)
 
     def move_top(self, worklist: List[dict], indices: Sequence[int]) -> List[dict]:
-        first_enabled = next((i for i, x in enumerate(worklist) if x["enabled"]), None)
-        if first_enabled is None:
-            return self._renumber(worklist)
-        return self.reorder_before(worklist, indices, first_enabled)
+        return priority_rules.move_top(worklist, indices)
 
     def move_bottom(self, worklist: List[dict], indices: Sequence[int]) -> List[dict]:
-        # 置底：相当于"移到尾后" → target 取 None
-        # reorder_before 不支持 None，这里直接取 last_enabled 之后
-        enabled = [i for i, x in enumerate(worklist) if x["enabled"]]
-        if not enabled:
-            return self._renumber(worklist)
-        idx_set = set(indices)
-        moved = [worklist[i] for i in enabled if i in idx_set]
-        rest = [worklist[i] for i in enabled if i not in idx_set]
-        new_enabled = rest + moved
-        # 塞回
-        result = list(worklist)
-        ptr = 0
-        for gi in enabled:
-            result[gi] = new_enabled[ptr]; ptr += 1
-        return self._renumber(result)
+        return priority_rules.move_bottom(worklist, indices)
 
     @staticmethod
     def _renumber(worklist: List[dict]) -> List[dict]:
-        out = [dict(x) for x in worklist]
-        o = 0
-        for x in out:
-            if x["enabled"]:
-                x["order"] = o
-                x["priority_index"] = o
-                o += 1
-            else:
-                x["order"] = -1
-                x["priority_index"] = None
-        return out
+        return priority_rules._renumber(worklist)
 
     # ---- 预设优先级（地图底 / 素材中 / 功能上） ----
     def apply_preset(self, worklist: List[dict]) -> List[dict]:
@@ -512,36 +247,7 @@ class PriorityService:
 
         保存时 worklist_to_profile_active() 会反转为游戏的实际加载顺序。
         """
-        enabled = [dict(x) for x in worklist if x["enabled"]]
-        disabled = [dict(x) for x in worklist if not x["enabled"]]
-
-        bottom, middle, top = [], [], []
-        for x in enabled:
-            mod = x.get("mod")
-            # 没 mod 信息时做伪 Mod：手动拿名称判断
-            if mod is None:
-                pseudo = Mod(mod_id=x["package_name"], package_path="", package_type="local",
-                             source_type="local", source_path="", files=[], size=0, enabled=False,
-                             load_order=-1, timestamp=0)
-                _hit_btm = _mod_match(pseudo, PRESET_CATEGORY_MAP["map_bottom"])
-                _hit_top = _mod_match(pseudo, PRESET_CATEGORY_MAP["function_top"])
-            else:
-                _hit_btm = _mod_match(mod, PRESET_CATEGORY_MAP["map_bottom"])
-                _hit_top = _mod_match(mod, PRESET_CATEGORY_MAP["function_top"])
-            if _hit_btm:
-                bottom.append(x)
-            elif _hit_top:
-                top.append(x)
-            else:
-                middle.append(x)
-        new_enabled = top + middle + bottom
-        for i, x in enumerate(new_enabled):
-            x["order"] = i
-            x["priority_index"] = i
-        for x in disabled:
-            x["order"] = -1
-            x["priority_index"] = None
-        return new_enabled + disabled
+        return priority_rules.apply_preset(worklist)
 
 
     # —— 分类整体块移动（基于 package_name 集合，保持块内相对顺序）——
