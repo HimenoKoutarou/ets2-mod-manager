@@ -1362,7 +1362,7 @@ class _SignalMixin:
             for p in getattr(self, "profiles", []):
                 pid = getattr(p, "profile_id", str(id(p)))
                 try:
-                    active = self.profile_svc.get_active_mods(p)
+                    active = self._get_profile_use_cases().read_active_mods(p)
                 except Exception:
                     active = []
                 profiles_state[pid] = {

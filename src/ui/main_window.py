@@ -48,6 +48,7 @@ from core.sii_parser import parse_mods_info
 from services.backup_service import BackupService
 from services.profile_service import ProfileService, ProfileInfo
 from services.priority_service import PriorityService
+from application.profile_use_cases import ProfileUseCases
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
 from version import __version__
 from services.update_service import UpdateService
@@ -177,6 +178,9 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
 
         self.backup_svc = BackupService()
         self.profile_svc = ProfileService(self.paths, backup=self.backup_svc)
+        # Composition root: the UI talks to the Profile application boundary;
+        # ProfileService remains the compatibility repository/game-state port.
+        self.profile_use_cases = ProfileUseCases(self.profile_svc, self.profile_svc)
         self.all_mods: List[Mod] = []
         self.all_mods_by_pkg: Dict[str, Mod] = {}
         self.priority_svc = PriorityService([])

@@ -489,7 +489,7 @@ class _ToolbarMixin:
                 live_rows = [row for row in live_worklist if row.get("enabled")]
             else:
                 active_mods = list(reversed(
-                    self.profile_svc.get_active_mods(self.current_profile)
+                    self._get_profile_use_cases().read_active_mods(self.current_profile)
                 ))
         except Exception:
             active_mods = []
@@ -1198,7 +1198,7 @@ class _ToolbarMixin:
             QMessageBox.information(self, "禁用 mod", "当前未选中任何 profile。")
             return
         try:
-            active = list(self.profile_svc.get_active_mods(self.current_profile))
+            active = self._get_profile_use_cases().read_active_mods(self.current_profile)
         except Exception as e:
             QMessageBox.warning(self, "禁用 mod", f"读取 active_mods 失败: {e}")
             return
@@ -1246,7 +1246,7 @@ class _ToolbarMixin:
             QMessageBox.information(self, "移动 mod", "当前未选中任何 profile。")
             return
         try:
-            active = list(self.profile_svc.get_active_mods(self.current_profile))
+            active = self._get_profile_use_cases().read_active_mods(self.current_profile)
         except Exception as e:
             QMessageBox.warning(self, "移动 mod", f"读取 active_mods 失败: {e}")
             return

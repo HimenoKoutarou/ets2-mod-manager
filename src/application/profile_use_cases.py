@@ -40,6 +40,16 @@ class ProfileUseCases:
         self._repository = repository
         self._game_state = game_state
 
+    def read_active_mods(self, profile) -> List[str]:
+        """Read Profile ``active_mods`` through the repository port.
+
+        Reads are allowed for Local, Steam, and Cloud profiles.  The
+        repository remains responsible for decryption, caching, and parsing;
+        the application boundary normalizes the result to a detached list so
+        callers cannot mutate repository-owned state accidentally.
+        """
+        return list(self._repository.get_active_mods(profile) or [])
+
     def replace_active_mods(self, profile, new_mods: List[str], *, verify: bool = True):
         require_writable_profile(profile)
         require_game_closed(self._game_state, "修改 Profile")

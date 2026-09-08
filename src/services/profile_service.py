@@ -452,6 +452,10 @@ class ProfileService:
         """Compatibility read API for UI code and legacy callers."""
         return bool(self.game_state.is_running())
 
+    def is_running(self) -> bool:
+        """Application ``GameState`` port implementation."""
+        return self.is_game_running()
+
     def _auto_sii_decrypt(self) -> Optional[Path]:
         bin_dir = Path(__file__).resolve().parents[2] / "assets" / "bin"
         for name in ("SII_Decrypt.exe", "sii_core.exe"):

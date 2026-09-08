@@ -5,6 +5,7 @@ Mixin 类本身不做 __init__ / 不 super()，所有 self.xxx 属性都来自 M
 """
 from __future__ import annotations
 from application.mod_management_use_cases import ModManagementUseCases
+from application.profile_use_cases import ProfileUseCases
 from services.profile_service import ProfileService, ProfileInfo
 
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
@@ -40,6 +41,28 @@ from domain.mod_identity import canonical_key, mod_aliases, profile_entry_aliase
 
 
 class _TableDataMixin:
+    def _get_profile_use_cases(self) -> ProfileUseCases:
+        """Return the Profile application facade used by presentation code."""
+        use_cases = getattr(self, "profile_use_cases", None)
+        if use_cases is not None:
+            return use_cases
+        repository = getattr(self, "profile_svc", None)
+        if repository is None:
+            raise RuntimeError("Profile repository is not configured")
+        game_state = repository
+        if not callable(getattr(game_state, "is_running", None)):
+            class _GameStateAdapter:
+                def __init__(self, service):
+                    self._service = service
+
+                def is_running(self):
+                    return bool(self._service.is_game_running())
+
+            game_state = _GameStateAdapter(repository)
+        use_cases = ProfileUseCases(repository, game_state)
+        self.profile_use_cases = use_cases
+        return use_cases
+
     def _get_mod_management_use_cases(self) -> ModManagementUseCases:
         """Return an application facade bound to the current priority adapter.
 
@@ -378,7 +401,7 @@ class _TableDataMixin:
             active = list(active_override)
         else:
             try:
-                active = self.profile_svc.get_active_mods(prof)
+                active = self._get_profile_use_cases().read_active_mods(prof)
             except Exception as e:
                 QMessageBox.warning(self, _("dlg.read_fail_title"), _("dlg.read_active_fail", e=f"{e!r}"))
                 active = []
@@ -1489,7 +1512,7 @@ class _TableDataMixin:
             # Saving is infrequent and profile corruption is costly. Verify
             # the just-written active_mods instead of discovering a mismatch
             # only after the game starts.
-            wrote = self.profile_svc.set_active_mods(
+            wrote = self._get_profile_use_cases().replace_active_mods(
                 self.current_profile, new_active, verify=True
             )
             self.current_profile.mod_count = len(new_active)
@@ -1826,7 +1849,7 @@ class _TableDataMixin:
             return
         active: list[str] = []
         try:
-            active = list(self.profile_svc.get_active_mods(prof))
+            active = self._get_profile_use_cases().read_active_mods(prof)
         except Exception:
             try:
                 active = list(getattr(prof, "active_mods", []) or [])
