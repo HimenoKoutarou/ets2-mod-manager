@@ -122,12 +122,10 @@ class _GameLaunchWorker(QThread):
             # 判断是否崩溃
             crashed = False
             if crash_txt.exists():
-                mtime_after = crash_txt.stat().st_mtime
-                if mtime_after > mtime_before:
-                    crashed = True
-            rc = proc.returncode
-            if rc is not None and rc != 0:
-                crashed = True
+                crashed = _crash_log_updated(
+                    mtime_before,
+                    crash_txt.stat().st_mtime,
+                )
 
             self.game_exited.emit(crashed)
 
@@ -137,6 +135,11 @@ class _GameLaunchWorker(QThread):
             self.launch_failed.emit("没有权限启动游戏")
         except Exception as e:
             self.launch_failed.emit(str(e))
+
+
+def _crash_log_updated(mtime_before: float, mtime_after: float) -> bool:
+    """A crash is evidenced by a newer crash log, not by exit code alone."""
+    return float(mtime_after) > float(mtime_before)
 
 
 # ============================================================
