@@ -32,75 +32,23 @@ from core.scs_archive import ScsArchiveReader
 from core.sii_parser import parse_sii
 from domain.mod_identity import aliases_match, mod_aliases, profile_entry_aliases
 
+# Public diagnostic DTOs live at the Application boundary.  Re-exporting the
+# names here preserves the legacy import path while ensuring new callers and
+# the future C# facade share exactly the same runtime types.
+from application.contracts import (
+    Severity,
+    PrecheckDepth,
+    CrashSuspicion,
+    PrecheckIssue,
+    PrecheckReport,
+    CrashSuspectMod,
+    CrashAnalyzeResult,
+)
+
 
 # ============================================================
 # 数据模型
 # ============================================================
-
-class Severity(str, Enum):
-    RED = "red"          # 必崩：真实加载必然闪退
-    YELLOW = "yellow"    # 警告：大概率运行时异常，但可能不闪退
-    GREEN = "green"      # OK：此层检查通过（不纳入告警计数，仅统计）
-
-
-class PrecheckDepth(str, Enum):
-    L0_FAST = "L0"       # <1s
-    L1_MED  = "L1"       # <5s
-    L2_DEEP = "L2"       # <30s  默认 max_depth
-    L3_HIST = "L3"       # <2s，可与 L0~L2 组合叠加
-
-
-class CrashSuspicion(str, Enum):
-    S = "S"              # 确定嫌疑：日志明确写 in package 'xxx.scs' 或直接报 mod id
-    A = "A"              # 高嫌疑：崩发生在该 mod 正在 mount 或刚 mount 完的错误区间
-    B = "B"              # 一般嫌疑：崩前最后 N 个成功 mount 中（N=5）
-
-
-@dataclass
-class PrecheckIssue:
-    mod_id: str
-    mod_display_name: str
-    priority_index: Optional[int]
-    severity: Severity
-    layer: PrecheckDepth
-    check_code: str
-    evidence: str
-    suggestion: str
-    extra: dict = field(default_factory=dict)
-
-
-@dataclass
-class PrecheckReport:
-    profile_id: str
-    scanned_mods: int
-    total_issues: int
-    red_count: int
-    yellow_count: int
-    issues: List[PrecheckIssue]
-    elapsed_ms: int
-
-
-@dataclass
-class CrashSuspectMod:
-    rank: int
-    suspicion: CrashSuspicion
-    mod_id: str
-    mod_display_name: str
-    priority_index: Optional[int]
-    evidence_lines: List[str]
-    evidence_line_range: Tuple[int, int]
-
-
-@dataclass
-class CrashAnalyzeResult:
-    crash_time: str
-    build_version: str
-    exception_code: str
-    fault_module_category: str
-    suspects: List[CrashSuspectMod]
-    failed_to_match: int
-    raw_tail_lines: List[str]
-
 
 # ============================================================
 # 常量与正则

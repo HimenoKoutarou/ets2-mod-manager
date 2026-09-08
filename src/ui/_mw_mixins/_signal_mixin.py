@@ -9,6 +9,7 @@ from .._mw_widgets import _LangSwitchDialog, SplashScreen, ModTable, COL_ENABLED
 from .._mw_workers import _ProfileReadWorker
 from version import __version__
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
+from application.category_use_cases import CategoryUseCases
 
 import json
 import os
@@ -55,6 +56,16 @@ class _UpdateInstallWorker(QThread):
 
 
 class _SignalMixin:
+    def _get_category_use_cases(self) -> CategoryUseCases:
+        """Return the shared category Application facade."""
+        use_cases = getattr(self, "category_use_cases", None)
+        if use_cases is not None:
+            return use_cases
+        from services import category_service
+        use_cases = CategoryUseCases(category_service)
+        self.category_use_cases = use_cases
+        return use_cases
+
     def _background_workers(self):
         """Return live main-window workers without duplicate objects."""
         attrs = (
@@ -166,7 +177,7 @@ class _SignalMixin:
                 unique_packages.append(pkg)
         n = 0
         category_updates = {}
-        from services import category_service as _cs
+        category_use_cases = self._get_category_use_cases()
         for pkg in unique_packages:
             mod = self._lookup_mod(pkg)
             if mod is None:
@@ -195,8 +206,8 @@ class _SignalMixin:
             n += 1
         if n:
             try:
-                _cs.set_categories_bulk(category_updates)
-                _cs.save()
+                category_use_cases.set_categories_bulk(category_updates)
+                category_use_cases.save()
             except Exception:
                 pass
             # 重新读取分类计数和节点状态，确保目标文件夹立即可见。
@@ -235,8 +246,9 @@ class _SignalMixin:
         menu.addSeparator()
         assign_menu = menu.addMenu("分配到分类")
         try:
-            from services.category_service import all_folders
-            category_items = [("未分类", "")] + [(str(x), str(x)) for x in all_folders()]
+            category_items = [("未分类", "")] + [
+                (str(x), str(x)) for x in self._get_category_use_cases().all_folders()
+            ]
         except Exception:
             category_items = [("未分类", "")]
         assign_actions = {}
@@ -1063,6 +1075,15 @@ class _SignalMixin:
             self.lbl_link_status.setStyleSheet("")
 
     # ---------- 扫描：顶部主进度条控制 + 取消处理 ----------
+    def _on_quick_scan_dto(self, result) -> None:
+        """Adapt the M6 scan DTO to the existing rendering path."""
+        status = getattr(result, "status", None)
+        status_value = getattr(status, "value", status)
+        if result is None or status_value != "completed":
+            self._on_quick_scan_failed(getattr(result, "error", None) or "扫描未完成")
+            return
+        self._on_quick_scan_result(list(result.mods), list(result.new_mod_ids))
+
     def _on_quick_scan_result(self, mods_list: list, new_ids: list):
         """快速扫描完成：填 all_mods → 刷新表格 → 立即保存会话 → 新模组弹窗 → 启动异步解析 + Steam 查询"""
         # installer splash: quick_scan 阶段完成 → parse 阶段启动
@@ -1717,11 +1738,15 @@ class _SignalMixin:
         elif kind == "__filter_cat__":
             self._current_filter_cat = value
             self._apply_filter_to_table()
-            from services.category_service import label_of
             if value == "":
                 self.statusBar().showMessage(_("ui.sb_filter_uncat"), 3000)
             else:
-                self.statusBar().showMessage(_("ui.sb_filter_cat", label=label_of(value)), 3000)
+                try:
+                    from services.category_service import label_of
+                    label = label_of(value)
+                except Exception:
+                    label = value
+                self.statusBar().showMessage(_("ui.sb_filter_cat", label=label), 3000)
 
     def _on_tree_category_menu(self, pos):
         it = self.tree_categories.itemAt(pos)

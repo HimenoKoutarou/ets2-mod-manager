@@ -49,6 +49,9 @@ from services.backup_service import BackupService
 from services.profile_service import ProfileService, ProfileInfo
 from services.priority_service import PriorityService
 from application.profile_use_cases import ProfileUseCases
+from application.mod_scan_use_cases import ModScanUseCases
+from application.category_use_cases import CategoryUseCases
+from application.crash_diagnosis_use_cases import CrashDiagnosisUseCases
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
 from version import __version__
 from services.update_service import UpdateService
@@ -175,6 +178,13 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         self.paths: ETS2Paths = detect_paths()
         self.symlink = SymlinkManager(self.paths.mod_dir)
         self.scanner = ModScanner(self.paths.mod_dir, self.paths.workshop_content_dir, self.paths.mods_info_path)
+        # Composition root for the M6 boundaries.  Legacy services/workers
+        # remain usable, while new UI entry points can depend on these
+        # technology-neutral facades.
+        self.mod_scan_use_cases = ModScanUseCases(self.scanner)
+        from services import category_service as _category_service
+        self.category_use_cases = CategoryUseCases(_category_service)
+        self.crash_diagnosis_use_cases = CrashDiagnosisUseCases()
 
         self.backup_svc = BackupService()
         self.profile_svc = ProfileService(self.paths, backup=self.backup_svc)

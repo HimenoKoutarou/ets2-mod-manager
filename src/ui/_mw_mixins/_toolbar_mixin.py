@@ -133,7 +133,6 @@ class _ToolbarMixin:
         self.tree_categories.itemChanged.connect(self._on_category_item_changed)
         self.tree_categories.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_categories.customContextMenuRequested.connect(self._on_tree_category_menu)
-        from services.category_service import all_folders
         self._cat_item_all = QTreeWidgetItem([_("ui.cat_all")])
         self._cat_item_all.setData(0, Qt.UserRole, ("__filter_all__", None))
         self.tree_categories.addTopLevelItem(self._cat_item_all)
@@ -147,7 +146,7 @@ class _ToolbarMixin:
         )
         self.tree_categories.addTopLevelItem(self._cat_item_uncategorized)
         self._cat_items: dict[str, QTreeWidgetItem] = {}
-        for fname in all_folders():
+        for fname in self._get_category_use_cases().all_folders():
             it = QTreeWidgetItem([_("ui.cat_prefix", label=fname)])
             it.setData(0, Qt.UserRole, ("__filter_cat__", fname))
             self._make_category_item_checkable(it)
@@ -680,10 +679,15 @@ class _ToolbarMixin:
         """启动快速扫描后台线程（替代原同步 scanner.scan），避免 UI 阻塞。"""
         self._show_scan_progress(_("ui.sp_phase_quick"), busy=True, detail=_("ui.sp_preparing"))
         self.statusBar().showMessage(_("ui.sb_scanning_quick"))
-        w = _QuickScanWorker(self.scanner)
+        w = _QuickScanWorker(
+            self.scanner,
+            category_use_cases=getattr(self, "category_use_cases", None),
+        )
         self._quick_scan_worker = w
         w.progress_filename.connect(lambda fn: self._show_scan_progress(_("ui.sp_phase_quick"), busy=True, detail=fn))
-        w.result_ready.connect(self._on_quick_scan_result)
+        # New UI code consumes the Application DTO; the legacy two-list signal
+        # remains available for older integrations.
+        w.result_dto_ready.connect(self._on_quick_scan_dto)
         w.failed.connect(self._on_quick_scan_failed)
         w.start()
 
@@ -1153,6 +1157,7 @@ class _ToolbarMixin:
             dlg = CrashCheckDialog(
                 profile=self.current_profile,
                 all_mods=getattr(self, "all_mods", []) or [],
+                diagnosis_use_cases=getattr(self, "crash_diagnosis_use_cases", None),
                 parent=self,
             )
         except Exception as e:

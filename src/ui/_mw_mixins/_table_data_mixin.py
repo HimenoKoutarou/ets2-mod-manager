@@ -6,6 +6,7 @@ Mixin 类本身不做 __init__ / 不 super()，所有 self.xxx 属性都来自 M
 from __future__ import annotations
 from application.mod_management_use_cases import ModManagementUseCases
 from application.profile_use_cases import ProfileUseCases
+from application.category_use_cases import CategoryUseCases
 from services.profile_service import ProfileService, ProfileInfo
 
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
@@ -41,6 +42,16 @@ from domain.mod_identity import canonical_key, mod_aliases, profile_entry_aliase
 
 
 class _TableDataMixin:
+    def _get_category_use_cases(self) -> CategoryUseCases:
+        """Return the category Application facade with legacy fallback."""
+        use_cases = getattr(self, "category_use_cases", None)
+        if use_cases is not None:
+            return use_cases
+        from services import category_service
+        use_cases = CategoryUseCases(category_service)
+        self.category_use_cases = use_cases
+        return use_cases
+
     def _get_profile_use_cases(self) -> ProfileUseCases:
         """Return the Profile application facade used by presentation code."""
         use_cases = getattr(self, "profile_use_cases", None)
@@ -195,9 +206,7 @@ class _TableDataMixin:
 
     def _render_active_grouped_table(self, table: ModTable) -> None:
         """Render enabled Mods with custom folders as expandable group rows."""
-        from services.category_service import all_folders
-
-        folders = set(all_folders())
+        folders = set(self._get_category_use_cases().all_folders())
         worklist = list(getattr(self, "current_worklist", []) or [])
         folder_entries: Dict[str, list] = {}
         folder_order: list[str] = []
@@ -492,8 +501,7 @@ class _TableDataMixin:
         if not active_table:
             return [("mod", dict(entry), self._lookup_mod(str(entry.get("package_name") or "")) or entry.get("mod"))
                     for entry in worklist]
-        from services.category_service import all_folders
-        folders = set(all_folders())
+        folders = set(self._get_category_use_cases().all_folders())
         folder_entries: Dict[str, list] = {}
         for entry in worklist:
             pkg = str(entry.get("package_name") or "").strip()
@@ -941,8 +949,7 @@ class _TableDataMixin:
             # refers to a folder that no longer exists, expose the Mod as
             # uncategorized instead of making it disappear from the tree.
             try:
-                from services.category_service import all_folders
-                if tag not in set(all_folders()):
+                if tag not in set(self._get_category_use_cases().all_folders()):
                     try:
                         mod._category_tag = ""
                     except Exception:
@@ -962,7 +969,6 @@ class _TableDataMixin:
             ]
         try:
             import re as _re_cat_tag
-            from services import category_service as _cs
             expanded_aliases = []
             for alias in aliases:
                 alias = str(alias or "").strip()
@@ -979,10 +985,10 @@ class _TableDataMixin:
                 if stripped and stripped not in expanded_aliases:
                     expanded_aliases.append(stripped)
             for alias in expanded_aliases:
-                cached = str(_cs.get_category(alias) or "")
+                cached = self._get_category_use_cases().get_category(alias)
                 if cached:
                     try:
-                        if cached not in set(_cs.all_folders()):
+                        if cached not in set(self._get_category_use_cases().all_folders()):
                             cached = ""
                     except Exception:
                         pass
@@ -1014,8 +1020,11 @@ class _TableDataMixin:
 
         cached_ids = set()
         try:
-            from services import category_service as _cs
-            cached_ids = {_canon(x) for x in _cs.mods_in_category(cat_key) if _canon(x)}
+            cached_ids = {
+                _canon(x)
+                for x in self._get_category_use_cases().mods_in_category(cat_key)
+                if _canon(x)
+            }
         except Exception:
             pass
         seen = set()
@@ -1270,8 +1279,7 @@ class _TableDataMixin:
     def _iter_user_categories_for_menu(self) -> list:
         """返回用户自定义分类列表（仅用户创建的文件夹，不包含未分类）。"""
         try:
-            from services.category_service import all_folders
-            return list(all_folders())
+            return self._get_category_use_cases().all_folders()
         except Exception:
             return []
 
@@ -1580,8 +1588,8 @@ class _TableDataMixin:
         if not name:
             QMessageBox.warning(self, _("dlg.new_folder_title"), _("dlg.folder_name_empty"))
             return
-        from services import category_service as _cs
-        if not _cs.create_folder(name):
+        result = self._get_category_use_cases().create_folder(name)
+        if not result.ok:
             QMessageBox.warning(self, _("dlg.new_folder_title"), _("dlg.folder_exists"))
             return
         self._rebuild_category_tree()
@@ -1596,34 +1604,32 @@ class _TableDataMixin:
         if not ok: return
         new_name = new_name.strip()
         if not new_name or new_name == old_name: return
-        from services import category_service as _cs
-        n = _cs.rename_folder(old_name, new_name)
-        if n < 0:
+        result = self._get_category_use_cases().rename_folder(old_name, new_name)
+        if result.conflict:
             QMessageBox.warning(self, _("dlg.rename_folder_title"), _("dlg.folder_exists"))
             return
         self._rebuild_category_tree()
         self._apply_filter_to_table()
         self.statusBar().showMessage(
-            _("ui.sb_folder_renamed", old=old_name, new=new_name, n=max(n, 0)), 5000)
+            _("ui.sb_folder_renamed", old=old_name, new=new_name,
+              n=max(result.affected_mods, 0)), 5000)
 
     def _delete_folder(self, name: str):
         if not self._ensure_profile_editable():
             return
-        from services import category_service as _cs
-        st = _cs.stats()
+        st = self._get_category_use_cases().snapshot().stats
         count = st.get(name, 0)
         ret = QMessageBox.question(
             self, _("dlg.delete_folder_title"),
             _("dlg.delete_folder_msg", name=name, n=count))
         if ret != QMessageBox.Yes: return
-        n = _cs.delete_folder(name)
+        result = self._get_category_use_cases().delete_folder(name)
         self._rebuild_category_tree()
         self._apply_filter_to_table()
         self.statusBar().showMessage(
-            _("ui.sb_folder_deleted", name=name, n=max(n, 0)), 5000)
+            _("ui.sb_folder_deleted", name=name, n=max(result.affected_mods, 0)), 5000)
 
     def _rebuild_category_tree(self):
-        from services.category_service import all_folders
         cur = self.tree_categories.currentItem()
         cur_role = cur.data(0, Qt.UserRole) if cur else None
         # QTreeWidget.itemChanged fires for setText/setCheckState as well as
@@ -1639,7 +1645,7 @@ class _TableDataMixin:
                 if idx >= 0:
                     self.tree_categories.takeTopLevelItem(idx)
             self._cat_items.clear()
-            for fname in all_folders():
+            for fname in self._get_category_use_cases().all_folders():
                 it = QTreeWidgetItem([_("ui.cat_prefix", label=fname)])
                 it.setData(0, Qt.UserRole, ("__filter_cat__", fname))
                 self._make_category_item_checkable(it)
@@ -1872,8 +1878,7 @@ class _TableDataMixin:
         cat_cb = QComboBox(dlg)
         cat_cb.addItem(_("ui.cat_all"), None)
         try:
-            from services.category_service import all_folders
-            categories = list(all_folders())
+            categories = self._get_category_use_cases().all_folders()
         except Exception:
             categories = []
         if "" in [getattr(self._lookup_mod(pn), "category_tag", "") or "" for pn in active]:
@@ -1918,10 +1923,9 @@ class _TableDataMixin:
     def _show_new_mods_dialog(self, new_ids: list[str]):
         if not new_ids: return
         try:
-            from services.category_service import all_folders
-            folders = all_folders()
+            folders = self._get_category_use_cases().all_folders()
         except Exception:
-            cats = []
+            folders = []
         rows: list[tuple[str, object, QComboBox]] = []
         for mid in new_ids:
             m = getattr(self, "_all_mods_by_id", {}).get(mid)
@@ -2008,8 +2012,7 @@ class _TableDataMixin:
                 fname, ok = QInputDialog.getText(self, _("dlg.new_folder_title"), _("dlg.new_folder_label"))
                 if ok and fname.strip():
                     fname = fname.strip()
-                    from services import category_service as _cs
-                    _cs.create_folder(fname)
+                    self._get_category_use_cases().create_folder(fname)
                     ck = fname
                 else:
                     ck = ""
@@ -2018,9 +2021,8 @@ class _TableDataMixin:
                 try: m._category_tag = ck
                 except Exception: pass
         try:
-            from services import category_service as _cs
-            _cs.set_categories_bulk(changes)
-            _cs.save()
+            self._get_category_use_cases().set_categories_bulk(changes)
+            self._get_category_use_cases().save()
         except Exception:
             pass
         self._apply_filter_to_table()

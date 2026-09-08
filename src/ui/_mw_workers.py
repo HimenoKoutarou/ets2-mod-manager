@@ -15,6 +15,7 @@ from PySide6.QtCore import QObject, Signal, QThread
 
 from services.i18n_service import _, tr
 from core.models import Mod
+from application.contracts import ModScanResult, ScanStatus
 
 
 class _QuickScanWorker(QThread):
@@ -22,11 +23,13 @@ class _QuickScanWorker(QThread):
 
     progress_filename = Signal(str)        # 当前扫描的文件名（用于主进度条不定态阶段文案）
     result_ready = Signal(list, list)      # (mods_list, new_ids)
+    result_dto_ready = Signal(object)      # Application-level ModScanResult
     failed = Signal(str)
 
-    def __init__(self, scanner, parent=None):
+    def __init__(self, scanner, parent=None, category_use_cases=None):
         super().__init__(parent)
         self._scanner = scanner
+        self._category_use_cases = category_use_cases
         self._stop = False
 
     def stop(self):
@@ -94,7 +97,11 @@ class _QuickScanWorker(QThread):
 
             # --- 3) 分类标签回填 + 新模组检测（这步也逐包emit阶段名称） ---
             try:
-                from services import category_service as _cs
+                if self._category_use_cases is None:
+                    from application.category_use_cases import CategoryUseCases
+                    from services import category_service
+                    self._category_use_cases = CategoryUseCases(category_service)
+                category_use_cases = self._category_use_cases
                 name_hints = {}
                 for m in mods_list:
                     if self._stop:
@@ -106,11 +113,13 @@ class _QuickScanWorker(QThread):
                     name_hints[m.mod_id] = m.display_title
                 if not self._stop:
                     for m in mods_list:
-                        cat = _cs.get_category(m.mod_id)
+                        cat = category_use_cases.get_category(m.mod_id)
                         if cat:
                             m._category_tag = cat
-                    _cs.touch_and_detect_new([m.mod_id for m in mods_list], name_hints=name_hints)
-                    _cs.save()
+                    category_use_cases.touch_and_detect_new(
+                        [m.mod_id for m in mods_list], name_hints=name_hints
+                    )
+                    category_use_cases.save()
             except Exception:
                 pass
             try:
@@ -123,6 +132,12 @@ class _QuickScanWorker(QThread):
                 # 取消即认为失败，不发送结果
                 self.failed.emit(_("ui.sb_scan_cancelled"))
             else:
+                self.result_dto_ready.emit(ModScanResult(
+                    mods=list(mods_list),
+                    new_mod_ids=list(new_ids),
+                    scanned_count=len(mods_list),
+                    status=ScanStatus.COMPLETED,
+                ))
                 self.result_ready.emit(mods_list, list(new_ids))
         except Exception as e:
             import traceback

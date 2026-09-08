@@ -28,10 +28,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor
 
 from ui.theme import ThemeManager, DARK_THEME, LIGHT_THEME
-from services.crash_service import (
-    Severity, CrashSuspicion, CrashSuspectMod, CrashAnalyzeResult,
-    analyze_crashlog, discover_latest_crash_pair,
-)
+from application.contracts import CrashSuspicion, CrashSuspectMod, CrashAnalyzeResult
+from application.crash_diagnosis_use_cases import CrashDiagnosisUseCases
 from services.game_launcher_service import (
     find_game_exe, find_game_docs_dir, launch_and_watch, GameLaunchHandle,
 )
@@ -62,18 +60,20 @@ class CrashCheckSignals(QObject):
 class _AnalyzeWorker(QThread):
     finished = Signal()
 
-    def __init__(self, crash_path, log_path=None, profile=None, all_mods=None, parent=None):
+    def __init__(self, crash_path, log_path=None, profile=None, all_mods=None,
+                 diagnosis_use_cases=None, parent=None):
         super().__init__(parent)
         self.crash_path = crash_path
         self.log_path = log_path
         self.profile = profile
         self.all_mods = list(all_mods) if all_mods else []
+        self.diagnosis_use_cases = diagnosis_use_cases or CrashDiagnosisUseCases()
         self.result: Optional[CrashAnalyzeResult] = None
         self.error: Optional[str] = None
 
     def run(self):
         try:
-            self.result = analyze_crashlog(
+            self.result = self.diagnosis_use_cases.analyze_crashlog(
                 self.crash_path, self.log_path,
                 profile=self.profile, all_mods=self.all_mods,
             )
@@ -150,12 +150,14 @@ class CrashCheckDialog(QDialog):
 
     signals = CrashCheckSignals()
 
-    def __init__(self, profile=None, all_mods: Optional[List] = None, parent=None):
+    def __init__(self, profile=None, all_mods: Optional[List] = None,
+                 diagnosis_use_cases=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("崩溃排查：启动游戏监控 / Crashlog 解析")
         self.resize(1000, 680)
         self._profile = profile
         self._all_mods = list(all_mods) if all_mods else []
+        self._diagnosis_use_cases = diagnosis_use_cases or CrashDiagnosisUseCases()
         self._analyze_worker: Optional[_AnalyzeWorker] = None
         self._launch_worker: Optional[_GameLaunchWorker] = None
         self._analyze_result: Optional[CrashAnalyzeResult] = None
@@ -332,13 +334,13 @@ class CrashCheckDialog(QDialog):
     def _run_auto_analyze(self) -> None:
         """自动扫描默认 Documents 目录下最新的 (game.crash.txt, game.log.txt)。"""
         try:
-            pair = discover_latest_crash_pair()
+            pair = self._diagnosis_use_cases.discover_latest_crash_pair()
         except Exception:
             pair = None
         if not pair:
             return
-        crash_p = pair.get("crash")
-        log_p = pair.get("log")
+        crash_p = pair.crash if hasattr(pair, "crash") else pair.get("crash")
+        log_p = pair.log if hasattr(pair, "log") else pair.get("log")
         if crash_p is None:
             return
         self.crash_path_edit.setText(str(crash_p))
@@ -360,7 +362,8 @@ class CrashCheckDialog(QDialog):
         self.crash_status_label.setText("解析中...")
         self._analyze_worker = _AnalyzeWorker(
             crash_path=crash_path, log_path=log_path,
-            profile=self._profile, all_mods=self._all_mods, parent=self,
+            profile=self._profile, all_mods=self._all_mods,
+            diagnosis_use_cases=self._diagnosis_use_cases, parent=self,
         )
         self._analyze_worker.finished.connect(self._on_analyze_done)
         self._analyze_worker.start()

@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-核心 Mod 管理重构 M5 已完成：Mod 管理的工作列表构建、批量启停、单项/分类排序、预设、Profile 顺序转换和 Crash 回查重建统一经过 `application.mod_management_use_cases.ModManagementUseCases`；纯工作列表变换已下沉到 `domain.mod_priority_rules`；Profile active_mods 的读取和写入统一经过 `application.profile_use_cases.ProfileUseCases`。
+核心 Mod 管理重构 M6 已完成：M5 的 Mod 管理与 Profile active_mods 边界继续保持；扫描、分类和 Crash 诊断新增稳定的 Application DTO/facade。纯工作列表变换仍下沉到 `domain.mod_priority_rules`；Profile active_mods 仍统一经过 `application.profile_use_cases.ProfileUseCases`。
 
 M1 已完成：Mod 身份 alias、Profile/UI 顺序转换和工作列表重建统一走 Domain 规则。
 
@@ -27,6 +27,10 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - Local/Cloud 写入边界、游戏运行检查、备份、原子替换和写后校验仍由现有 `ProfileService` 兼容适配器执行，Application 层不复制文件格式逻辑。
 - `domain.mod_priority_rules` 不依赖 Qt、Path、文件系统或 Service；Mod 元数据通过 resolver callback 注入，支持未来替换为 C#/.NET 或 Rust Core。
 - `PriorityService` 的构建、启停、移动、预设和顺序转换方法保留为兼容薄包装；其主要职责收缩为 Mod alias 解析和分类索引缓存。
+- `application.contracts` 定义 `ModScanResult`/`ModScanSnapshot`、`CategoryState`/`CategoryMutationResult`、`ProgressEvent`/`CancellationEvent` 和 Crash 诊断 DTO；这些类型只使用普通 Python 值，作为未来 C# / Rust 边界的迁移契约。
+- `application.mod_scan_use_cases.ModScanUseCases` 将旧 `ModScanner.scan()` 的 `(mods, new_ids)` 归一化为 `ModScanResult`，支持预取消检查；快速扫描 Worker 通过 `result_dto_ready` 向 UI 发 DTO，同时保留旧 `result_ready(list, list)` 兼容信号。
+- `application.category_use_cases.CategoryUseCases` 包装 `category_service`，提供分类快照、文件夹变更结果和批量归类操作；主窗口分类树、归类、文件夹管理和快速扫描分类回填已优先走 facade，旧 Service API 保留。
+- `application.crash_diagnosis_use_cases.CrashDiagnosisUseCases` 包装 Crash 发现、预检和日志分析；`services.crash_service` 重新导出 `application.contracts` 中的 Crash DTO/枚举，旧导入路径继续有效；CrashCheckDialog 通过 facade 调用。
 
 ## 本阶段约束
 
@@ -57,6 +61,6 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 
 ## 后续方向
 
-1. M6：补齐扫描、分类和 Crash 诊断的 DTO/事件边界，再评估 C#/.NET + Rust Core 的替换顺序。
-2. M7：把 Profile 名称、复制/删除等非 Mod 管理写操作拆到独立 use case，避免继续扩大 `ProfileService` 兼容层。
-3. M8：对 Domain/Application 输出建立跨实现 golden fixtures，为多语言迁移提供新旧结果对比。
+1. M7：把 Profile 名称、复制/删除等非 Mod 管理写操作拆到独立 use case，避免继续扩大 `ProfileService` 兼容层。
+2. M8：对 Domain/Application 输出建立跨实现 golden fixtures，为多语言迁移提供新旧结果对比。
+3. M9：建立 Rust Core 的 HashFS/SCS/BSII C ABI 原型，再接入 C#/.NET 迁移骨架。
