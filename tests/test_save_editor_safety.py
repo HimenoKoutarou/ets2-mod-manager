@@ -16,8 +16,9 @@ from services.save_editor_service import (  # noqa: E402
     decrypt_scsc,
     encrypt_scsc,
 )
-from services.profile_service import ProfileInfo  # noqa: E402
+from services.profile_service import ProfileInfo, _escape_profile_str_for_sii  # noqa: E402
 from domain.bsii import parse_bsii  # noqa: E402
+from ui.save_editor_dialog import _combine_unlock_results  # noqa: E402
 
 
 def _field(name: str, type_byte: int, payload: bytes) -> bytes:
@@ -92,6 +93,19 @@ class SaveEditorSafetyTests(unittest.TestCase):
             self.assertEqual(b"new-content", path.read_bytes())
             leftovers = [p for p in path.parent.iterdir() if p.name != path.name]
             self.assertEqual([], leftovers)
+
+    def test_profile_text_replacement_preserves_escaped_quotes(self):
+        old = ' profile_name: "旧\\"名\\\\路径"\n company_name: "旧公司"\n'
+        escaped = _escape_profile_str_for_sii('新"名\\路径')
+        replaced = SaveEditorService._replace_text_field(old, "profile_name", escaped)
+        self.assertIn(f' profile_name: "{escaped}"', replaced)
+        self.assertIn(' company_name: "旧公司"', replaced)
+
+    def test_combined_unlock_requires_both_operations(self):
+        self.assertEqual((True, ""), _combine_unlock_results(True, True))
+        self.assertEqual((False, ""), _combine_unlock_results(True, False))
+        self.assertEqual((False, ""), _combine_unlock_results(False, True))
+        self.assertEqual((False, ""), _combine_unlock_results(False, False))
 
 
 class _BackupStub:

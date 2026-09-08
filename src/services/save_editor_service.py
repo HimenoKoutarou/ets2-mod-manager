@@ -444,7 +444,8 @@ class SaveEditorService:
     @staticmethod
     def _replace_text_field(text: str, key: str, new_val: str) -> str:
         pat = re.compile(
-            r'^(?P<indent>\s*)' + re.escape(key) + r'\s*:\s*"[^"]*"\s*$',
+            r'^(?P<indent>[ \t]*)' + re.escape(key)
+            + r'[ \t]*:[ \t]*"(?:\\.|[^"\\])*"[ \t]*$',
             re.MULTILINE
         )
         return pat.sub(lambda m: f'{m.group("indent")}{key}: "{new_val}"', text)
