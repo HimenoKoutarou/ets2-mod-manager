@@ -502,7 +502,15 @@ class SaveEditorService:
             info_bytes = (info_prefix + container_text).encode("utf-8")
             if info_bytes.startswith(b"\xef\xbb\xbf"):
                 info_bytes = info_bytes[3:]
-            _atomic_write_bytes(copied_info, info_bytes)
+            # Preserve the source container format. Real ETS2 saves use ScsC
+            # for info.sii; writing decrypted text here makes the copied slot
+            # unreadable even though the metadata itself is valid.
+            output_info = (
+                encrypt_scsc(info_bytes)
+                if raw_info.startswith(_MAGIC_SCSC)
+                else info_bytes
+            )
+            _atomic_write_bytes(copied_info, output_info)
             os.replace(staging_dir, target_dir)
         except Exception:
             shutil.rmtree(staging_dir, ignore_errors=True)

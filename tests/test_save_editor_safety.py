@@ -13,6 +13,7 @@ from services.save_editor_service import (  # noqa: E402
     SaveEditorService,
     SaveSlotInfo,
     _atomic_write_bytes,
+    decrypt_scsc,
     encrypt_scsc,
 )
 from services.profile_service import ProfileInfo  # noqa: E402
@@ -125,9 +126,10 @@ class SaveSlotCopyTests(unittest.TestCase):
             self.assertEqual(b"game-save-payload", copied.game_sii.read_bytes())
             self.assertEqual(b"preview-image", (copied.slot_path / "preview.tga").read_bytes())
             copied_info = copied.info_sii.read_bytes()
-            self.assertTrue(copied_info.startswith(b"SiiNunit"))
-            self.assertIn(b'name: "\\xE6\\xB5\\x8B\\xE8\\xAF\\x95\\xE5\\x89\\xAF\\xE6\\x9C\\xAC"', copied_info)
-            self.assertNotIn(b"file_time: 100", copied_info)
+            self.assertTrue(copied_info.startswith(b"ScsC"))
+            copied_plain = decrypt_scsc(copied_info)
+            self.assertIn(b'name: "\\xE6\\xB5\\x8B\\xE8\\xAF\\x95\\xE5\\x89\\xAF\\xE6\\x9C\\xAC"', copied_plain)
+            self.assertNotIn(b"file_time: 100", copied_plain)
             self.assertEqual(source_info, slot.info_sii.read_bytes())
             self.assertFalse(any(p.name.startswith(".2_copy_") for p in copied.slot_path.parent.iterdir()))
 
