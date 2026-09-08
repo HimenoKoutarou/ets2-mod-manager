@@ -21,6 +21,14 @@ class GameState(Protocol):
     def is_running(self) -> bool: ...
 
 
+def require_game_closed(game_state: GameState, action: str = "修改存档") -> None:
+    """Enforce the write-side invariant shared by all Profile/save use cases."""
+    if game_state.is_running():
+        raise RuntimeError(
+            f"检测到 ETS2 或 ATS 正在运行，请完全退出游戏后再{action}。"
+        )
+
+
 class ProfileUseCases:
     """Small application boundary for Profile mutations.
 
@@ -34,6 +42,5 @@ class ProfileUseCases:
 
     def replace_active_mods(self, profile, new_mods: List[str], *, verify: bool = True):
         require_writable_profile(profile)
-        if self._game_state.is_running():
-            raise RuntimeError("检测到 ETS2 或 ATS 正在运行，请完全退出游戏后再修改 Profile。")
+        require_game_closed(self._game_state, "修改 Profile")
         return self._repository.set_active_mods(profile, list(new_mods), verify=verify)

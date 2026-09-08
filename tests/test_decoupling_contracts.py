@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from core.sii_parser import parse_sii
 from domain.mod_identity import aliases_match, profile_entry_aliases
 from application.profile_use_cases import ProfileUseCases
+from application.profile_use_cases import require_game_closed
 from services.crash_service import PrecheckDepth, precheck_active_mods
 from services.priority_service import PriorityService
 from services.profile_service import ProfileInfo, ProfileService
@@ -97,6 +98,19 @@ def test_profile_use_case_enforces_game_closed_before_repository_write():
         pass
     else:
         raise AssertionError("Profile mutation must be rejected while the game runs")
+
+
+def test_shared_game_closed_guard_is_injectable():
+    class RunningGame:
+        def is_running(self):
+            return True
+
+    try:
+        require_game_closed(RunningGame(), "写入测试")
+    except RuntimeError as error:
+        assert "写入测试" in str(error)
+    else:
+        raise AssertionError("The shared guard must reject a running game")
 
 
 def test_crash_precheck_resolves_workshop_alias_without_missing_mod_issue():

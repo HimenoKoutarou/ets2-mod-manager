@@ -29,6 +29,8 @@ from typing import Dict, List, Optional, Tuple
 from core.sii_parser import parse_sii, parse_sii_file, SiiUnit
 from services.backup_service import BackupService
 from domain.profile_rules import require_writable_profile
+from application.profile_use_cases import require_game_closed
+from infrastructure.process.game_state import WindowsGameState
 
 try:
     from Crypto.Cipher import AES
@@ -421,10 +423,12 @@ class ProfileService:
     """
 
     def __init__(self, paths, backup: Optional[BackupService] = None,
-                 sii_decrypt_exe: Optional[Path] = None):
+                 sii_decrypt_exe: Optional[Path] = None,
+                 game_state=None):
         self.paths = paths
         self.backup = backup or BackupService()
         self.sii_decrypt_exe = sii_decrypt_exe or self._auto_sii_decrypt()
+        self.game_state = game_state or WindowsGameState()
         # Profile reads are immutable between file changes.  Keeping the
         # decoded active_mods list avoids decrypting the same profile again
         # when the tree label, selection handler and table renderer all ask
@@ -440,6 +444,9 @@ class ProfileService:
         accidentally mutate the copy used by Steam synchronization.
         """
         require_writable_profile(prof)
+
+    def ensure_game_closed(self, action: str = "修改 Profile") -> None:
+        require_game_closed(self.game_state, action)
 
     def _auto_sii_decrypt(self) -> Optional[Path]:
         bin_dir = Path(__file__).resolve().parents[2] / "assets" / "bin"
@@ -633,6 +640,7 @@ class ProfileService:
         保留 verify=True 用于调试或关键路径。
         """
         self.ensure_local_profile(prof)
+        self.ensure_game_closed("修改 Profile")
         # 解密文本
         plain = self._get_plain_text_strict(prof.profile_sii)
         new_text = rewrite_active_mods_in_text(plain, list(new_mods))
@@ -666,6 +674,7 @@ class ProfileService:
     def copy_profile(self, prof: ProfileInfo, new_display_name: str = "", new_company_name: str = "") -> ProfileInfo:
         """复制存档到同一位置（local/steam/cloud）。"""
         self.ensure_local_profile(prof)
+        self.ensure_game_closed("复制 Profile")
         # 1. 根据 prof.location 定位目标父目录
         if prof.location == "local":
             parent = self.paths.profiles_dir
@@ -826,6 +835,7 @@ class ProfileService:
     def delete_profile(self, prof: ProfileInfo, backup_first: bool = True) -> None:
         """删除存档（含备份）"""
         self.ensure_local_profile(prof)
+        self.ensure_game_closed("删除 Profile")
         # 1. 若 backup_first=True：先把整个 prof.folder 目录打 zip 备份到 BackupService 的备份目录
         if backup_first:
             try:

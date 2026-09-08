@@ -22,6 +22,8 @@ import re
 import shutil
 import os
 import tempfile
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict
@@ -42,6 +44,8 @@ from services.profile_service import (
     _unescape_profile_str, _run_sii_decrypt,
     profile_plaintext_bytes,
 )
+from application.profile_use_cases import require_game_closed
+from infrastructure.process.game_state import WindowsGameState
 
 
 # =========================================================================
@@ -226,8 +230,18 @@ class SaveEditorService:
 
     FUEL_FIELDS = ["fuel", "current_fuel", "fuel_level", "total_fuel_litres"]
 
-    def __init__(self, profile_service: ProfileService):
+    def __init__(self, profile_service: ProfileService, game_state=None):
         self.ps = profile_service
+        self.game_state = game_state or getattr(
+            profile_service, "game_state", None
+        ) or WindowsGameState()
+
+    def is_game_running(self) -> bool:
+        """Compatibility wrapper around the injectable game-state adapter."""
+        return bool(self.game_state.is_running())
+
+    def ensure_game_closed(self, action: str = "修改存档") -> None:
+        require_game_closed(self.game_state, action)
 
     # ---------- 列出存档槽位 ----------
 
@@ -367,6 +381,7 @@ class SaveEditorService:
     def rename_profile(self, prof: ProfileInfo, new_profile_name: str = "",
                        new_company_name: str = "") -> Path:
         self.ps.ensure_local_profile(prof)
+        self.ensure_game_closed("重命名 Profile")
         plain = self.ps._get_plain_text(prof.profile_sii)
 
         if new_profile_name:
@@ -399,6 +414,7 @@ class SaveEditorService:
         # Reading a Cloud source is allowed; the destination must always be a
         # local profile because this operation writes active_mods/controls.
         self.ps.ensure_local_profile(dst)
+        self.ensure_game_closed("复制 Profile 设置")
         if copy_active_mods:
             mods = self.ps.get_active_mods(src)
             self.ps.set_active_mods(dst, mods)
@@ -410,6 +426,98 @@ class SaveEditorService:
                 if dst_controls.exists():
                     self.ps.backup.backup(dst_controls, tag="pre-copy-controls")
                 shutil.copy2(src_controls, dst_controls)
+
+    def copy_save_slot(self, slot: SaveSlotInfo, new_display_name: str) -> SaveSlotInfo:
+        """Copy one local game save into a new numbered slot.
+
+        The source is never changed. The copy is prepared in a sibling staging
+        directory and moved into place only after its ``info.sii`` has been
+        decoded and updated successfully.
+        """
+        self.ps.ensure_local_profile(slot.profile)
+        self.ensure_game_closed("复制存档")
+
+        display_name = str(new_display_name or "").strip()
+        if not display_name:
+            raise ValueError("新存档名称不能为空。")
+
+        save_dir = (slot.profile.folder / "save").resolve()
+        source_dir = Path(slot.slot_path).resolve()
+        if source_dir.parent != save_dir:
+            raise ValueError("源存档槽位不在当前本地 Profile 的 save 目录中。")
+        if not source_dir.is_dir():
+            raise FileNotFoundError(f"源存档目录不存在：{source_dir}")
+
+        source_game = source_dir / "game.sii"
+        source_info = source_dir / "info.sii"
+        if not source_game.is_file() or not source_info.is_file():
+            raise FileNotFoundError("源存档缺少 game.sii 或 info.sii，无法复制。")
+
+        numeric_slots = [
+            int(path.name)
+            for path in save_dir.iterdir()
+            if path.is_dir() and path.name.isdigit()
+        ]
+        next_number = max(numeric_slots, default=0) + 1
+        target_dir = save_dir / str(next_number)
+        while target_dir.exists():
+            next_number += 1
+            target_dir = save_dir / str(next_number)
+
+        staging_dir = save_dir / f".{next_number}_copy_{uuid.uuid4().hex}"
+        try:
+            shutil.copytree(source_dir, staging_dir, copy_function=shutil.copy2)
+            copied_info = staging_dir / "info.sii"
+            raw_info = copied_info.read_bytes()
+            plain_info = decrypt_scsc(raw_info)
+            if b"SiiNunit" not in plain_info[:256] or b"save_container" not in plain_info:
+                raise ValueError("无法解析源存档 info.sii，已取消创建新存档。")
+
+            info_text = _decode_text(plain_info)
+            container_pos = info_text.find("save_container")
+            info_prefix = info_text[:container_pos]
+            container_text = info_text[container_pos:]
+            escaped_name = _escape_profile_str_for_sii(display_name)
+            container_text, name_count = re.subn(
+                r'^(?P<indent>\s*)name\s*:\s*"(?:\\.|[^"\\])*"\s*$',
+                lambda match: f'{match.group("indent")}name: "{escaped_name}"',
+                container_text,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            if name_count != 1:
+                raise ValueError("info.sii 中没有可修改的存档名称字段。")
+
+            now = int(time.time())
+            container_text, file_time_count = re.subn(
+                r'^(?P<indent>\s*)file_time\s*:\s*-?\d+\s*$',
+                lambda match: f'{match.group("indent")}file_time: {now}',
+                container_text,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            if file_time_count != 1:
+                raise ValueError("info.sii 中没有可修改的 file_time 字段。")
+
+            info_bytes = (info_prefix + container_text).encode("utf-8")
+            if info_bytes.startswith(b"\xef\xbb\xbf"):
+                info_bytes = info_bytes[3:]
+            _atomic_write_bytes(copied_info, info_bytes)
+            os.replace(staging_dir, target_dir)
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+        copied_game = target_dir / "game.sii"
+        copied_info = target_dir / "info.sii"
+        return SaveSlotInfo(
+            profile=slot.profile,
+            slot_name=target_dir.name,
+            slot_path=target_dir,
+            game_sii=copied_game,
+            info_sii=copied_info,
+            file_time=now,
+        )
 
     # ---------- 功能 5：修改金钱 / 经验 / 等级 ----------
 
@@ -552,6 +660,7 @@ class SaveEditorService:
     def _save_game_sii(self, slot: SaveSlotInfo, new_bsii: bytes) -> None:
         """加密写回 game.sii 并失效缓存。"""
         self.ps.ensure_local_profile(slot.profile)
+        self.ensure_game_closed("修改存档")
         game_sii = slot.game_sii
         self.ps.backup.backup(game_sii, tag="pre-save-edit")
         encrypted = self.encrypt_game_sii(new_bsii, slot)
