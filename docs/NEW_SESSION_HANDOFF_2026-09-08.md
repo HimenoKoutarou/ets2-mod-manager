@@ -241,3 +241,61 @@ git commit -m "type: concise description"
 
 不要执行全量 `git add .`，避免把已有修改、构建产物和测试数据混入提交。
 
+## 2026-09-08 发布记录
+
+本次会话已完成一次构建和 push：
+
+- 交接文档提交：`3caa3ad docs: add new session handoff`
+- 已推送范围：`origin/main` 已更新到 `3caa3ad`
+- 推送命令：
+
+```powershell
+git push origin main
+```
+
+- 构建来源：从干净 Git worktree 检出当前 `HEAD`，没有带入主工作区未提交修改。
+- 构建命令：
+
+```powershell
+python build.py
+```
+
+- 构建版本：`1.2.3`
+- 构建产物：`ETS2ModManager.exe`、`assets/`、`version.json`
+- 压缩包：
+
+```text
+C:\Users\11253\Documents\Codex\2026-08-28\new-chat-5\outputs\ETS2ModManager-win-x64-v1.2.3-20260908.zip
+```
+
+- 压缩包已验证包含 `ETS2ModManager.exe` 和 `version.json`，`version.json` 中版本为 `1.2.3`。
+- PyInstaller 构建成功；过程中有少量可选 Qt 数据库驱动和 QML 插件警告，不影响当前窗口程序构建。
+
+### 发布后的 Git 注意事项
+
+当前主工作区仍有用户之前留下的未提交修改和未跟踪构建/测试文件。`git status -sb` 应显示：
+
+```text
+## main...origin/main
+```
+
+这表示已提交内容已经与远端同步，但不代表工作区干净。新会话不得因为这些文件而执行清理或回退操作。后续若需要发布新的修改，应先确认具体文件，再只提交相关文件；不要把存档编辑、Profile、优先级和本地化测试产物一次性加入提交。
+
+### 新会话发布检查
+
+```powershell
+cd F:\ETS2ModManager
+git fetch origin
+git status -sb
+git log -3 --oneline
+git diff --stat
+```
+
+发布前确认：
+
+1. 功能改动已经有独立 commit。
+2. `git status` 中没有意外被纳入的用户修改。
+3. 构建使用的是明确的 commit 或干净 worktree。
+4. `dist/version.json` 与 `src/version.py` 版本一致。
+5. 压缩包能够打开，且至少包含 exe、assets 和 version.json。
+6. 用户明确要求 push 或 Release 后才能执行远端发布。
