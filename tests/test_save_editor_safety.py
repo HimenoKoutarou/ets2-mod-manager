@@ -129,6 +129,22 @@ class _ProfileServiceStub:
             raise PermissionError("local profiles only")
 
 
+class _ProfileSettingsStub(_ProfileServiceStub):
+    def __init__(self):
+        self.active = {}
+        self.fail_next_write = False
+
+    def get_active_mods(self, profile):
+        return list(self.active.get(profile.profile_id, []))
+
+    def set_active_mods(self, profile, new_mods, *, verify=False):
+        if self.fail_next_write:
+            self.fail_next_write = False
+            raise RuntimeError("simulated active_mods write failure")
+        self.active[profile.profile_id] = list(new_mods)
+        return profile.profile_sii
+
+
 class SaveSlotCopyTests(unittest.TestCase):
     def _make_slot(self, root: Path, location: str = "local"):
         profile_dir = root / "profile"
@@ -226,6 +242,33 @@ class SaveSlotCopyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 service._save_game_sii(slot, b"new")
             self.assertEqual(b"old", game_sii.read_bytes())
+
+    def test_copy_profile_settings_rolls_back_controls_when_mod_write_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src_dir = root / "src"
+            dst_dir = root / "dst"
+            src_dir.mkdir()
+            dst_dir.mkdir()
+            src_sii = src_dir / "profile.sii"
+            dst_sii = dst_dir / "profile.sii"
+            src_sii.write_text("SiiNunit\n", encoding="utf-8")
+            dst_sii.write_text("SiiNunit\n", encoding="utf-8")
+            (src_dir / "controls.sii").write_bytes(b"new-controls")
+            dst_controls = dst_dir / "controls.sii"
+            dst_controls.write_bytes(b"old-controls")
+            src = ProfileInfo("src", "local", src_dir, src_sii)
+            dst = ProfileInfo("dst", "local", dst_dir, dst_sii)
+            profile_service = _ProfileSettingsStub()
+            profile_service.active = {"src": ["new"], "dst": ["old"]}
+            profile_service.fail_next_write = True
+
+            service = SaveEditorService(profile_service)
+            with self.assertRaises(RuntimeError):
+                service.copy_profile_settings(src, dst, True, True)
+
+            self.assertEqual(["old"], profile_service.active["dst"])
+            self.assertEqual(b"old-controls", dst_controls.read_bytes())
 
 
 class StructuredStatsEditTests(unittest.TestCase):

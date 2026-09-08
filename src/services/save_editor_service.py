@@ -464,17 +464,43 @@ class SaveEditorService:
         # local profile because this operation writes active_mods/controls.
         self.ps.ensure_local_profile(dst)
         self.ensure_game_closed("复制 Profile 设置")
-        if copy_active_mods:
-            mods = self.ps.get_active_mods(src)
-            self.ps.set_active_mods(dst, mods)
+        source_mods = self.ps.get_active_mods(src) if copy_active_mods else None
+        previous_mods = self.ps.get_active_mods(dst) if copy_active_mods else None
+        src_controls = src.folder / "controls.sii"
+        dst_controls = dst.folder / "controls.sii"
+        copy_controls_now = bool(copy_controls and src_controls.is_file())
+        previous_controls_exists = dst_controls.is_file()
+        previous_controls = dst_controls.read_bytes() if previous_controls_exists else None
 
-        if copy_controls:
-            src_controls = src.folder / "controls.sii"
-            dst_controls = dst.folder / "controls.sii"
-            if src_controls.exists():
-                if dst_controls.exists():
+        try:
+            # Apply controls first so a Profile write failure can still restore
+            # the original controls file before the exception leaves the UI.
+            if copy_controls_now:
+                if previous_controls_exists:
                     self.ps.backup.backup(dst_controls, tag="pre-copy-controls")
-                shutil.copy2(src_controls, dst_controls)
+                _atomic_write_bytes(dst_controls, src_controls.read_bytes())
+            if copy_active_mods:
+                self.ps.set_active_mods(dst, source_mods, verify=True)
+        except Exception as error:
+            rollback_errors = []
+            if copy_active_mods and previous_mods is not None:
+                try:
+                    self.ps.set_active_mods(dst, previous_mods, verify=True)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"active_mods rollback: {rollback_error}")
+            if copy_controls_now:
+                try:
+                    if previous_controls_exists and previous_controls is not None:
+                        _atomic_write_bytes(dst_controls, previous_controls)
+                    else:
+                        dst_controls.unlink(missing_ok=True)
+                except Exception as rollback_error:
+                    rollback_errors.append(f"controls rollback: {rollback_error}")
+            if rollback_errors:
+                raise RuntimeError(
+                    f"复制 Profile 设置失败：{error}；回滚失败：{'; '.join(rollback_errors)}"
+                ) from error
+            raise
 
     def copy_save_slot(self, slot: SaveSlotInfo, new_display_name: str) -> SaveSlotInfo:
         """Copy one local game save into a new numbered slot.
