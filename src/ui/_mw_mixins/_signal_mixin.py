@@ -1691,7 +1691,9 @@ class _SignalMixin:
     def _apply_preset(self):
         if not self.priority_svc: return
         self._sync_worklist_from_table()
-        self.current_worklist = self.priority_svc.apply_preset(self.current_worklist)
+        self.current_worklist = self._get_mod_management_use_cases().apply_preset(
+            self.current_worklist
+        )
         try: self._mark_priority_dirty("已按预设重排优先级 · 请点工具栏「保存」写回 profile")
         except Exception: pass
         if self.current_profile: self._render_current_worklist()

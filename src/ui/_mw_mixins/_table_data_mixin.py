@@ -4,7 +4,7 @@ Mixin 类本身不做 __init__ / 不 super()，所有 self.xxx 属性都来自 M
 唯一注意：closeEvent 位于 _SignalMixin 中，其末尾会直接调用 `QMainWindow.closeEvent(self, event)` 跳过 MRO。
 """
 from __future__ import annotations
-from services.priority_service import PriorityService
+from application.mod_management_use_cases import ModManagementUseCases
 from services.profile_service import ProfileService, ProfileInfo
 
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
@@ -40,6 +40,21 @@ from domain.mod_identity import canonical_key, mod_aliases, profile_entry_aliase
 
 
 class _TableDataMixin:
+    def _get_mod_management_use_cases(self) -> ModManagementUseCases:
+        """Return an application facade bound to the current priority adapter.
+
+        A fresh ``PriorityService`` is installed after each Mod rescan.  Keep
+        the facade lazy so headless tests and early bootstrap paths do not need
+        another constructor dependency, while the identity check prevents a
+        stale adapter from surviving a rescan.
+        """
+        priority = getattr(self, "priority_svc", None)
+        use_cases = getattr(self, "_mod_management_uc", None)
+        if use_cases is None or use_cases.priority is not priority:
+            use_cases = ModManagementUseCases(priority)
+            self._mod_management_uc = use_cases
+        return use_cases
+
     @staticmethod
     def _canonical_mod_lookup_key(value: object) -> str:
         return canonical_key(value)
@@ -302,8 +317,8 @@ class _TableDataMixin:
         # Search/category filters can hide rows. Keep those entries at their
         # previous relative position after the explicitly reordered tokens.
         desired.extend(pkg for pkg in current_enabled if pkg not in seen)
-        self.current_worklist = self.priority_svc.rebuild_from_active(
-            self.priority_svc, self.current_worklist, desired
+        self.current_worklist = self._get_mod_management_use_cases().rebuild_from_active(
+            self.current_worklist, desired
         )
 
     def _toggle_active_folder(self, row: int, column: int = 0) -> None:
@@ -367,7 +382,7 @@ class _TableDataMixin:
             except Exception as e:
                 QMessageBox.warning(self, _("dlg.read_fail_title"), _("dlg.read_active_fail", e=f"{e!r}"))
                 active = []
-        self.current_worklist = self.priority_svc.build_worklist(
+        self.current_worklist = self._get_mod_management_use_cases().build_worklist(
             active, list(self.all_mods_by_pkg.keys())
         )
         self._worklist_profile_key = self._profile_worklist_key(prof)
@@ -756,7 +771,9 @@ class _TableDataMixin:
             QMessageBox.information(self, _("dlg.hint_title"), _("dlg.hint_select_rows"))
             return
         self._sync_worklist_from_table()
-        wl2 = PriorityService.batch_toggle(self.current_worklist, rows, action)
+        wl2 = self._get_mod_management_use_cases().batch_toggle(
+            self.current_worklist, rows, action
+        )
         self.current_worklist = wl2
         self._sync_mod_runtime_state()
         try:
@@ -778,14 +795,13 @@ class _TableDataMixin:
         has_folder = any(self.table.is_folder_row(r) for r in selected_rows)
         if has_folder:
             pkg_set = self._selected_package_set()
-            if kind == "up": self.current_worklist = self.priority_svc.move_up_by_package_set(self.current_worklist, pkg_set)
-            elif kind == "down": self.current_worklist = self.priority_svc.move_down_by_package_set(self.current_worklist, pkg_set)
-            elif kind == "top": self.current_worklist = self.priority_svc.move_top_by_package_set(self.current_worklist, pkg_set)
-            elif kind == "bottom": self.current_worklist = self.priority_svc.move_bottom_by_package_set(self.current_worklist, pkg_set)
-        elif kind == "up": self.current_worklist = self.priority_svc.move_up(self.current_worklist, rows)
-        elif kind == "down": self.current_worklist = self.priority_svc.move_down(self.current_worklist, rows)
-        elif kind == "top": self.current_worklist = self.priority_svc.move_top(self.current_worklist, rows)
-        elif kind == "bottom": self.current_worklist = self.priority_svc.move_bottom(self.current_worklist, rows)
+            self.current_worklist = self._get_mod_management_use_cases().move_category(
+                self.current_worklist, pkg_set, kind
+            )
+        else:
+            self.current_worklist = self._get_mod_management_use_cases().move(
+                self.current_worklist, rows, kind
+            )
         self._sync_mod_runtime_state()
         try:
             self._mark_priority_dirty("加载顺序已更改 · 请点工具栏「保存」写回 profile")
@@ -820,13 +836,21 @@ class _TableDataMixin:
         if any(tbl.is_folder_row(r) for r in selected_rows):
             pkg_set = self._selected_package_set()
             if delta < 0:
-                self.current_worklist = self.priority_svc.move_up_by_package_set(self.current_worklist, pkg_set, steps=abs(delta))
+                self.current_worklist = self._get_mod_management_use_cases().move_category_delta(
+                    self.current_worklist, pkg_set, -abs(delta)
+                )
             else:
-                self.current_worklist = self.priority_svc.move_down_by_package_set(self.current_worklist, pkg_set, steps=delta)
+                self.current_worklist = self._get_mod_management_use_cases().move_category_delta(
+                    self.current_worklist, pkg_set, delta
+                )
         elif delta < 0:
-            self.current_worklist = self.priority_svc.move_up(self.current_worklist, rows, steps=abs(delta))
+            self.current_worklist = self._get_mod_management_use_cases().move_delta(
+                self.current_worklist, rows, -abs(delta)
+            )
         else:
-            self.current_worklist = self.priority_svc.move_down(self.current_worklist, rows, steps=delta)
+            self.current_worklist = self._get_mod_management_use_cases().move_delta(
+                self.current_worklist, rows, delta
+            )
         self._sync_mod_runtime_state()
         try:
             self._mark_priority_dirty("加载顺序已更改 · 请点工具栏「保存」写回 profile")
@@ -1135,8 +1159,8 @@ class _TableDataMixin:
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self.current_worklist = self.priority_svc.move_up_by_package_set(
-            self.current_worklist, pkg_set, steps=steps
+        self.current_worklist = self._get_mod_management_use_cases().move_category(
+            self.current_worklist, pkg_set, "up", steps=steps
         )
         try: self._mark_priority_dirty("已按分类整体上移 · 请点工具栏「保存」写回 profile")
         except Exception: pass
@@ -1160,8 +1184,8 @@ class _TableDataMixin:
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self.current_worklist = self.priority_svc.move_down_by_package_set(
-            self.current_worklist, pkg_set, steps=steps
+        self.current_worklist = self._get_mod_management_use_cases().move_category(
+            self.current_worklist, pkg_set, "down", steps=steps
         )
         try: self._mark_priority_dirty("已按分类整体下移 · 请点工具栏「保存」写回 profile")
         except Exception: pass
@@ -1185,8 +1209,8 @@ class _TableDataMixin:
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self.current_worklist = self.priority_svc.move_top_by_package_set(
-            self.current_worklist, pkg_set
+        self.current_worklist = self._get_mod_management_use_cases().move_category(
+            self.current_worklist, pkg_set, "top"
         )
         try: self._mark_priority_dirty("已按分类整体置顶 · 请点工具栏「保存」写回 profile")
         except Exception: pass
@@ -1210,8 +1234,8 @@ class _TableDataMixin:
         if not pkg_set:
             self.statusBar().showMessage(_("ui.sb_cat_empty", name=self._cat_display_name(cat_key)), 4000)
             return
-        self.current_worklist = self.priority_svc.move_bottom_by_package_set(
-            self.current_worklist, pkg_set
+        self.current_worklist = self._get_mod_management_use_cases().move_category(
+            self.current_worklist, pkg_set, "bottom"
         )
         try: self._mark_priority_dirty("已按分类整体置底 · 请点工具栏「保存」写回 profile")
         except Exception: pass
@@ -1442,7 +1466,9 @@ class _TableDataMixin:
         self._sync_worklist_from_table()
         if not self._ensure_backup_before_save():
             return
-        new_active = PriorityService.worklist_to_profile_active(self.current_worklist)
+        new_active = self._get_mod_management_use_cases().worklist_to_profile_active(
+            self.current_worklist
+        )
         dirty_note = "（* 有未保存的优先级/启用变更）" if getattr(self, "_dirty_priority", False) else ""
         ret = QMessageBox.question(
             self, _("dlg.save_confirm_title"),

@@ -2,7 +2,11 @@
 
 ## 当前阶段
 
-核心 Mod 管理重构 M1 已完成：Mod 身份 alias、Profile/UI 顺序转换和工作列表重建统一走 Domain 规则。
+核心 Mod 管理重构 M3 已完成：Mod 管理的工作列表构建、批量启停、单项/分类排序、预设、Profile 顺序转换和 Crash 回查重建统一经过 `application.mod_management_use_cases.ModManagementUseCases`。
+
+M1 已完成：Mod 身份 alias、Profile/UI 顺序转换和工作列表重建统一走 Domain 规则。
+
+M2 已完成：`ModCatalog` 统一扫描去重、本地优先和 Workshop 重复项挂载。
 
 BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、燃油和解锁功能不属于当前 Mod 管理主线。
 
@@ -17,6 +21,8 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - `SaveEditorService` 已使用解析器执行金额、经验和等级操作，并缓存解析后的 BSII 文档。
 - 等级没有独立持久化字段，设置等级时写入对应的 `economy.experience_points`。
 - `PriorityService`、主界面 Mod 表格索引和 Crash 禁用回查已复用 `domain.mod_identity`，不再各自实现 alias 解析。
+- UI 的 Mod 管理动作通过 `_TableDataMixin._get_mod_management_use_cases()` 获取 Application facade；扫描替换 `PriorityService` 后会按实例身份自动刷新 facade。
+- Application facade 不依赖 Qt、Path 或文件系统；当前由 `PriorityService` 作为兼容性的 priority port，后续可替换为纯 Domain/其他语言实现。
 
 ## 本阶段约束
 
@@ -34,7 +40,6 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 
 ## 后续方向
 
-1. 用 BSII 字段类型和 offset 实现受校验的金钱/经验写入。
-2. 经验使用 `economy.experience_points` UInt32，等级由经验反推，不搜索不存在的 `level` 字段。
-3. 金钱使用 `bank.money_account` Int64。
-4. 为写入增加类型、边界、回环和游戏关闭检查。
+1. M4：把 Profile active_mods 读写接入 Application repository/port，UI 保存入口只提交 DTO，不直接依赖 `ProfileService`。
+2. M5：将 `PriorityService` 的纯排序算法下沉到 Domain，Application 仅编排命令和结果。
+3. M6：补齐扫描、分类和 Crash 诊断的 DTO/事件边界，再评估 C#/.NET + Rust Core 的替换顺序。

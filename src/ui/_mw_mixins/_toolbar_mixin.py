@@ -480,8 +480,9 @@ class _ToolbarMixin:
             live_key = getattr(self, "_worklist_profile_key", None)
             live_worklist = getattr(self, "current_worklist", None)
             if live_key == profile_key and live_worklist:
-                from services.priority_service import PriorityService
-                active_mods = PriorityService.worklist_to_active(live_worklist)
+                active_mods = self._get_mod_management_use_cases().worklist_to_active(
+                    live_worklist
+                )
                 # Keep the actual Mod object when available. Re-resolving a
                 # profile string can fail for Workshop aliases or stale
                 # manifest names, yielding a false empty localization scan.
@@ -1217,7 +1218,9 @@ class _ToolbarMixin:
         # P2 async priority: memory-only + dirty, user must click 保存
         self._sync_worklist_from_table()
         try:
-            rebuild = PriorityService.rebuild_from_active(self.priority_svc, self.current_worklist, new_active_entries)
+            rebuild = self._get_mod_management_use_cases().rebuild_from_active(
+                self.current_worklist, new_active_entries
+            )
             if rebuild:
                 self.current_worklist = rebuild
         except Exception:
@@ -1264,7 +1267,9 @@ class _ToolbarMixin:
         # P2 async priority: memory-only + dirty, user must click 保存
         self._sync_worklist_from_table()
         try:
-            rebuild = PriorityService.rebuild_from_active(self.priority_svc, self.current_worklist, active)
+            rebuild = self._get_mod_management_use_cases().rebuild_from_active(
+                self.current_worklist, active
+            )
             if rebuild:
                 self.current_worklist = rebuild
         except Exception:
