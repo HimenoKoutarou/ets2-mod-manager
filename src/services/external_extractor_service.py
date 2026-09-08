@@ -102,10 +102,9 @@ def get_extractor_mode() -> str:
     with _extractor_mode_lock:
         if _extractor_mode_cache in EXTRACTOR_MODES:
             return _extractor_mode_cache
-        # The application selects the extractor automatically. Keep reading
-        # legacy config files for compatibility, but default to the automatic
-        # modern-first strategy when no setting exists.
-        mode = EXTRACTOR_MODE_AUTO
+        # Keep the established extractor as the compatibility default. Users
+        # can opt into modern-first probing explicitly through the setting.
+        mode = EXTRACTOR_MODE_LEGACY
         try:
             value = json.loads(_EXTRACTOR_CONFIG_PATH.read_text(encoding="utf-8"))
             configured = value.get("mode") if isinstance(value, dict) else None
