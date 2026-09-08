@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-核心 Mod 管理重构 M9 已完成：M5 的 Mod 管理、M6 的扫描/分类/Crash DTO 边界、M7 的 Profile 生命周期 facade、M8 的跨实现 golden fixtures 和 M9 的 Rust/C# 迁移骨架均已落地。Python/PySide6 仍是当前可运行实现；C#/.NET 10 + Rust Core 进入并行迁移阶段。
+核心 Mod 管理重构 M10 已完成：M5 的 Mod 管理、M6 的扫描/分类/Crash DTO 边界、M7 的 Profile 生命周期 facade、M8 的跨实现 golden fixtures、M9 的 Rust/C# 迁移骨架和 M10 的功能回归/整体 Review 均已完成。Python/PySide6 仍是当前可运行实现；C#/.NET 10 + Rust Core 进入并行迁移阶段。
 
 M1 已完成：Mod 身份 alias、Profile/UI 顺序转换和工作列表重建统一走 Domain 规则。
 
@@ -35,6 +35,8 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - `tests/golden/migration_contracts_v1.json` 固化 Mod alias、active_mods 顺序、工作列表变换和 DTO transport shape；Python 测试、未来 C# ContractTests 和 Rust 测试共用该 fixture。
 - `src/core/rust` 已有 `archive_core`、`bsii_core`、`mod_scanner` 和 `ets2_core_ffi` workspace；C ABI 只暴露 byte/string buffer、DTO JSON、错误码和显式 `ets2_core_free_buffer`。
 - `src/dotnet` 已有 Contracts/Domain/Application/Infrastructure/WpfClient/ModScanWorker/ContractTests 分层骨架，WPF 使用 CommunityToolkit.Mvvm，SQLite schema 使用 WAL；当前机器只有 .NET 8 Runtime 且没有 SDK，因此尚未进行实际 .NET 编译。
+- M10 验证：Python `unittest discover` 通过 62 个测试；所有带 `__main__` 的回归脚本在 UTF-8 环境下通过，R14 为 121/121；Profile 转义字段和组合解锁成功条件已补回归测试。pytest 可收集 122 项，但 Qt 测试在 pytest 运行器下异常退出，直接脚本运行同批 UI 测试通过。
+- M10 修复：Profile 重命名字段匹配支持 SII 转义引号/反斜杠；“全部解锁”只有经销商和车库两项都成功才报告成功；无 Profile 的 SaveEditorDialog UI 冒烟初始化保持可用。
 
 ## 本阶段约束
 
