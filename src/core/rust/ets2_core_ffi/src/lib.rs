@@ -30,7 +30,10 @@ pub struct Ets2Result {
 }
 
 fn empty_buffer() -> Ets2Buffer {
-    Ets2Buffer { ptr: std::ptr::null_mut(), len: 0 }
+    Ets2Buffer {
+        ptr: std::ptr::null_mut(),
+        len: 0,
+    }
 }
 
 fn owned_buffer(bytes: Vec<u8>) -> Ets2Buffer {
@@ -44,18 +47,29 @@ fn owned_buffer(bytes: Vec<u8>) -> Ets2Buffer {
 }
 
 fn ok(data: Vec<u8>) -> Ets2Result {
-    Ets2Result { code: ERR_OK, data: owned_buffer(data), error: empty_buffer() }
+    Ets2Result {
+        code: ERR_OK,
+        data: owned_buffer(data),
+        error: empty_buffer(),
+    }
 }
 
 fn err(code: i32, message: &'static [u8]) -> Ets2Result {
-    Ets2Result { code, data: empty_buffer(), error: owned_buffer(message.to_vec()) }
+    Ets2Result {
+        code,
+        data: empty_buffer(),
+        error: owned_buffer(message.to_vec()),
+    }
 }
 
 unsafe fn input<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], Ets2Result> {
     if len > 0 && ptr.is_null() {
         return Err(err(ERR_INVALID_ARGUMENT, b"null_input"));
     }
-    Ok(slice::from_raw_parts(if ptr.is_null() { [].as_ptr() } else { ptr }, len))
+    Ok(slice::from_raw_parts(
+        if ptr.is_null() { [].as_ptr() } else { ptr },
+        len,
+    ))
 }
 
 #[no_mangle]
@@ -73,10 +87,7 @@ pub unsafe extern "C" fn ets2_core_free_buffer(buffer: Ets2Buffer) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ets2_core_inspect_bytes(
-    ptr: *const u8,
-    len: usize,
-) -> Ets2Result {
+pub unsafe extern "C" fn ets2_core_inspect_bytes(ptr: *const u8, len: usize) -> Ets2Result {
     let bytes = match input(ptr, len) {
         Ok(bytes) => bytes,
         Err(result) => return result,
@@ -93,10 +104,7 @@ pub unsafe extern "C" fn ets2_core_inspect_bytes(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ets2_core_count_packages(
-    ptr: *const u8,
-    len: usize,
-) -> Ets2Result {
+pub unsafe extern "C" fn ets2_core_count_packages(ptr: *const u8, len: usize) -> Ets2Result {
     let bytes = match input(ptr, len) {
         Ok(bytes) => bytes,
         Err(result) => return result,

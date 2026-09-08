@@ -3,6 +3,7 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../ETS2ModManager.Contracts/ETS2ModManager.Contracts.csproj" />
     <ProjectReference Include="../ETS2ModManager.Domain/ETS2ModManager.Domain.csproj" />
     <None Include="../../../tests/golden/migration_contracts_v1.json"
           Link="migration_contracts_v1.json" CopyToOutputDirectory="PreserveNewest" />

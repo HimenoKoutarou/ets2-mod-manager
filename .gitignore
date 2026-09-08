@@ -32,6 +32,12 @@ assets/cache/
 # External tools
 assets/tools/
 
+# Side-by-side migration build outputs
+src/dotnet/**/bin/
+src/dotnet/**/obj/
+src/core/rust/target/
+src/core/rust/Cargo.lock
+
 # Logs
 *.log
 logs/

@@ -44,4 +44,69 @@ public static class PriorityRules
 
     public static IReadOnlyList<string> WorklistToProfileActive(IEnumerable<WorklistEntry> rows) =>
         UiToProfileOrder(rows.Where(row => row.Enabled).Select(row => row.PackageName));
+
+    public static IReadOnlyList<WorklistEntry> BatchToggle(
+        IEnumerable<WorklistEntry> entries,
+        IEnumerable<int> indices,
+        string action)
+    {
+        var rows = entries.ToList();
+        var selected = indices.ToHashSet();
+        for (var index = 0; index < rows.Count; index++)
+        {
+            if (!selected.Contains(index))
+            {
+                continue;
+            }
+
+            var enabled = action switch
+            {
+                "enable" => true,
+                "disable" => false,
+                _ => !rows[index].Enabled,
+            };
+            rows[index] = rows[index] with { Enabled = enabled };
+        }
+        return Renumber(rows.Where(row => row.Enabled).Concat(rows.Where(row => !row.Enabled)));
+    }
+
+    public static IReadOnlyList<WorklistEntry> MoveBottom(
+        IEnumerable<WorklistEntry> entries,
+        IEnumerable<int> indices)
+    {
+        var rows = entries.ToList();
+        var selected = indices.ToHashSet();
+        var enabledPositions = rows
+            .Select((row, index) => (row, index))
+            .Where(item => item.row.Enabled)
+            .ToList();
+        var enabledRows = enabledPositions.Select(item => item.row).ToList();
+        var moving = enabledRows
+            .Where((_, index) => selected.Contains(enabledPositions[index].index))
+            .ToList();
+        var remaining = enabledRows.Except(moving).ToList();
+        var ordered = remaining.Concat(moving).ToList();
+        var enabledCursor = 0;
+        for (var index = 0; index < rows.Count; index++)
+        {
+            if (rows[index].Enabled)
+            {
+                rows[index] = ordered[enabledCursor++];
+            }
+        }
+        return Renumber(rows);
+    }
+
+    private static IReadOnlyList<WorklistEntry> Renumber(IEnumerable<WorklistEntry> rows)
+    {
+        var output = new List<WorklistEntry>();
+        var order = 0;
+        foreach (var row in rows)
+        {
+            output.Add(row.Enabled
+                ? row with { Order = order, PriorityIndex = order++ }
+                : row with { Order = -1, PriorityIndex = null });
+        }
+        return output;
+    }
 }
