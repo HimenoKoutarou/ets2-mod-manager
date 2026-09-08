@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../ETS2ModManager.Contracts/ETS2ModManager.Contracts.csproj" />
+    <ProjectReference Include="../ETS2ModManager.Application/ETS2ModManager.Application.csproj" />
+  </ItemGroup>
+</Project>

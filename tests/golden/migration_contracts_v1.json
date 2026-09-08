@@ -1,0 +1,60 @@
+{
+  "contract_version": 1,
+  "identity_cases": [
+    {
+      "input": "My_Mod_copy2|Title",
+      "canonical_key": "my_mod",
+      "legacy_workshop_id": "",
+      "aliases": [
+        "my_mod",
+        "my_mod_copy2",
+        "my_mod_copy2|title",
+        "title"
+      ]
+    },
+    {
+      "input": "mod_workshop_package.000000004AC8AC43|No Damage",
+      "canonical_key": "mod_workshop_package.000000004ac8ac43",
+      "legacy_workshop_id": "1254665283",
+      "aliases": [
+        "1254665283",
+        "mod_workshop_package.000000004ac8ac43",
+        "mod_workshop_package.000000004ac8ac43|no damage",
+        "no damage"
+      ]
+    }
+  ],
+  "priority_case": {
+    "profile_active_mods": ["low", "mid", "high"],
+    "all_package_names": ["extra", "high", "low", "mid"],
+    "built_worklist": [
+      {"package_name": "high", "enabled": true, "order": 0, "priority_index": 0},
+      {"package_name": "mid", "enabled": true, "order": 1, "priority_index": 1},
+      {"package_name": "low", "enabled": true, "order": 2, "priority_index": 2},
+      {"package_name": "extra", "enabled": false, "order": -1, "priority_index": null}
+    ],
+    "ui_active_mods": ["high", "mid", "low"],
+    "roundtrip_profile_active_mods": ["low", "mid", "high"],
+    "disable_index_1": [
+      {"package_name": "high", "enabled": true, "order": 0, "priority_index": 0},
+      {"package_name": "low", "enabled": true, "order": 1, "priority_index": 1},
+      {"package_name": "mid", "enabled": false, "order": -1, "priority_index": null},
+      {"package_name": "extra", "enabled": false, "order": -1, "priority_index": null}
+    ],
+    "move_index_0_to_bottom": [
+      {"package_name": "mid", "enabled": true, "order": 0, "priority_index": 0},
+      {"package_name": "low", "enabled": true, "order": 1, "priority_index": 1},
+      {"package_name": "high", "enabled": true, "order": 2, "priority_index": 2},
+      {"package_name": "extra", "enabled": false, "order": -1, "priority_index": null}
+    ]
+  },
+  "dto_case": {
+    "operation": "mod_scan",
+    "phase": "discover",
+    "current": 2,
+    "total": 4,
+    "item": "example.scs",
+    "status": "running",
+    "message": ""
+  }
+}

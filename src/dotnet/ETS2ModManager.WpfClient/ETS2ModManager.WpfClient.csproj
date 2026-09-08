@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <ProjectReference Include="../ETS2ModManager.Contracts/ETS2ModManager.Contracts.csproj" />
+    <ProjectReference Include="../ETS2ModManager.Application/ETS2ModManager.Application.csproj" />
+    <ProjectReference Include="../ETS2ModManager.Infrastructure/ETS2ModManager.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

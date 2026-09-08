@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-核心 Mod 管理重构 M6 已完成：M5 的 Mod 管理与 Profile active_mods 边界继续保持；扫描、分类和 Crash 诊断新增稳定的 Application DTO/facade。纯工作列表变换仍下沉到 `domain.mod_priority_rules`；Profile active_mods 仍统一经过 `application.profile_use_cases.ProfileUseCases`。
+核心 Mod 管理重构 M9 已完成：M5 的 Mod 管理、M6 的扫描/分类/Crash DTO 边界、M7 的 Profile 生命周期 facade、M8 的跨实现 golden fixtures 和 M9 的 Rust/C# 迁移骨架均已落地。Python/PySide6 仍是当前可运行实现；C#/.NET 10 + Rust Core 进入并行迁移阶段。
 
 M1 已完成：Mod 身份 alias、Profile/UI 顺序转换和工作列表重建统一走 Domain 规则。
 
@@ -31,6 +31,10 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - `application.mod_scan_use_cases.ModScanUseCases` 将旧 `ModScanner.scan()` 的 `(mods, new_ids)` 归一化为 `ModScanResult`，支持预取消检查；快速扫描 Worker 通过 `result_dto_ready` 向 UI 发 DTO，同时保留旧 `result_ready(list, list)` 兼容信号。
 - `application.category_use_cases.CategoryUseCases` 包装 `category_service`，提供分类快照、文件夹变更结果和批量归类操作；主窗口分类树、归类、文件夹管理和快速扫描分类回填已优先走 facade，旧 Service API 保留。
 - `application.crash_diagnosis_use_cases.CrashDiagnosisUseCases` 包装 Crash 发现、预检和日志分析；`services.crash_service` 重新导出 `application.contracts` 中的 Crash DTO/枚举，旧导入路径继续有效；CrashCheckDialog 通过 facade 调用。
+- `application.profile_lifecycle_use_cases.ProfileLifecycleUseCases` 包装 Profile 备份、复制、删除、重命名和设置复制；主窗口 Profile 菜单和 SaveEditorDialog 的 Profile 级操作通过 facade，文件格式细节仍由 Service Adapter 负责。
+- `tests/golden/migration_contracts_v1.json` 固化 Mod alias、active_mods 顺序、工作列表变换和 DTO transport shape；Python 测试、未来 C# ContractTests 和 Rust 测试共用该 fixture。
+- `src/core/rust` 已有 `archive_core`、`bsii_core`、`mod_scanner` 和 `ets2_core_ffi` workspace；C ABI 只暴露 byte/string buffer、DTO JSON、错误码和显式 `ets2_core_free_buffer`。
+- `src/dotnet` 已有 Contracts/Domain/Application/Infrastructure/WpfClient/ModScanWorker/ContractTests 分层骨架，WPF 使用 CommunityToolkit.Mvvm，SQLite schema 使用 WAL；当前机器只有 .NET 8 Runtime 且没有 SDK，因此尚未进行实际 .NET 编译。
 
 ## 本阶段约束
 
@@ -61,6 +65,6 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 
 ## 后续方向
 
-1. M7：把 Profile 名称、复制/删除等非 Mod 管理写操作拆到独立 use case，避免继续扩大 `ProfileService` 兼容层。
-2. M8：对 Domain/Application 输出建立跨实现 golden fixtures，为多语言迁移提供新旧结果对比。
-3. M9：建立 Rust Core 的 HashFS/SCS/BSII C ABI 原型，再接入 C#/.NET 迁移骨架。
+1. 用安装好的 .NET 10 SDK 编译 `src/dotnet/ETS2ModManager.sln`，接入真实 Profile Repository 和 Rust DLL。
+2. 在 Rust 中替换 `archive_core`/`bsii_core` 的原型函数，先以 golden fixtures 对比 Python 结果，再切换默认实现。
+3. 逐页迁移 WPF UI；Python/PySide6 在每个功能通过 golden/e2e 回归前继续保留。

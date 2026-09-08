@@ -1,0 +1,12 @@
+[package]
+name = "ets2_core_ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+archive_core = { path = "../archive_core" }
+bsii_core = { path = "../bsii_core" }
+mod_scanner = { path = "../mod_scanner" }
