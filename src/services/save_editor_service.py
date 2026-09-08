@@ -65,6 +65,11 @@ _SCS_AES_KEY = bytes([
 _MAGIC_SCSC = b"ScsC"
 
 
+def _combine_unlock_results(dealers_ok: bool, garages_ok: bool) -> tuple[bool, str]:
+    """Return a truthful result for the combined dealer/garage operation."""
+    return bool(dealers_ok and garages_ok), ""
+
+
 def decrypt_scsc(data: bytes) -> bytes:
     """解密 ScsC 格式：AES-256-CBC 解密 → zlib 解压。返回明文 BSII 二进制。"""
     if not data.startswith(_MAGIC_SCSC):

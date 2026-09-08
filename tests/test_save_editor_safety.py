@@ -12,13 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from services.save_editor_service import (  # noqa: E402
     SaveEditorService,
     SaveSlotInfo,
+    _combine_unlock_results,
     _atomic_write_bytes,
     decrypt_scsc,
     encrypt_scsc,
 )
 from services.profile_service import ProfileInfo, _escape_profile_str_for_sii  # noqa: E402
 from domain.bsii import parse_bsii  # noqa: E402
-from ui.save_editor_dialog import _combine_unlock_results  # noqa: E402
 
 
 def _field(name: str, type_byte: int, payload: bytes) -> bytes:
