@@ -3,13 +3,14 @@ from __future__ import annotations
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from core.models import Mod
+from domain.mod_identity import profile_entry_package
+from domain.priority_rules import profile_to_ui_order, ui_to_profile_order
 
 
-# 模组优先级：ETS2 的 active_mods[] 顺序 = 游戏内 Mod Manager 列表顺序（从上到下）。
-#   active_mods[0] = 列表第一个 = 最高优先级（覆盖下面的同名文件）；
-#   active_mods[N-1] = 列表最后一个 = 最低优先级（被上面覆盖）。
-# 我们把语义和 SCS 一致：
-#   ORDER = active_mods 中的下标，0 = 最高优先级，越大优先级越低。
+# ETS2 profile.sii 的 active_mods[] 是实际加载顺序：
+#   active_mods[0] = 最低优先级（先加载）；
+#   active_mods[N-1] = 最高优先级（后加载并覆盖前面的同名文件）。
+# UI 工作列表使用用户更直观的相反方向：顶部 / order 0 = 最高优先级。
 
 PRESET_CATEGORY_MAP = {
     # 预设名：tuple(该预设需要命中的关键词 / 分类)
@@ -71,6 +72,8 @@ class PriorityService:
     def __init__(self, known_mods: Iterable[Mod]):
         self.known_mods: List[Mod] = list(known_mods)
         self.by_name: Dict[str, Mod] = {}
+        self.by_canonical: Dict[str, Mod] = {}
+        self.by_display_title: Dict[str, Mod] = {}
         # 性能优化：worklist 反向索引缓存，避免 indices_for_category 每次线性扫描
         # 结构：{ id(worklist_tuple): { frozenset(pkg_set): List[int] } }
         # worklist 是 list[dict]，不可哈希，用元组化签名做 key
@@ -93,6 +96,23 @@ class PriorityService:
             stripped = _re_pn.sub(r"_(workshop|copy\d*|local)$", "", m.mod_id)
             if stripped and stripped != m.mod_id and stripped.isdigit():
                 self.by_name.setdefault(stripped, m)
+            mf = getattr(m, "manifest", None)
+            for title in (
+                getattr(mf, "display_name", "") if mf else "",
+                getattr(m, "display_title", ""),
+            ):
+                title_key = str(title or "").strip().casefold()
+                if title_key and not title_key.isdigit():
+                    self.by_display_title.setdefault(title_key, m)
+            for alias in (
+                getattr(m, "mod_id", ""),
+                getattr(mf, "package_name", "") if mf else "",
+                getattr(mf, "display_name", "") if mf else "",
+                getattr(m, "display_title", ""),
+            ):
+                canonical = self._canonical_key(alias)
+                if canonical:
+                    self.by_canonical.setdefault(canonical, m)
 
     @staticmethod
     def _canonical_key(value: object) -> str:
@@ -120,37 +140,35 @@ class PriorityService:
             return None
         import re
         pn = str(package_name).strip()
-        left = pn.split("|", 1)[0].strip()
+        left = profile_entry_package(pn)
         suffix_left = re.sub(r"_(workshop|copy\d*|local)$", "", left, flags=re.IGNORECASE)
         suffix_full = re.sub(r"_(workshop|copy\d*|local)$", "", pn, flags=re.IGNORECASE)
-        for key in (pn, left, suffix_left, suffix_full):
+        legacy_ws_id = ""
+        m_legacy = re.fullmatch(
+            r"mod_workshop_package\.0*([0-9a-f]{1,8})",
+            left,
+            flags=re.IGNORECASE,
+        )
+        if m_legacy:
+            try:
+                legacy_ws_id = str(int(m_legacy.group(1), 16))
+            except ValueError:
+                legacy_ws_id = ""
+        for key in (pn, left, suffix_left, suffix_full, legacy_ws_id):
             if key and key in self.by_name:
                 return self.by_name[key]
-        if left.isdigit() or suffix_left.isdigit() or pn.isdigit():
-            target = left if left.isdigit() else (suffix_left if suffix_left.isdigit() else pn)
-            for mod in self.known_mods:
-                mid = re.sub(
-                    r"_(workshop|copy\d*|local)$", "",
-                    str(getattr(mod, "mod_id", "") or ""),
-                    flags=re.IGNORECASE,
-                )
-                mf_pkg = str(
-                    getattr(getattr(mod, "manifest", None), "package_name", "") or ""
-                ).split("|", 1)[0].strip()
-                if mid == target or mf_pkg == target:
-                    return mod
         target = self._canonical_key(pn)
-        if target:
-            for mod in self.known_mods:
-                mf = getattr(mod, "manifest", None)
-                keys = (
-                    getattr(mod, "mod_id", ""),
-                    getattr(mf, "package_name", "") if mf else "",
-                    getattr(mf, "display_name", "") if mf else "",
-                    getattr(mod, "display_title", ""),
-                )
-                if any(self._canonical_key(key) == target for key in keys if key):
-                    return mod
+        resolved = self.by_canonical.get(target) if target else None
+        if resolved is not None:
+            return resolved
+        # Older profiles may store opaque Workshop keys such as
+        # ``mod_workshop_package.<hash>|Real Traffic Density ETS2``.
+        # The title after ``|`` is stable and is also present in the Workshop
+        # metadata cache, so use it as a final lookup key.
+        if "|" in pn:
+            title = pn.split("|", 1)[1].strip().casefold()
+            if title:
+                return self.by_display_title.get(title)
         return None
 
     # ---- 分类反向索引（性能优化） ----
@@ -184,7 +202,7 @@ class PriorityService:
 
     @classmethod
     def rebuild_from_active(cls, current_svc, current_worklist, new_active_entries):
-        # Rebuild worklist rows after an in-memory active-mods reorder.
+        # Rebuild worklist rows from profile.sii order (low -> high priority).
         # Mirrors build_worklist() row shape: enabled, priority_index, package_name,
         # mod + display_title metadata carried over from current_worklist where present.
         # Disabled rows get priority_index = None.
@@ -198,6 +216,8 @@ class PriorityService:
                 key = str(e).strip()
             if key:
                 active_keys.append(key)
+        # The worklist and all UI operations are high -> low priority.
+        active_keys = profile_to_ui_order(active_keys)
         active_rank = {k: i for i, k in enumerate(active_keys)}
         new_wl = []
         for row in current_worklist:
@@ -251,10 +271,11 @@ class PriorityService:
         产出 [{
             "package_name": str,
             "enabled": bool,          # 是否在 active_mods 中
-            "order": int,             # 优先级序号（0=最高优先级 / 列表第一个），不在列表中 = -1
+            "order": int,             # UI 优先级序号（0=最高优先级 / 列表顶部），不在列表中 = -1
             "mod": Optional[Mod],
         }, ...]。
-        排列规则：先 active_mods 原顺序，然后是"未启用的已知模组"（按 package_name 排）。
+        输入 active_mods 使用 profile.sii 的低到高顺序；输出先放已启用模组，
+        并转换为 UI 的高到低顺序，然后追加未启用模组。
         """
         result: List[dict] = []
         represented_mods: set[int] = set()
@@ -290,8 +311,9 @@ class PriorityService:
                 enabled_count += 1
             return True
 
-        # First retain the profile's exact active_mods order and spelling.
-        for pn in active_mods:
+        # Retain the profile's exact spelling while reversing only the order
+        # at the persistence/UI boundary.
+        for pn in profile_to_ui_order(active_mods):
             add_entry(pn, True, self._resolve_mod(pn))
 
         # Then add each inactive scanned Mod once.  ``all_package_names`` is
@@ -302,7 +324,7 @@ class PriorityService:
             add_entry(canonical or pn, False, mod)
         return result
 
-    # ---- 导出新的 active_mods 列表：按工作列表中"所有 enabled 条目"的当前顺序 ----
+    # ---- 导出 UI 优先级列表：所有 enabled 条目，最高优先级在前 ----
     @staticmethod
     def worklist_to_active(worklist: List[dict]) -> List[str]:
         active = []
@@ -321,6 +343,11 @@ class PriorityService:
                     package_name = f"{package_name}|{title}"
             active.append(package_name)
         return active
+
+    @staticmethod
+    def worklist_to_profile_active(worklist: List[dict]) -> List[str]:
+        """Convert the UI high-to-low worklist to profile.sii low-to-high order."""
+        return ui_to_profile_order(PriorityService.worklist_to_active(worklist))
 
     # ---- 批量：启用 / 禁用 / 反转 ----
     @staticmethod
@@ -506,12 +533,12 @@ class PriorityService:
     # ---- 预设优先级（地图底 / 素材中 / 功能上） ----
     def apply_preset(self, worklist: List[dict]) -> List[dict]:
         """
-        将所有已启用条目分成三层：
-            底层（最后加载 = 优先级最高？不！ET2 数组是"先出现先加载"，后面覆盖前面。
-            为了让"地图资产包"不被修改，反而应该先加载它。所以：
-                · map_bottom    → 排在 active_mods 前面（先加载）
-                · assets_middle → 中间
-                · function_top  → 排在最后（最高优先级，覆盖前面的 asset/map 皮肤）
+        将所有已启用条目按 UI 的高到低顺序分成三层：
+            · function_top  → UI 顶部（最高优先级）
+            · assets_middle → 中间
+            · map_bottom    → UI 底部（最低优先级）
+
+        保存时 worklist_to_profile_active() 会反转为游戏的实际加载顺序。
         """
         enabled = [dict(x) for x in worklist if x["enabled"]]
         disabled = [dict(x) for x in worklist if not x["enabled"]]
@@ -535,7 +562,7 @@ class PriorityService:
                 top.append(x)
             else:
                 middle.append(x)
-        new_enabled = bottom + middle + top
+        new_enabled = top + middle + bottom
         for i, x in enumerate(new_enabled):
             x["order"] = i
             x["priority_index"] = i

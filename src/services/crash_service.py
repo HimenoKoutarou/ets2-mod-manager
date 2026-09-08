@@ -30,6 +30,7 @@ from typing import Optional, List, Dict, Tuple, Any
 from core.models import Mod, ModManifest
 from core.scs_archive import ScsArchiveReader
 from core.sii_parser import parse_sii
+from domain.mod_identity import aliases_match, mod_aliases, profile_entry_aliases
 
 
 # ============================================================
@@ -247,22 +248,27 @@ def precheck_active_mods(
     try:
         if profile is None:
             raise ValueError("profile is None")
-        active_mods: List[str] = list(getattr(profile, "active_mods", []) or [])
+        # Profile order is low -> high; diagnostics expose priority 0 as the
+        # highest priority, matching the main UI.
+        active_mods: List[str] = list(reversed(
+            list(getattr(profile, "active_mods", []) or [])
+        ))
         profile_id = str(getattr(profile, "profile_id", "") or "")
         mods_by_id: Dict[str, Mod] = {}
         if all_mods:
             for m in all_mods:
                 try:
-                    mid = m.mod_id
+                    aliases = mod_aliases(m)
                 except Exception:
                     import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
                     continue
-                if mid and mid not in mods_by_id:
-                    mods_by_id[mid] = m
-        # active_mods 按顺序赋予 priority_index（0 = 最高）
+                for alias in aliases:
+                    mods_by_id.setdefault(alias, m)
+        # UI 顺序赋予 priority_index（0 = 最高）
         active_objs: List[Mod] = []
         for idx, mid in enumerate(active_mods):
-            m = mods_by_id.get(mid)
+            aliases = profile_entry_aliases(mid)
+            m = next((mods_by_id.get(alias) for alias in aliases if alias in mods_by_id), None)
             if m is None:
                 continue
             try:
@@ -344,15 +350,14 @@ def _cancel_requested(cancel_flag) -> bool:
 
 def _run_L0(active_objs: List[Mod], active_mods: List[str], issues: List[PrecheckIssue]) -> None:
     # L0-1：active_mods[i] 在 all_mods 找不到 / 文件不存在
-    found_ids = set()
+    found_aliases = set()
     for m in active_objs:
         try:
-            found_ids.add(m.mod_id)
+            found_aliases.update(mod_aliases(m))
         except Exception:
             import traceback as _tb; _tb.print_exc(limit=1, file=sys.stderr)
-            pass
     for idx, mid in enumerate(active_mods):
-        if mid in found_ids:
+        if profile_entry_aliases(mid) & found_aliases:
             continue
         issues.append(PrecheckIssue(
             mod_id=mid, mod_display_name=mid, priority_index=idx,

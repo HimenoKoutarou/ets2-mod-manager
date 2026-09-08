@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 # 相对路径 import（项目根被加到 sys.path 后可用）
 from core.sii_parser import parse_sii, parse_sii_file, SiiUnit
 from services.backup_service import BackupService
+from domain.profile_rules import require_writable_profile
 
 try:
     from Crypto.Cipher import AES
@@ -438,14 +439,7 @@ class ProfileService:
         at the service boundary so UI actions and background jobs cannot
         accidentally mutate the copy used by Steam synchronization.
         """
-        # ``test`` is used only by the repository's synthetic round-trip
-        # fixtures; real profiles are writable exclusively when location is
-        # exactly ``local``.
-        if prof is None or getattr(prof, "location", "") not in ("local", "test"):
-            location = getattr(prof, "location", "unknown") if prof is not None else "unknown"
-            raise PermissionError(
-                f"只允许修改本地存档，当前存档来源为 {location}。请切换到“本地”存档后再操作。"
-            )
+        require_writable_profile(prof)
 
     def _auto_sii_decrypt(self) -> Optional[Path]:
         bin_dir = Path(__file__).resolve().parents[2] / "assets" / "bin"
@@ -496,7 +490,22 @@ class ProfileService:
                 if key in seen_paths:
                     continue
                 seen_paths.add(key)
-                info = ProfileInfo(profile_id=d.name, location=loc, folder=d, profile_sii=psii)
+                quick_name = ""
+                if quick:
+                    try:
+                        if len(d.name) % 2 == 0 and re.fullmatch(r"[0-9A-Fa-f]+", d.name):
+                            decoded = bytes.fromhex(d.name).decode("utf-8")
+                            if decoded and all(ch.isprintable() for ch in decoded):
+                                quick_name = decoded
+                    except (ValueError, UnicodeDecodeError):
+                        pass
+                info = ProfileInfo(
+                    profile_id=d.name,
+                    location=loc,
+                    folder=d,
+                    profile_sii=psii,
+                    display_name=quick_name,
+                )
                 if not quick:
                     self._enrich(info)
                 out.append(info)
@@ -585,6 +594,7 @@ class ProfileService:
 
     # ---------- 读取 active_mods ----------
     def get_active_mods(self, prof: ProfileInfo) -> List[str]:
+        """Return raw profile.sii order: low priority first, high priority last."""
         path = Path(prof.profile_sii)
         try:
             st = path.stat()
