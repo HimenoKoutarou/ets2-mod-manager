@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -11,7 +10,7 @@ def to_transport_value(value: Any):
     """Convert DTO values to JSON-compatible primitives deterministically."""
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, Path):
+    if hasattr(value, "__fspath__"):
         return str(value)
     if is_dataclass(value) and not isinstance(value, type):
         return {
