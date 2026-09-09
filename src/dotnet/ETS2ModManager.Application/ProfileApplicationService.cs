@@ -22,6 +22,18 @@ public sealed class ProfileApplicationService(
         return repository.Copy(profile, displayName, companyName);
     }
 
+    public ProfileRef Rename(ProfileRef profile, string displayName, string companyName)
+    {
+        RequireWritable(profile, "rename Profile");
+        return repository.Rename(profile, displayName, companyName);
+    }
+
+    public void CopySettings(ProfileRef source, ProfileRef destination, bool activeMods, bool controls)
+    {
+        RequireWritable(destination, "copy Profile settings");
+        repository.CopySettings(source, destination, activeMods, controls);
+    }
+
     public void Delete(ProfileRef profile, bool backupFirst = true)
     {
         RequireWritable(profile, "delete Profile");

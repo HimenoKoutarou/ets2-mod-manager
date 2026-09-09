@@ -97,6 +97,90 @@ public static class PriorityRules
         return Renumber(rows);
     }
 
+    public static IReadOnlyList<WorklistEntry> MoveUp(
+        IEnumerable<WorklistEntry> entries,
+        IEnumerable<int> indices,
+        int steps = 1)
+    {
+        var rows = entries.ToList();
+        var selected = indices.ToHashSet();
+        var enabledPositions = rows
+            .Select((row, index) => (row, index))
+            .Where(item => item.row.Enabled)
+            .Select((item, enabledIndex) => (item.row, item.index, enabledIndex))
+            .ToList();
+        var moving = enabledPositions.Where(item => selected.Contains(item.index)).Select(item => item.enabledIndex).ToHashSet();
+        for (var step = 0; step < Math.Max(0, steps); step++)
+        {
+            for (var i = 1; i < enabledPositions.Count; i++)
+            {
+                if (moving.Contains(i) && !moving.Contains(i - 1))
+                {
+                    (enabledPositions[i - 1], enabledPositions[i]) = (enabledPositions[i], enabledPositions[i - 1]);
+                    moving.Remove(i);
+                    moving.Add(i - 1);
+                }
+            }
+        }
+        WriteEnabledRows(rows, enabledPositions.Select(item => item.row).ToList());
+        return Renumber(rows);
+    }
+
+    public static IReadOnlyList<WorklistEntry> MoveDown(
+        IEnumerable<WorklistEntry> entries,
+        IEnumerable<int> indices,
+        int steps = 1)
+    {
+        var rows = entries.ToList();
+        var selected = indices.ToHashSet();
+        var enabledPositions = rows
+            .Select((row, index) => (row, index))
+            .Where(item => item.row.Enabled)
+            .Select((item, enabledIndex) => (item.row, item.index, enabledIndex))
+            .ToList();
+        var moving = enabledPositions.Where(item => selected.Contains(item.index)).Select(item => item.enabledIndex).ToHashSet();
+        for (var step = 0; step < Math.Max(0, steps); step++)
+        {
+            for (var i = enabledPositions.Count - 2; i >= 0; i--)
+            {
+                if (moving.Contains(i) && !moving.Contains(i + 1))
+                {
+                    (enabledPositions[i], enabledPositions[i + 1]) = (enabledPositions[i + 1], enabledPositions[i]);
+                    moving.Remove(i);
+                    moving.Add(i + 1);
+                }
+            }
+        }
+        WriteEnabledRows(rows, enabledPositions.Select(item => item.row).ToList());
+        return Renumber(rows);
+    }
+
+    public static IReadOnlyList<WorklistEntry> MoveTop(
+        IEnumerable<WorklistEntry> entries,
+        IEnumerable<int> indices)
+    {
+        var rows = entries.ToList();
+        var selected = indices.ToHashSet();
+        var enabled = rows
+            .Select((row, index) => (row, index))
+            .Where(item => item.row.Enabled)
+            .ToList();
+        var moving = enabled.Where(item => selected.Contains(item.index)).Select(item => item.row).ToList();
+        var movingKeys = moving.ToHashSet();
+        var remaining = enabled.Select(item => item.row).Where(row => !movingKeys.Contains(row)).ToList();
+        WriteEnabledRows(rows, moving.Concat(remaining).ToList());
+        return Renumber(rows);
+    }
+
+    private static void WriteEnabledRows(List<WorklistEntry> rows, IReadOnlyList<WorklistEntry> enabledRows)
+    {
+        var cursor = 0;
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (rows[i].Enabled) rows[i] = enabledRows[cursor++];
+        }
+    }
+
     private static IReadOnlyList<WorklistEntry> Renumber(IEnumerable<WorklistEntry> rows)
     {
         var output = new List<WorklistEntry>();

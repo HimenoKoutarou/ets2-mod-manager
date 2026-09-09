@@ -32,6 +32,9 @@ internal static partial class Ets2CoreNative
     internal static extern NativeResult ets2_core_count_packages(byte[] bytes, nuint length);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern NativeResult ets2_core_scan_roots(byte[] bytes, nuint length);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ets2_core_free_buffer(NativeBuffer buffer);
 }
 
@@ -46,6 +49,12 @@ public sealed class Ets2CoreClient
     {
         var bytes = Encoding.UTF8.GetBytes(string.Join('\n', paths));
         return Invoke(bytes, Ets2CoreNative.ets2_core_count_packages);
+    }
+
+    public string ScanRoots(string? localDirectory, string? workshopDirectory)
+    {
+        var bytes = Encoding.UTF8.GetBytes($"{localDirectory ?? ""}\n{workshopDirectory ?? ""}");
+        return Invoke(bytes, Ets2CoreNative.ets2_core_scan_roots);
     }
 
     public void EnsureCompatible()

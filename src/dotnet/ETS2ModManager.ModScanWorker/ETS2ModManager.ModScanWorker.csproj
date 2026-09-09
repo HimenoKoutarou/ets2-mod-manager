@@ -3,6 +3,7 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="../ETS2ModManager.Infrastructure/ETS2ModManager.Infrastructure.csproj" />
   </ItemGroup>
 </Project>
