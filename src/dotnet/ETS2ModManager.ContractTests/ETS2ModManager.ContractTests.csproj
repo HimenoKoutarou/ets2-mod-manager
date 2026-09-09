@@ -3,8 +3,12 @@
     <OutputType>Exe</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="../ETS2ModManager.Contracts/ETS2ModManager.Contracts.csproj" />
     <ProjectReference Include="../ETS2ModManager.Domain/ETS2ModManager.Domain.csproj" />
+    <ProjectReference Include="../ETS2ModManager.Application/ETS2ModManager.Application.csproj" />
+    <ProjectReference Include="../ETS2ModManager.Infrastructure/ETS2ModManager.Infrastructure.csproj" />
+    <Content Include="../../../src/core/rust/target/x86_64-pc-windows-gnu/release/ets2_core_ffi.dll" Link="ets2_core_ffi.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../../../src/core/rust/target/x86_64-pc-windows-gnu/release/ets2_core_ffi.dll')" />
     <None Include="../../../tests/golden/migration_contracts_v1.json"
           Link="migration_contracts_v1.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

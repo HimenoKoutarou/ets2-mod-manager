@@ -1,6 +1,24 @@
 using System.Text.Json;
+using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using ETS2ModManager.Application;
 using ETS2ModManager.Contracts;
 using ETS2ModManager.Domain;
+using ETS2ModManager.Infrastructure.Archives;
+using ETS2ModManager.Infrastructure.Backup;
+using ETS2ModManager.Infrastructure.Categories;
+using ETS2ModManager.Infrastructure.Cities;
+using ETS2ModManager.Infrastructure.Indexing;
+using ETS2ModManager.Infrastructure.Localization;
+using ETS2ModManager.Infrastructure.Profiles;
+using ETS2ModManager.Infrastructure.Scanning;
+using ETS2ModManager.Infrastructure.Saves;
+using ETS2ModManager.Infrastructure.Rust;
+using ETS2ModManager.Infrastructure.Session;
+using ETS2ModManager.Infrastructure.Updates;
 
 using var document = JsonDocument.Parse(File.ReadAllText(
     Path.Combine(AppContext.BaseDirectory, "migration_contracts_v1.json")));
@@ -51,11 +69,22 @@ EqualString(dto.GetProperty("item").GetString(), eventDto.Item);
 EqualString(dto.GetProperty("message").GetString(), eventDto.Message);
 EqualString(dto.GetProperty("status").GetString(), eventDto.Status.ToString().ToLowerInvariant());
 
+    await RunInfrastructureSmokeAsync();
+    await RunAdapterContractsAsync();
+
+    RunNativeContract();
+
 Console.WriteLine("Migration contract v1 passed.");
 return 0;
 
 static string[] Strings(JsonElement element) => element.EnumerateArray()
     .Select(value => value.GetString() ?? string.Empty).ToArray();
+
+static string ReadZipText(ZipArchiveEntry entry)
+{
+    using var reader = new StreamReader(entry.Open(), Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+    return reader.ReadToEnd();
+}
 
 static void EqualString(string? expected, string? actual)
 {
@@ -99,3 +128,348 @@ static void EqualWorklist(JsonElement expected, IEnumerable<WorklistEntry> actua
 
 static int? NullableInt(JsonElement value) =>
     value.ValueKind == JsonValueKind.Null ? null : value.GetInt32();
+
+static async Task RunInfrastructureSmokeAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "ets2mm-contract-" + Guid.NewGuid().ToString("N"));
+    var profiles = Path.Combine(root, "profiles");
+    var profileFolder = Path.Combine(profiles, "test_profile");
+    var mods = Path.Combine(root, "mod");
+    var backups = Path.Combine(root, "backups");
+    Directory.CreateDirectory(profileFolder);
+    Directory.CreateDirectory(mods);
+    var profileSii = Path.Combine(profileFolder, "profile.sii");
+    var profileText = "SiiNunit\n{\nprofile : _nameless.test {\n profile_name: \"Driver\"\n company_name: \"Company\"\n active_mods: 1\n active_mods[0]: \"base_mod\"\n}\n}\n";
+    File.WriteAllBytes(profileSii, CreateScsC(profileText));
+    File.WriteAllText(Path.Combine(mods, "map_pack.scs"), "sample");
+    try
+    {
+        var backup = new FileBackupStore(backups);
+        var repository = new FileProfileRepository(profiles, null, null, backup);
+        var profile = repository.ListProfiles().Single();
+        EqualSequence(["base_mod"], repository.ReadActiveMods(profile));
+        repository.ReplaceActiveMods(profile, ["base_mod", "traffic_mod"], true);
+        EqualSequence(["base_mod", "traffic_mod"], repository.ReadActiveMods(profile));
+        if (!Directory.EnumerateFiles(backups, "*.zip").Any()) throw new InvalidOperationException("Profile backup was not created.");
+
+        var scanner = new FileSystemModScanner(mods, null);
+        var scan = await scanner.ScanAsync(null, CancellationToken.None);
+        if (scan.Mods.Count != 1 || scan.Mods[0].ModId != "map_pack") throw new InvalidOperationException("Filesystem scanner contract failed.");
+        var index = new SqliteModIndex(Path.Combine(root, "cache", "mods.db"));
+        index.Upsert(scan);
+        if (index.Query().Count != 1) throw new InvalidOperationException("SQLite index contract failed.");
+        index.Replace(new ModScanResult([], [], 0, 0, ScanStatus.Completed, null));
+        if (index.Query().Count != 0) throw new InvalidOperationException("SQLite full-scan replacement contract failed.");
+        index.Replace(scan);
+
+        await RunSaveContractAsync(root, backup);
+    }
+    finally
+    {
+        try { Directory.Delete(root, true); } catch { }
+    }
+}
+
+static async Task RunAdapterContractsAsync()
+{
+    var root = Path.Combine(Path.GetTempPath(), "ets2mm-adapters-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    try
+    {
+        var categoryRoot = Path.Combine(root, "category-store");
+        var categories = new JsonCategoryService(categoryRoot);
+        if (!categories.CreateFolder("Maps").Success) throw new InvalidOperationException("Category create contract failed.");
+        if (!categories.SetCategory("mod-a", "Maps").Success) throw new InvalidOperationException("Category assignment contract failed.");
+        var snapshot = categories.Snapshot();
+        if (!snapshot.Folders.SequenceEqual(["Maps"]) || snapshot.Stats["Maps"] != 1) throw new InvalidOperationException("Category persistence contract failed.");
+        if (!categories.RenameFolder("Maps", "Cities").Success || categories.GetCategory("mod-a") != "Cities") throw new InvalidOperationException("Category rename contract failed.");
+        if (!categories.DeleteFolder("Cities").Success || categories.GetCategory("mod-a") != "") throw new InvalidOperationException("Category delete contract failed.");
+
+        var package = Path.Combine(root, "city-package");
+        Directory.CreateDirectory(Path.Combine(package, "def", "nested"));
+        File.WriteAllText(Path.Combine(package, "def", "nested", "city_berlin.sii"),
+            "SiiNunit\n{\ncity_data : city.berlin {\n city_name: \"Berlin\"\n short_city_name: \"BER\"\n country: \"germany\"\n}\n}\n");
+        var cityMod = new ModRecord("mod-a", "city_mod", package, "directory", "City Mod", 0, 0);
+        var cityResults = await new CityLookupService().RebuildAndSearchAsync([cityMod], "ber", CancellationToken.None);
+        if (cityResults.Count != 1 || cityResults[0].CityName != "Berlin" || cityResults[0].Sources.Count != 1) throw new InvalidOperationException("Nested city lookup contract failed.");
+
+        var archivePath = Path.Combine(root, "package.zip");
+        using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
+        using (var writer = new StreamWriter(archive.CreateEntry("def/manifest.sii").Open(), Encoding.UTF8)) writer.Write("package_name: \"zip_mod\"\n");
+        var extraction = await new ExternalArchiveService(Path.Combine(root, "tools")).ExtractManifestAsync(archivePath, CancellationToken.None);
+        if (!extraction.Success || extraction.Text is null || !extraction.Text.Contains("zip_mod", StringComparison.Ordinal)) throw new InvalidOperationException("ZIP extraction contract failed.");
+        var treeDestination = Path.Combine(root, "tree-output");
+        var tree = await new ExternalArchiveService(Path.Combine(root, "tools")).ExtractTreeAsync(
+            archivePath, treeDestination, ["def", "locale/zh_cn"], CancellationToken.None);
+        if (!tree.Success || !File.Exists(Path.Combine(treeDestination, "def", "manifest.sii")))
+            throw new InvalidOperationException("ZIP tree extraction contract failed.");
+        var toolRoot = Path.Combine(root, "tools");
+        Directory.CreateDirectory(toolRoot);
+        File.WriteAllBytes(Path.Combine(toolRoot, "sxc64.exe"), [0]);
+        if (!new ExternalArchiveService(toolRoot).Availability.Any) throw new InvalidOperationException("SXC availability contract failed.");
+
+        var opaqueRoot = Path.Combine(root, "opaque-root");
+        Directory.CreateDirectory(opaqueRoot);
+        var opaquePath = Path.Combine(opaqueRoot, "opaque.scs");
+        File.WriteAllBytes(opaquePath, "SCS#opaque"u8.ToArray());
+        var opaqueScan = await new FileSystemModScanner(opaqueRoot, null, new StubArchiveService(
+            "SiiNunit\n{\nmod_package : opaque_mod {\n display_name: \"Opaque Mod\"\n}\n}\n")).ScanAsync(null, CancellationToken.None);
+        if (opaqueScan.Mods.Count != 1 || opaqueScan.Mods[0].PackageName != "opaque_mod" || opaqueScan.Mods[0].DisplayName != "Opaque Mod") throw new InvalidOperationException("External manifest scanner contract failed.");
+
+        var opaqueLocalizationPath = Path.Combine(opaqueRoot, "opaque-l10n.scs");
+        File.WriteAllBytes(opaqueLocalizationPath, "SCS#l10n"u8.ToArray());
+        var externalTreeArchive = new StubArchiveService(
+            "manifest",
+            (destination, _) =>
+            {
+                var localeDirectory = Path.Combine(destination, "locale", "zh_cn");
+                Directory.CreateDirectory(localeDirectory);
+                File.WriteAllText(Path.Combine(localeDirectory, "generated.sii"),
+                    "SiiNunit { localization_db : .external { key[]: \"external.city\" val[]: \"外部城市\" } }");
+            });
+        var externalL10n = new FileLocalizationService(Path.Combine(root, "external-l10n.json"), externalTreeArchive);
+        var externalL10nScan = await externalL10n.ScanAsync([opaqueLocalizationPath], null, CancellationToken.None);
+        if (externalL10nScan.Entries.Count != 1 || externalL10nScan.Entries[0].Value != "外部城市")
+            throw new InvalidOperationException("External localization tree scan contract failed.");
+
+        var translations = Path.Combine(root, "i18n");
+        Directory.CreateDirectory(translations);
+        File.WriteAllText(Path.Combine(translations, "en_US.json"), "{\"hello\":\"Hello\"}");
+        var translation = new JsonTranslationService(translations);
+        if (!translation.Languages.Contains("en_US", StringComparer.OrdinalIgnoreCase) || translation.Translate("en_US", "hello") != "Hello") throw new InvalidOperationException("Translation contract failed.");
+
+        var l10nPackage = Path.Combine(root, "l10n-package");
+        var l10nLocale = Path.Combine(l10nPackage, "locale", "zh_cn");
+        Directory.CreateDirectory(l10nLocale);
+        File.WriteAllText(Path.Combine(l10nLocale, "localization.sii"),
+            "SiiNunit\n{\nlocalization_db : .localization\n{\n key[]: \"city.berlin\"\n val[]: \"柏林\"\n key[]: \"city.empty\"\n val[]: \"\"\n}\n}\n");
+        var dictPath = Path.Combine(root, "l10n_dict.json");
+        var l10n = new FileLocalizationService(dictPath);
+        var l10nScan = await l10n.ScanAsync([l10nPackage], null, CancellationToken.None);
+        if (l10nScan.Entries.Count != 2 || l10nScan.Entries[0].Status != "native" || l10nScan.Entries[1].Status != "missing_value")
+            throw new InvalidOperationException("Localization array scan contract failed.");
+        File.WriteAllText(Path.Combine(root, "custom.csv"), "city.empty,空城市\n");
+        var imported = l10n.ImportDictionary(Path.Combine(root, "custom.csv"), true);
+        if (imported.Imported != 1 || l10n.ReadDictionary()["city.empty"] != "空城市") throw new InvalidOperationException("Localization dictionary import contract failed.");
+        l10nScan = await l10n.ScanAsync([l10nPackage], null, CancellationToken.None);
+        if (l10nScan.Entries[1].Status != "local" || l10nScan.Entries[1].Value != "空城市") throw new InvalidOperationException("Localization dictionary resolution contract failed.");
+        l10n.SetTranslation("city.manual", "手动翻译");
+        var exportPath = Path.Combine(root, "generated.scs");
+        var exported = await l10n.ExportAsync(l10nScan.Entries.Append(new LocalizationEntry("city.manual", "手动翻译", "", "test", "city", "local")), exportPath, "zh_cn", "Contract L10n", CancellationToken.None);
+        if (!exported.Success || exported.EntriesWritten != 3 || !File.Exists(exportPath)) throw new InvalidOperationException("Localization export contract failed.");
+        using (var exportedZip = ZipFile.OpenRead(exportPath))
+        {
+            var generated = exportedZip.GetEntry("locale/zh_cn/generated.sii");
+            if (generated is null || !ReadZipText(generated).Contains("city.manual", StringComparison.Ordinal)) throw new InvalidOperationException("Localization generated SII contract failed.");
+        }
+        var defPackage = Path.Combine(root, "l10n-def-package.zip");
+        using (var defZip = ZipFile.Open(defPackage, ZipArchiveMode.Create))
+        {
+            using var defWriter = new StreamWriter(defZip.CreateEntry("def/city.sii").Open(), Encoding.UTF8);
+            defWriter.Write("SiiNunit { city_data : city.missing { city_name: \"Missing City\" } }");
+        }
+        var defScan = await l10n.ScanAsync([defPackage], null, CancellationToken.None);
+        var missingDefinition = defScan.Entries.SingleOrDefault(entry => entry.UnitName == "city.missing");
+        if (missingDefinition is null || missingDefinition.DefLocaleKeyPresent || missingDefinition.LocaleKey != "Missing City")
+            throw new InvalidOperationException("Localization definition metadata contract failed.");
+        var defExportPath = Path.Combine(root, "generated-def.scs");
+        var defExport = await l10n.ExportAsync([missingDefinition with { Value = "缺失城市", Status = "local" }], defExportPath, "zh_cn", "Definition L10n", CancellationToken.None);
+        if (!defExport.Success) throw new InvalidOperationException("Localization definition export contract failed.");
+        using (var defExportZip = ZipFile.OpenRead(defExportPath))
+        {
+            var overrideEntry = defExportZip.GetEntry("def/city/generated.sii");
+            if (overrideEntry is null || !ReadZipText(overrideEntry).Contains("city_name_localized: \"@@Missing City@@\"", StringComparison.Ordinal))
+                throw new InvalidOperationException("Localization definition override contract failed.");
+        }
+
+        var highPackage = Path.Combine(root, "high-priority.zip");
+        using (var highZip = ZipFile.Open(highPackage, ZipArchiveMode.Create))
+        using (var highWriter = new StreamWriter(highZip.CreateEntry("locale/zh_cn/shared.sii").Open(), Encoding.UTF8))
+            highWriter.Write("SiiNunit { localization_db : .high { key[]: \"priority.shared\" val[]: \"HIGH\" } }");
+        var lowPackage = Path.Combine(root, "low-priority.zip");
+        using (var lowZip = ZipFile.Open(lowPackage, ZipArchiveMode.Create))
+        using (var lowWriter = new StreamWriter(lowZip.CreateEntry("locale/zh_cn/shared.sii").Open(), Encoding.UTF8))
+            lowWriter.Write("SiiNunit { localization_db : .low { key[]: \"priority.shared\" val[]: \"LOW\" } }");
+        var priorityScan = await l10n.ScanAsync([highPackage, lowPackage], null, CancellationToken.None);
+        if (priorityScan.Entries.Count != 1 || priorityScan.Entries[0].Value != "HIGH")
+            throw new InvalidOperationException("Localization priority merge contract failed.");
+
+        var blockedHigh = Path.Combine(root, "blocked-high.zip");
+        using (var blockedZip = ZipFile.Open(blockedHigh, ZipArchiveMode.Create))
+        using (var blockedWriter = new StreamWriter(blockedZip.CreateEntry("locale/zh_cn/shared.sii").Open(), Encoding.UTF8))
+            blockedWriter.Write("SiiNunit { localization_db : .blocked { key[]: \"priority.blocked\" val[]: \"\" } }");
+        var blockedLow = Path.Combine(root, "blocked-low.zip");
+        using (var blockedZip = ZipFile.Open(blockedLow, ZipArchiveMode.Create))
+        using (var blockedWriter = new StreamWriter(blockedZip.CreateEntry("locale/zh_cn/shared.sii").Open(), Encoding.UTF8))
+            blockedWriter.Write("SiiNunit { localization_db : .blocked { key[]: \"priority.blocked\" val[]: \"LOW\" } }");
+        var blockedScan = await l10n.ScanAsync([blockedHigh, blockedLow], null, CancellationToken.None);
+        var blocked = blockedScan.Entries.SingleOrDefault(entry => entry.Key == "priority.blocked");
+        if (blocked is null || blocked.Value.Length != 0 || blocked.Status != "missing_value")
+            throw new InvalidOperationException("Localization empty-value precedence contract failed.");
+
+        var mergedPackage = Path.Combine(root, "definition-and-locale.zip");
+        using (var mergedZip = ZipFile.Open(mergedPackage, ZipArchiveMode.Create))
+        {
+            using (var localeWriter = new StreamWriter(mergedZip.CreateEntry("locale/zh_cn/merged.sii").Open(), Encoding.UTF8))
+                localeWriter.Write("SiiNunit { localization_db : .merged { key[]: \"city.meta\" val[]: \"元数据城市\" } }");
+            using (var defWriter = new StreamWriter(mergedZip.CreateEntry("def/city.sii").Open(), Encoding.UTF8))
+                defWriter.Write("SiiNunit { city_data : city.meta { city_name: \"Meta City\" city_name_localized: \"@@city.meta@@\" } }");
+        }
+        var mergedScan = await l10n.ScanAsync([mergedPackage], null, CancellationToken.None);
+        var mergedEntry = mergedScan.Entries.SingleOrDefault(entry => entry.Key == "city.meta");
+        if (mergedEntry is null || mergedEntry.Value != "元数据城市" || mergedEntry.UnitName != "city.meta"
+            || !mergedEntry.DefLocaleKeyPresent)
+            throw new InvalidOperationException("Localization definition/locale merge contract failed.");
+
+        var session = new JsonSessionStore(Path.Combine(root, "session.json"));
+        session.Save(new SessionContract("profile-a", 3));
+        if (session.Load<SessionContract>() is not { ProfileId: "profile-a", SelectedIndex: 3 }) throw new InvalidOperationException("Session persistence contract failed.");
+
+        var backupSource = Path.Combine(root, "backup-source.sii");
+        var backupRoot = Path.Combine(root, "backups");
+        var rollingBackup = new FileBackupStore(backupRoot, 10);
+        for (var i = 0; i < 12; i++)
+        {
+            File.WriteAllText(backupSource, $"{i}");
+            rollingBackup.Backup(backupSource, "contract");
+        }
+        if (Directory.GetFiles(backupRoot, "backup-source_*.zip").Length > 10) throw new InvalidOperationException("Backup retention contract failed.");
+
+        var handler = new StubHttpHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"tag_name\":\"v2.0.0\",\"assets\":[{\"name\":\"release.zip\",\"size\":12,\"browser_download_url\":\"https://example.test/release.zip\"}]}", Encoding.UTF8, "application/json")
+        });
+        var update = await new GitHubUpdateService(new HttpClient(handler)).CheckAsync("1.0.0", "https://github.com/owner/repo.git", CancellationToken.None);
+        if (!update.IsAvailable || update.LatestVersion != "2.0.0" || update.DownloadUrl is null) throw new InvalidOperationException("Update check contract failed.");
+        var invalid = await new GitHubUpdateService(new HttpClient(handler)).CheckAsync("1.0.0", "bad-repository", CancellationToken.None);
+        if (invalid.IsAvailable || !invalid.Message.Contains("owner/name", StringComparison.Ordinal)) throw new InvalidOperationException("Update repository validation contract failed.");
+        var updater = new GitHubUpdateService(new HttpClient(handler));
+        var noUrl = await updater.DownloadAndInstallAsync(
+            new UpdateInfo(true, "1.0.0", "2.0.0", null, "missing URL"), root, "ETS2ModManager.WpfClient.exe", CancellationToken.None);
+        if (noUrl.Success || !noUrl.Message.Contains("No downloadable update", StringComparison.Ordinal))
+            throw new InvalidOperationException("Update missing URL contract failed.");
+        var missingInstall = await updater.DownloadAndInstallAsync(
+            update, Path.Combine(root, "missing-install"), "ETS2ModManager.WpfClient.exe", CancellationToken.None);
+        if (missingInstall.Success || !missingInstall.Message.Contains("Install directory does not exist", StringComparison.Ordinal))
+            throw new InvalidOperationException("Update missing install directory contract failed.");
+        var malformed = await updater.DownloadAndInstallAsync(
+            update with { DownloadUrl = "https://example.test/malformed.zip" }, root, "ETS2ModManager.WpfClient.exe", CancellationToken.None);
+        if (malformed.Success || malformed.StagedDirectory is not null || !malformed.Message.Contains("Update installation failed", StringComparison.Ordinal))
+            throw new InvalidOperationException("Update malformed package contract failed.");
+    }
+    finally
+    {
+        try { Directory.Delete(root, true); } catch { }
+    }
+}
+
+static void RunNativeContract()
+{
+    try
+    {
+        var client = new Ets2CoreClient();
+        client.EnsureCompatible();
+        var response = client.InspectBytes("BSII\x03\0\0\0"u8.ToArray());
+        if (!response.Contains("\"kind\":\"bsii\"", StringComparison.Ordinal)) throw new InvalidOperationException("Rust FFI response contract failed.");
+    }
+    catch (DllNotFoundException)
+    {
+        Console.WriteLine("Rust FFI contract skipped: native DLL is not available in this test output.");
+    }
+}
+
+static async Task RunSaveContractAsync(string root, IBackupStore backup)
+{
+    var profileFolder = Path.Combine(root, "profiles", "save-contract");
+    var slotFolder = Path.Combine(profileFolder, "save", "1");
+    Directory.CreateDirectory(slotFolder);
+    var profile = new ProfileRef("save-contract", "local", profileFolder, Path.Combine(profileFolder, "profile.sii"), "Save Contract", "", 0);
+    var gamePath = Path.Combine(slotFolder, "game.sii");
+    var plain = BuildCanonicalBsii(279375, 1253729);
+    File.WriteAllBytes(gamePath, ScsCCodec.Encrypt(plain));
+    var slot = new SaveSlotRef(profile.ProfileId, "1", slotFolder, gamePath, "Contract Save", File.GetLastWriteTimeUtc(gamePath), profile.Location);
+    var service = new SaveEditorService(backup);
+    var snapshot = service.ReadSnapshot(slot);
+    if (!snapshot.Fields.Any(x => x.FieldName == "money_account" && x.Value == "1253729")) throw new InvalidOperationException("BSII money read contract failed.");
+    if (!snapshot.Fields.Any(x => x.FieldName == "experience_points" && x.Value == "279375")) throw new InvalidOperationException("BSII experience read contract failed.");
+    if (!service.SetMoney(slot, 2000000).Success || !service.SetExperience(slot, 6000).Success) throw new InvalidOperationException("BSII mutation contract failed.");
+    var after = service.ReadSnapshot(slot);
+    if (!after.Fields.Any(x => x.FieldName == "money_account" && x.Value == "2000000")) throw new InvalidOperationException("BSII money write verification failed.");
+    if (!after.Fields.Any(x => x.FieldName == "experience_points" && x.Value == "6000")) throw new InvalidOperationException("BSII experience write verification failed.");
+    var levelResult = service.SetLevel(slot, 5);
+    if (!levelResult.Success) throw new InvalidOperationException($"BSII level mutation contract failed: {levelResult.Message}");
+    var level = service.ReadSnapshot(slot);
+    if (!level.Fields.Any(x => x.FieldName == "experience_points" && x.Value == "10000")) throw new InvalidOperationException("BSII level value verification failed.");
+    var garageResult = service.UnlockAllGarages(slot);
+    if (!garageResult.Success) throw new InvalidOperationException($"BSII garage unlock contract failed: {garageResult.Message}");
+    var garageAgain = service.UnlockAllGarages(slot);
+    if (garageAgain.Success || !garageAgain.Message.Contains("already enabled", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("BSII garage idempotence contract failed.");
+    var dealerResult = service.UnlockAllDealers(slot);
+    if (dealerResult.Success || !dealerResult.Message.Contains("No compatible boolean field", StringComparison.Ordinal)) throw new InvalidOperationException("BSII dealer capability boundary contract failed.");
+    await Task.CompletedTask;
+}
+
+static byte[] BuildCanonicalBsii(uint experience, long money)
+{
+    static byte[] String(string value)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+        return BitConverter.GetBytes(bytes.Length).Concat(bytes).ToArray();
+    }
+    static byte[] Encoded(string value)
+    {
+        const string table = "0123456789abcdefghijklmnopqrstuvwxyz_";
+        ulong number = 0;
+        for (var index = 0; index < value.Length; index++) number += (ulong)(table.IndexOf(value[index]) + 1) * (ulong)Math.Pow(38, index);
+        return BitConverter.GetBytes(number);
+    }
+    static byte[] Id(string value) => new byte[] { 1 }.Concat(Encoded(value)).ToArray();
+    static byte[] Definition(uint id, string name, params (string Field, uint Type)[] fields)
+    {
+        var output = new List<byte>(BitConverter.GetBytes(0u).Concat(new byte[] { 1 }).Concat(BitConverter.GetBytes(id)).Concat(String(name)));
+        foreach (var field in fields) output.AddRange(BitConverter.GetBytes(field.Type).Concat(String(field.Field)));
+        output.AddRange(BitConverter.GetBytes(0u));
+        return output.ToArray();
+    }
+    var data = new List<byte>("BSII"u8.ToArray().Concat(BitConverter.GetBytes(3u)));
+    data.AddRange(Definition(1, "economy", ("bank", 0x39), ("experience_points", 0x27), ("garages", 0x35)));
+    data.AddRange(Definition(2, "bank", ("money_account", 0x31)));
+    data.AddRange(BitConverter.GetBytes(1u)); data.AddRange(Id("economy")); data.AddRange(Id("bank")); data.AddRange(BitConverter.GetBytes(experience)); data.Add(0);
+    data.AddRange(BitConverter.GetBytes(2u)); data.AddRange(Id("bank")); data.AddRange(BitConverter.GetBytes(money));
+    return data.ToArray();
+}
+
+static byte[] CreateScsC(string text)
+{
+    var key = new byte[] { 0x2A, 0x5F, 0xCB, 0x17, 0x91, 0xD2, 0x2F, 0xB6, 0x02, 0x45, 0xB3, 0xD8, 0x36, 0x9E, 0xD0, 0xB2, 0xC2, 0x73, 0x71, 0x56, 0x3F, 0xBF, 0x1F, 0x3C, 0x9E, 0xDF, 0x6B, 0x11, 0x82, 0x5A, 0x5D, 0x0A };
+    var plain = System.Text.Encoding.UTF8.GetBytes(text);
+    using var compressed = new MemoryStream();
+    using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true)) zlib.Write(plain);
+    var iv = Enumerable.Range(1, 16).Select(i => (byte)i).ToArray();
+    using var aes = Aes.Create(); aes.Key = key; aes.IV = iv; aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+    var encrypted = aes.CreateEncryptor().TransformFinalBlock(compressed.ToArray(), 0, (int)compressed.Length);
+    using var output = new MemoryStream(); output.Write("ScsC"u8); output.Write(new byte[32]); output.Write(iv); output.Write(BitConverter.GetBytes(plain.Length)); output.Write(encrypted); return output.ToArray();
+}
+
+file sealed record SessionContract(string ProfileId, int SelectedIndex);
+
+file sealed class StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(responder(request));
+}
+
+file sealed class StubArchiveService(
+    string manifest,
+    Action<string, IReadOnlyList<string>>? treeWriter = null) : IExternalArchiveService
+{
+    public ExtractorAvailability Availability => new(false, false, false);
+    public Task<ExtractionResult> ExtractManifestAsync(string packagePath, CancellationToken cancellationToken) => Task.FromResult(new ExtractionResult(true, manifest, Encoding.UTF8.GetBytes(manifest), "stub"));
+    public Task<ExtractionResult> ExtractFileAsync(string packagePath, string entryName, CancellationToken cancellationToken) => ExtractManifestAsync(packagePath, cancellationToken);
+    public Task<ExtractionResult> ExtractTreeAsync(string packagePath, string destinationDirectory, IReadOnlyList<string> roots, CancellationToken cancellationToken)
+    {
+        if (treeWriter is null) return Task.FromResult(new ExtractionResult(false, null, null, "stub"));
+        Directory.CreateDirectory(destinationDirectory);
+        treeWriter(destinationDirectory, roots);
+        return Task.FromResult(new ExtractionResult(true, null, null, "stub tree"));
+    }
+}
