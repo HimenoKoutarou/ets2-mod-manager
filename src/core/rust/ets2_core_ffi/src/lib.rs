@@ -6,8 +6,8 @@
 use std::slice;
 
 use archive_core::detect_kind;
-use bsii_core::inspect_header;
-use mod_scanner::count_supported;
+use bsii_core::parse_summary;
+use mod_scanner::{count_supported, scan_roots};
 
 pub const ABI_VERSION: u32 = 1;
 pub const ERR_OK: i32 = 0;
@@ -54,7 +54,7 @@ fn ok(data: Vec<u8>) -> Ets2Result {
     }
 }
 
-fn err(code: i32, message: &'static [u8]) -> Ets2Result {
+fn err(code: i32, message: &[u8]) -> Ets2Result {
     Ets2Result {
         code,
         data: empty_buffer(),
@@ -93,14 +93,68 @@ pub unsafe extern "C" fn ets2_core_inspect_bytes(ptr: *const u8, len: usize) -> 
         Err(result) => return result,
     };
     if bytes.starts_with(b"BSII") {
-        let version = match inspect_header(bytes) {
-            Ok(header) => header.version.to_string(),
+        let summary = match parse_summary(bytes) {
+            Ok(summary) => summary,
             Err(message) => return err(ERR_INVALID_ARGUMENT, message.as_bytes()),
         };
-        return ok(format!("{{\"kind\":\"bsii\",\"version\":{version}}}").into_bytes());
+        return ok(format!(
+            "{{\"kind\":\"bsii\",\"version\":{},\"definitions\":{},\"objects\":{}}}",
+            summary.version, summary.definitions, summary.objects
+        )
+        .into_bytes());
     }
     let kind = detect_kind(bytes).as_str();
     ok(format!("{{\"kind\":\"{kind}\"}}").into_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ets2_core_scan_roots(ptr: *const u8, len: usize) -> Ets2Result {
+    let bytes = match input(ptr, len) {
+        Ok(bytes) => bytes,
+        Err(result) => return result,
+    };
+    let text = match std::str::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => return err(ERR_INVALID_UTF8, b"input_not_utf8"),
+    };
+    let mut lines = text.lines();
+    let local = lines
+        .next()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::Path::new);
+    let workshop = lines
+        .next()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::Path::new);
+    let packages = scan_roots(local, workshop);
+    let mut json = String::from("{\"packages\":[");
+    for (index, package) in packages.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        let package_name = if package.manifest.package_name.is_empty() {
+            &package.mod_id
+        } else {
+            &package.manifest.package_name
+        };
+        let display = if package.manifest.display_name.is_empty() {
+            &package.mod_id
+        } else {
+            &package.manifest.display_name
+        };
+        json.push_str(&format!("{{\"mod_id\":\"{}\",\"package_name\":\"{}\",\"path\":\"{}\",\"type\":\"{}\",\"display_name\":\"{}\",\"size\":{},\"modified_ms\":{}}}",
+            escape_json(&package.mod_id), escape_json(package_name), escape_json(&package.path.to_string_lossy()), escape_json(&package.package_type), escape_json(display), package.size, package.modified_unix_ms));
+    }
+    json.push_str("]}");
+    ok(json.into_bytes())
+}
+
+fn escape_json(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 #[no_mangle]
@@ -132,7 +186,10 @@ mod tests {
         let result = unsafe { ets2_core_inspect_bytes(b"BSII\x03\0\0\0".as_ptr(), 8) };
         assert_eq!(result.code, ERR_OK);
         let data = unsafe { std::slice::from_raw_parts(result.data.ptr, result.data.len) };
-        assert_eq!(data, br#"{"kind":"bsii","version":3}"#);
+        assert_eq!(
+            data,
+            br#"{"kind":"bsii","version":3,"definitions":0,"objects":0}"#
+        );
         unsafe { ets2_core_free_buffer(result.data) };
     }
 }

@@ -1,4 +1,8 @@
-//! Small, dependency-free archive header classifier.
+//! Archive detection and lightweight manifest extraction.
+
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveKind {
@@ -31,6 +35,129 @@ pub fn detect_kind(bytes: &[u8]) -> ArchiveKind {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Manifest {
+    pub package_name: String,
+    pub display_name: String,
+    pub author: String,
+    pub version: String,
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Self {
+            package_name: String::new(),
+            display_name: String::new(),
+            author: String::new(),
+            version: String::new(),
+        }
+    }
+}
+
+pub fn parse_manifest(text: &str) -> Manifest {
+    let mut manifest = Manifest::default();
+    for line in text.lines() {
+        let Some((key, raw)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = raw.trim().trim_end_matches(',').trim();
+        if key == "mod_package" {
+            if manifest.package_name.is_empty() {
+                if let Some(name) = value.split_whitespace().next() {
+                    manifest.package_name = name.trim_end_matches('{').to_string();
+                }
+            }
+            continue;
+        }
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
+        let target = match key {
+            "package_name" => &mut manifest.package_name,
+            "display_name" | "name" => &mut manifest.display_name,
+            "author" => &mut manifest.author,
+            "version" | "package_version" => &mut manifest.version,
+            _ => continue,
+        };
+        if target.is_empty() {
+            *target = value.replace("\\\"", "\"");
+        }
+    }
+    manifest
+}
+
+pub fn read_manifest(path: impl AsRef<Path>) -> Result<Manifest, String> {
+    let path = path.as_ref();
+    if path.is_dir() {
+        let candidate = path.join("manifest.sii");
+        if candidate.exists() {
+            return read_manifest(&candidate);
+        }
+        let mut stack = vec![path.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p
+                    .file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("manifest.sii"))
+                {
+                    return read_manifest(p);
+                }
+            }
+        }
+        return Ok(Manifest::default());
+    }
+    let mut file = File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.starts_with(b"PK") {
+        if let Some(text) = read_stored_zip_manifest(&bytes) {
+            return Ok(parse_manifest(&text));
+        }
+    }
+    Ok(Manifest::default())
+}
+
+// SCS files that are ZIP containers commonly store manifest.sii uncompressed.
+// Reading local headers directly keeps this core dependency-free and portable;
+// deflated entries remain delegated to the full archive backend.
+fn read_stored_zip_manifest(bytes: &[u8]) -> Option<String> {
+    let mut pos = 0usize;
+    while pos.checked_add(30)? <= bytes.len() {
+        if &bytes[pos..pos + 4] != b"PK\x03\x04" {
+            break;
+        }
+        let method = u16::from_le_bytes(bytes[pos + 8..pos + 10].try_into().ok()?);
+        let compressed = u32::from_le_bytes(bytes[pos + 18..pos + 22].try_into().ok()?) as usize;
+        let name_len = u16::from_le_bytes(bytes[pos + 26..pos + 28].try_into().ok()?) as usize;
+        let extra_len = u16::from_le_bytes(bytes[pos + 28..pos + 30].try_into().ok()?) as usize;
+        let header_end = pos
+            .checked_add(30)?
+            .checked_add(name_len)?
+            .checked_add(extra_len)?;
+        let data_end = header_end.checked_add(compressed)?;
+        if data_end > bytes.len() {
+            return None;
+        }
+        let name = std::str::from_utf8(&bytes[pos + 30..pos + 30 + name_len]).ok()?;
+        if method == 0
+            && name
+                .rsplit('/')
+                .next()
+                .is_some_and(|n| n.eq_ignore_ascii_case("manifest.sii"))
+        {
+            return String::from_utf8(bytes[header_end..data_end].to_vec()).ok();
+        }
+        pos = data_end;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -41,5 +168,14 @@ mod tests {
         assert_eq!(detect_kind(b"SCS#\0\0"), ArchiveKind::HashFs);
         assert_eq!(detect_kind(b"AEM!\0\0"), ArchiveKind::Aem);
         assert_eq!(detect_kind(b"nope"), ArchiveKind::Unknown);
+    }
+
+    #[test]
+    fn parses_manifest_fields_without_a_full_sii_parser() {
+        let manifest = parse_manifest("mod_package : demo {\ndisplay_name: \"Demo Map\"\nauthor: \"Team\"\npackage_version: \"1.2\"");
+        assert_eq!(manifest.package_name, "demo");
+        assert_eq!(manifest.display_name, "Demo Map");
+        assert_eq!(manifest.author, "Team");
+        assert_eq!(manifest.version, "1.2");
     }
 }
