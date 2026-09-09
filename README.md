@@ -30,12 +30,16 @@
 
 ## 🧱 技术栈
 
+当前发布路线是 `.NET 10 + WPF/MVVM + Rust + SQLite`。Python/PySide6
+保留为迁移期兼容实现，详见 `docs/MIGRATION_STATUS_2026-09-09.md`。
+
 | 层 | 技术 |
 |---|---|
-| 语言 | Python 3.11+ |
-| GUI | PySide6 (Qt 6, LGPL) |
-| 后台线程 | QThread + Signal/Slot（不使用 threading.Thread daemon） |
-| 打包 | PyInstaller |
+| 桌面客户端 | C#/.NET 10 + WPF + CommunityToolkit.Mvvm |
+| 高吞吐核心 | Rust C ABI（扫描、manifest、BSII） |
+| 索引缓存 | SQLite WAL（Microsoft.Data.Sqlite） |
+| 兼容实现 | Python 3.11 + PySide6 |
+| 发布 | self-contained `dotnet publish`（`build-dotnet.bat`） |
 | 图片 | Qt 原生解码 + Pillow 兜底 |
 
 ## 🏗️ 架构概览
@@ -134,23 +138,16 @@ src/
       → S/A/B 三色徽章展示
 ```
 
-## 🚀 快速开始（开发模式）
+## 🚀 快速开始
 
 ```bash
-# 1. 克隆/下载项目
-git clone https://github.com/HimenoKoutarou/ets2-mod-manager.git
-cd ets2-mod-manager
-
-# 2. 创建虚拟环境
-python -m venv venv
-venv\Scripts\activate
-
-# 3. 安装依赖
-pip install -r requirements.txt
-
-# 4. 运行
-python run.py
+# 构建并启动迁移后的 .NET/WPF 客户端
+build-dotnet.bat
+start.bat
 ```
+
+Python/PySide6 保留为迁移后的兼容工具和回归测试，不再作为生产启动入口；
+生产入口 `start.bat` 只启动 `dist-dotnet/ETS2ModManager.WpfClient.exe`。
 
 ## 📦 打包发布
 
@@ -163,11 +160,14 @@ build.bat
 
 构建脚本生成以下产物：
 
-- `dist/ETS2ModManager.exe`：Windows onefile 可执行文件
-- `dist/assets/`：外部解包工具、SII 解密工具、图标和语言资源
-- `dist/ETS2ModManager-win-x64.zip`：可直接分发的 Windows 压缩包
+- `dist-dotnet/ETS2ModManager.WpfClient.exe`：self-contained .NET/WPF 客户端
+- `dist-dotnet/assets/`：外部解包工具、SII 解密工具和语言资源
+- `dist-dotnet/ets2_core_ffi.dll`：Rust native core
 
-运行缓存不会随发布包打包，首次运行时会在 `assets/cache/` 自动创建。
+`dist/` 和 `ETS2ModManager-win-x64.zip` 是迁移前 PyInstaller 流程的历史产物，
+不属于当前生产启动路径。
+
+运行缓存不会随发布包打包，首次运行时会在用户数据目录或 `assets/cache/` 自动创建。
 
 ## 📁 目录结构
 
@@ -186,7 +186,7 @@ ETS2ModManager/
 │   └── app_icon.png        # 应用图标
 ├── tests/                  # 测试
 ├── docs/                   # 文档（spec / plan）
-├── run.py                  # 启动入口
+├── run.py                  # 迁移期 Python 兼容入口（非生产）
 ├── build.py                # 打包脚本
 ├── requirements.txt        # 依赖
 └── README.md

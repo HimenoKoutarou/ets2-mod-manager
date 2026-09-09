@@ -73,3 +73,27 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 1. 用安装好的 .NET 10 SDK 编译 `src/dotnet/ETS2ModManager.sln`，接入真实 Profile Repository 和 Rust DLL。
 2. 在 Rust 中替换 `archive_core`/`bsii_core` 的原型函数，先以 golden fixtures 对比 Python 结果，再切换默认实现。
 3. 逐页迁移 WPF UI；Python/PySide6 在每个功能通过 golden/e2e 回归前继续保留。
+
+## 2026-09-10 continuation state
+
+- The production migration is now in stage 5/5: final parity, publish, and
+  acceptance.
+- `IExternalArchiveService.ExtractTreeAsync` is implemented by
+  `ExternalArchiveService` and covered by contract tests. Directories and
+  readable ZIP files are copied without invoking external tools; SCS#/HashFS
+  uses Extractor, and AEM/encrypted ZIP uses SXC. Cancellation kills the
+  process tree and temporary directories are removed.
+- `FileLocalizationService` accepts the shared archive adapter, scans
+  proprietary packages through extracted `def` and target-locale trees, and
+  merges locale/definition records by key. The first package is treated as
+  highest UI priority; a high-priority blank locale value remains blank.
+- WPF `MainWindow` creates one archive adapter and shares it with the
+  localization service, Mod scanner, and Tools page.
+- Final verification on September 10, 2026: .NET Release build is 0 warnings
+  and 0 errors; C# migration ContractTests pass; Python regression suite is
+  64/64; Rust fmt/check/tests pass; `build-dotnet.bat` creates a self-contained
+  `win-x64` publish; the published WPF process starts with title `ETS2 Mod
+  Manager` and remains responsive.
+- Do not reset or clean the dirty worktree. Generated archives, caches, and
+  old Python compatibility changes remain outside the focused migration
+  commits.

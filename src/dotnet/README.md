@@ -1,7 +1,7 @@
-# .NET 10 Migration Shell
+# .NET 10 Migration Application
 
-This directory is the side-by-side replacement shell. It targets `.NET 10`
-and keeps the Python/Qt application operational during migration.
+This directory contains the production desktop client. It targets `.NET 10`
+and uses Python/Qt only for legacy compatibility and regression coverage.
 
 - `Contracts`: language-neutral DTO definitions.
 - `Domain`: Mod identity and priority rules, verified by the shared JSON golden contract.
@@ -11,6 +11,13 @@ and keeps the Python/Qt application operational during migration.
 - `ModScanWorker`: out-of-process Rust scanner host.
 - `ContractTests`: dependency-free executable test runner for shared golden fixtures.
 
-The WPF shell is not a feature-complete replacement yet. Python remains the
-shipping compatibility implementation until each golden-tested workflow is
-connected to the .NET Application services.
+The WPF client owns the Mod workflow: profile discovery, active_mods ordering,
+Rust-first scanning with managed archive/extractor fallback, SQLite cache
+persistence, backup-before-write, plaintext/ScsC profile reads, save editing,
+crash diagnostics, localization, Workshop metadata, categories, city lookup,
+directory migration, and update installation. Python remains available only as
+a compatibility tool and test fixture for the legacy feature surface.
+
+Build a self-contained Windows release from the repository root with
+`build-dotnet.bat`; `start.bat` launches the published .NET client from
+`dist-dotnet`.
