@@ -92,6 +92,7 @@ public sealed partial class LocalizationRowViewModel : ObservableObject
 
 public partial class MainWindowViewModel : ObservableObject
 {
+    public UiTextViewModel Ui { get; }
     private readonly IModScanner _scanner;
     private readonly SqliteModIndex _index;
     private readonly IProfileRepository _profiles;
@@ -126,11 +127,16 @@ public partial class MainWindowViewModel : ObservableObject
     public ObservableCollection<WorkshopMetadata> WorkshopMetadata { get; } = [];
     public ObservableCollection<string> PresetNames { get; } = [];
 
+    public string SelectedModName => SelectedMod?.DisplayName ?? Ui.NoModSelected;
+    public string SelectedModPackage => SelectedMod?.PackageName ?? Ui.SelectModHint;
+    public string SelectedModType => SelectedMod?.PackageType ?? string.Empty;
+    public string SelectedModPath => SelectedMod?.PackagePath ?? string.Empty;
+
     [ObservableProperty]
     private ProfileRef? selectedProfile;
 
     [ObservableProperty]
-    private string status = "C# migration core ready";
+    private string status = "";
 
     [ObservableProperty]
     private bool isScanning;
@@ -145,7 +151,7 @@ public partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private string updateStatus = "";
     [ObservableProperty] private string localizationStatus = "";
     [ObservableProperty] private string localizationLocale = "zh_cn";
-    [ObservableProperty] private string localizationBaseline = "No baseline package selected";
+    [ObservableProperty] private string localizationBaseline = "";
     [ObservableProperty] private string crashStatus = "";
     [ObservableProperty] private string cityKeyword = "";
     [ObservableProperty] private string cityStatus = "";
@@ -171,6 +177,16 @@ public partial class MainWindowViewModel : ObservableObject
         ExternalArchiveApplicationService archiveService, ModPresetApplicationService presetService,
         string documentsDirectory, string modDirectory)
     {
+        Ui = new UiTextViewModel();
+        Ui.PropertyChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(SelectedModName));
+            OnPropertyChanged(nameof(SelectedModPackage));
+            OnPropertyChanged(nameof(SelectedModType));
+            OnPropertyChanged(nameof(SelectedModPath));
+            if (string.IsNullOrWhiteSpace(Status)) Status = Ui.Translate("wpf.status_ready", "Ready");
+            if (string.IsNullOrWhiteSpace(LocalizationBaseline)) LocalizationBaseline = Ui.Translate("wpf.no_baseline", "No baseline package selected");
+        };
         _scanner = scanner;
         _index = index;
         _profiles = profiles;
@@ -188,6 +204,8 @@ public partial class MainWindowViewModel : ObservableObject
         _presetService = presetService;
         _documentsDirectory = documentsDirectory;
         _modDirectory = modDirectory;
+        Status = Ui.Translate("wpf.status_ready", "Ready");
+        LocalizationBaseline = Ui.Translate("wpf.no_baseline", "No baseline package selected");
         LocalizationLocale = _localizationService.TargetLocale;
         Profiles = new ObservableCollection<ProfileRef>(profiles.ListProfiles());
         RefreshCategories();
@@ -207,6 +225,10 @@ public partial class MainWindowViewModel : ObservableObject
 
     partial void OnSelectedModChanged(ModRowViewModel? value)
     {
+        OnPropertyChanged(nameof(SelectedModName));
+        OnPropertyChanged(nameof(SelectedModPackage));
+        OnPropertyChanged(nameof(SelectedModType));
+        OnPropertyChanged(nameof(SelectedModPath));
         MoveModUpCommand.NotifyCanExecuteChanged();
         MoveModDownCommand.NotifyCanExecuteChanged();
         MoveModTopCommand.NotifyCanExecuteChanged();

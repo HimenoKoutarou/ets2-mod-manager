@@ -52,6 +52,30 @@ public partial class MainWindow : Window
         var scanner = new HybridModScanner(paths.ModDirectory, paths.WorkshopDirectory, archiveAdapter);
         DataContext = new MainWindowViewModel(scanner, index, profiles, application, save, crash, localization, links, updates, launcher,
             categories, cities, workshop, archives, presets, paths.DocumentsDirectory, paths.ModDirectory);
+        ((MainWindowViewModel)DataContext).Ui.PropertyChanged += (_, _) => UpdateLocalizedHeaders();
+        UpdateLocalizedHeaders();
+    }
+
+    private void UpdateLocalizedHeaders()
+    {
+        if (DataContext is not MainWindowViewModel viewModel) return;
+        var ui = viewModel.Ui;
+        if (ModGrid.Columns.Count >= 5)
+        {
+            ModGrid.Columns[0].Header = ui.Enabled;
+            ModGrid.Columns[1].Header = ui.Name;
+            ModGrid.Columns[2].Header = ui.Source;
+            ModGrid.Columns[3].Header = ui.Package;
+            ModGrid.Columns[4].Header = ui.Category;
+        }
+        if (LocalizationGrid.Columns.Count >= 5)
+        {
+            LocalizationGrid.Columns[0].Header = ui.Key;
+            LocalizationGrid.Columns[1].Header = ui.Translation;
+            LocalizationGrid.Columns[2].Header = ui.Status;
+            LocalizationGrid.Columns[3].Header = ui.Category;
+            LocalizationGrid.Columns[4].Header = ui.Package;
+        }
     }
 
     private void ModGrid_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
