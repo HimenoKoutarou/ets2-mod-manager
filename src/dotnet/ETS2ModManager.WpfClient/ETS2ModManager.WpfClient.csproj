@@ -6,8 +6,14 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
     <ProjectReference Include="../ETS2ModManager.Contracts/ETS2ModManager.Contracts.csproj" />
     <ProjectReference Include="../ETS2ModManager.Application/ETS2ModManager.Application.csproj" />
     <ProjectReference Include="../ETS2ModManager.Infrastructure/ETS2ModManager.Infrastructure.csproj" />
+    <Content Include="../../../assets/bin/SII_Decrypt.exe" Link="assets/bin/SII_Decrypt.exe" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../../assets/tools/*.exe" Link="assets/tools/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../../assets/i18n/**/*" Link="assets/i18n/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="../../../src/core/rust/target/x86_64-pc-windows-gnu/release/ets2_core_ffi.dll" Link="ets2_core_ffi.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('../../../src/core/rust/target/x86_64-pc-windows-gnu/release/ets2_core_ffi.dll')" />
+    <Content Include="../../../src/core/rust/target/release/ets2_core_ffi.dll" Link="ets2_core_ffi.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('../../../src/core/rust/target/release/ets2_core_ffi.dll')" />
   </ItemGroup>
 </Project>

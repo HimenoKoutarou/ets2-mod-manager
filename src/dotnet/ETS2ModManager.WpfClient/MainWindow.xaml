@@ -6,6 +6,10 @@
     <DockPanel Background="#F3F4F6">
         <ToolBar DockPanel.Dock="Top" Padding="8">
             <Button Command="{Binding StartScanCommand}" Content="Scan Mods" Padding="12,5" />
+            <Button Command="{Binding CancelScanCommand}" Content="Cancel Scan" Padding="12,5" Margin="6,0,0,0" />
+            <Button Command="{Binding SaveProfileCommand}" Content="Save Profile" Padding="12,5" Margin="6,0,0,0" />
+            <Button Command="{Binding LaunchGameCommand}" Content="Launch Game" Padding="12,5" Margin="6,0,0,0" />
+            <Button Command="{Binding AnalyzeCrashCommand}" Content="Analyze Crash" Padding="12,5" Margin="6,0,0,0" />
             <Separator />
             <TextBlock Text="{Binding Status}" VerticalAlignment="Center" Margin="8,0" />
         </ToolBar>
@@ -18,19 +22,157 @@
             <Border Background="White" BorderBrush="#D1D5DB" BorderThickness="1" Padding="10">
                 <DockPanel>
                     <TextBlock DockPanel.Dock="Top" Text="Profiles" FontWeight="SemiBold" Margin="0,0,0,8" />
-                    <ListBox />
+                    <ListBox ItemsSource="{Binding Profiles}" SelectedItem="{Binding SelectedProfile}" DisplayMemberPath="DisplayName" />
+                    <StackPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                        <Button Command="{Binding RefreshProfilesCommand}" Content="Refresh Profiles" Padding="8,4" />
+                        <TextBox Text="{Binding ProfileDisplayName, UpdateSourceTrigger=PropertyChanged}" Margin="0,6,0,0" ToolTip="Profile name" />
+                        <TextBox Text="{Binding ProfileCompanyName, UpdateSourceTrigger=PropertyChanged}" Margin="0,4,0,0" ToolTip="Company name" />
+                        <WrapPanel Margin="0,6,0,0">
+                            <Button Command="{Binding RenameProfileCommand}" Content="Rename" Padding="8,4" />
+                            <Button Command="{Binding CopyProfileCommand}" Content="Copy" Padding="8,4" Margin="6,0,0,0" />
+                            <Button Command="{Binding DeleteProfileCommand}" Content="Delete" Padding="8,4" Margin="6,0,0,0" />
+                        </WrapPanel>
+                    </StackPanel>
                 </DockPanel>
             </Border>
-            <Border Grid.Column="2" Background="White" BorderBrush="#D1D5DB" BorderThickness="1">
-                <DataGrid ItemsSource="{Binding Mods}" AutoGenerateColumns="False" IsReadOnly="True"
-                          HeadersVisibility="Column" GridLinesVisibility="Horizontal">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*" />
-                        <DataGridTextColumn Header="Source" Binding="{Binding PackageType}" Width="120" />
-                        <DataGridTextColumn Header="Package" Binding="{Binding PackageName}" Width="220" />
-                    </DataGrid.Columns>
-                </DataGrid>
-            </Border>
+            <TabControl Grid.Column="2">
+                <TabItem Header="Mods">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+                            <Button Command="{Binding EnableAllModsCommand}" Content="Enable All" Padding="9,4" />
+                            <Button Command="{Binding DisableAllModsCommand}" Content="Disable All" Padding="9,4" Margin="6,0,0,0" />
+                            <Button Command="{Binding ToggleAllModsCommand}" Content="Invert" Padding="9,4" Margin="6,0,0,0" />
+                            <Button Command="{Binding MoveModTopCommand}" Content="Top" Padding="9,4" Margin="14,0,0,0" />
+                            <Button Command="{Binding MoveModUpCommand}" Content="Up" Padding="9,4" Margin="6,0,0,0" />
+                            <Button Command="{Binding MoveModDownCommand}" Content="Down" Padding="9,4" Margin="6,0,0,0" />
+                            <Button Command="{Binding MoveModBottomCommand}" Content="Bottom" Padding="9,4" Margin="6,0,0,0" />
+                            <TextBox Text="{Binding PresetName, UpdateSourceTrigger=PropertyChanged}" Width="150" Margin="14,0,0,0" ToolTip="Preset name" />
+                            <Button Command="{Binding SavePresetCommand}" Content="Save Preset" Padding="9,4" Margin="6,0,0,0" />
+                            <ComboBox ItemsSource="{Binding PresetNames}" SelectedItem="{Binding SelectedPresetName}" Width="150" Margin="6,0,0,0" />
+                            <Button Command="{Binding LoadPresetCommand}" Content="Load" Padding="9,4" Margin="6,0,0,0" />
+                            <Button Command="{Binding DeletePresetCommand}" Content="Delete" Padding="9,4" Margin="6,0,0,0" />
+                        </StackPanel>
+                        <DataGrid x:Name="ModGrid" ItemsSource="{Binding Mods}" SelectedItem="{Binding SelectedMod}" SelectionMode="Single" AllowDrop="True" AutoGenerateColumns="False" IsReadOnly="False" HeadersVisibility="Column" GridLinesVisibility="Horizontal" PreviewMouseLeftButtonDown="ModGrid_PreviewMouseLeftButtonDown" PreviewMouseMove="ModGrid_PreviewMouseMove" Drop="ModGrid_Drop" DragOver="ModGrid_DragOver">
+                        <DataGrid.Columns>
+                            <DataGridCheckBoxColumn Header="Enabled" Binding="{Binding IsEnabled, UpdateSourceTrigger=PropertyChanged}" Width="75" />
+                            <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*" />
+                            <DataGridTextColumn Header="Source" Binding="{Binding PackageType}" Width="120" />
+                            <DataGridTextColumn Header="Package" Binding="{Binding PackageName}" Width="220" />
+                            <DataGridTextColumn Header="Category" Binding="{Binding Category, UpdateSourceTrigger=PropertyChanged}" Width="140" />
+                        </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </TabItem>
+                <TabItem Header="Saves" DataContext="{Binding}">
+                    <Grid Margin="10">
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Command="{Binding RefreshSaveSlotsCommand}" Content="Refresh" Padding="10,4" />
+                            <ComboBox ItemsSource="{Binding SaveSlots}" SelectedItem="{Binding SelectedSaveSlot}" DisplayMemberPath="DisplayName" Width="220" Margin="8,0" />
+                            <Button Command="{Binding CopySaveSlotCommand}" Content="Copy Slot" Padding="10,4" />
+                        </StackPanel>
+                        <WrapPanel Grid.Row="1" Margin="0,10,0,10">
+                            <TextBlock Text="Money" VerticalAlignment="Center" Margin="0,0,4,0"/><TextBox Text="{Binding SaveAmount}" Width="100" Margin="0,0,8,0"/>
+                            <Button Command="{Binding SetMoneyCommand}" Content="Set" Padding="8,3" Margin="0,0,12,0"/>
+                            <TextBlock Text="XP" VerticalAlignment="Center" Margin="0,0,4,0"/><TextBox Text="{Binding SaveExperience}" Width="100" Margin="0,0,8,0"/>
+                            <Button Command="{Binding SetExperienceCommand}" Content="Set" Padding="8,3" Margin="0,0,12,0"/>
+                            <TextBlock Text="Level" VerticalAlignment="Center" Margin="0,0,4,0"/><TextBox Text="{Binding SaveLevel}" Width="50" Margin="0,0,8,0"/>
+                            <Button Command="{Binding SetLevelCommand}" Content="Set" Padding="8,3" Margin="0,0,12,0"/>
+                            <Button Command="{Binding RepairTruckCommand}" Content="Repair" Padding="8,3" Margin="0,0,8,0"/>
+                            <Button Command="{Binding RefuelTruckCommand}" Content="Refuel" Padding="8,3"/>
+                            <Button Command="{Binding UnlockAllGaragesCommand}" Content="Unlock Garages" Padding="8,3" Margin="8,0,0,0"/>
+                            <Button Command="{Binding UnlockAllDealersCommand}" Content="Unlock Dealers" Padding="8,3" Margin="8,0,0,0"/>
+                        </WrapPanel>
+                        <DataGrid Grid.Row="2" ItemsSource="{Binding SaveFields}" AutoGenerateColumns="True" IsReadOnly="True" />
+                    </Grid>
+                </TabItem>
+                <TabItem Header="Localization">
+                    <DockPanel Margin="10">
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal">
+                            <Button Command="{Binding ScanLocalizationCommand}" Content="Scan Localization" Padding="10,4" HorizontalAlignment="Left"/>
+                            <Button Command="{Binding CancelLocalizationCommand}" Content="Cancel" Padding="10,4" Margin="8,0,0,0"/>
+                            <Button Command="{Binding ImportLocalizationDictionaryCommand}" Content="Import Dictionary" Padding="10,4" Margin="8,0,0,0"/>
+                            <Button Command="{Binding ExportLocalizationCommand}" Content="Export SCS" Padding="10,4" Margin="8,0,0,0"/>
+                            <TextBox Text="{Binding LocalizationLocale, UpdateSourceTrigger=PropertyChanged}" Width="90" Margin="8,0,0,0" ToolTip="Target locale"/>
+                            <Button Command="{Binding SelectLocalizationBaselineCommand}" Content="Select Baseline" Padding="10,4" Margin="8,0,0,0"/>
+                            <Button Command="{Binding ClearLocalizationBaselineCommand}" Content="Clear Baseline" Padding="10,4" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding LocalizationBaseline}" Margin="0,6,0,0"/>
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding LocalizationStatus}" Margin="0,6"/>
+                        <DataGrid ItemsSource="{Binding LocalizationEntries}" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="False">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Key" Binding="{Binding Key}" IsReadOnly="True" Width="220"/>
+                                <DataGridTextColumn Header="Translation" Binding="{Binding Value, UpdateSourceTrigger=LostFocus}" Width="*"/>
+                                <DataGridTextColumn Header="Status" Binding="{Binding Status}" IsReadOnly="True" Width="120"/>
+                                <DataGridTextColumn Header="Category" Binding="{Binding Category}" IsReadOnly="True" Width="100"/>
+                                <DataGridTextColumn Header="Package" Binding="{Binding PackageName}" IsReadOnly="True" Width="180"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+                </TabItem>
+                <TabItem Header="Diagnostics">
+                    <Grid Margin="10">
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Command="{Binding AnalyzeCrashCommand}" Content="Analyze Latest Crash" Padding="10,4"/>
+                            <Button Command="{Binding PrecheckProfileCommand}" Content="Precheck Profile" Padding="10,4" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock Grid.Row="1" Text="{Binding CrashStatus}" Margin="0,6"/>
+                        <DataGrid Grid.Row="2" ItemsSource="{Binding CrashSuspects}" AutoGenerateColumns="True" IsReadOnly="True"/>
+                        <DataGrid Grid.Row="3" ItemsSource="{Binding PrecheckIssues}" AutoGenerateColumns="True" IsReadOnly="True" Margin="0,8,0,0"/>
+                    </Grid>
+                </TabItem>
+                <TabItem Header="Cities">
+                    <DockPanel Margin="10">
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal">
+                            <TextBox Text="{Binding CityKeyword}" Width="220" Margin="0,0,8,0" />
+                            <Button Command="{Binding SearchCitiesCommand}" Content="Search Cities" Padding="10,4" />
+                        </StackPanel>
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding CityStatus}" Margin="0,6" />
+                        <DataGrid ItemsSource="{Binding CityResults}" AutoGenerateColumns="True" IsReadOnly="True" />
+                    </DockPanel>
+                </TabItem>
+                <TabItem Header="Workshop">
+                    <DockPanel Margin="10">
+                        <Button DockPanel.Dock="Top" Command="{Binding RefreshWorkshopMetadataCommand}" Content="Refresh Workshop Metadata" Padding="10,4" HorizontalAlignment="Left" />
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding WorkshopStatus}" Margin="0,6" />
+                        <DataGrid ItemsSource="{Binding WorkshopMetadata}" AutoGenerateColumns="True" IsReadOnly="True" />
+                    </DockPanel>
+                </TabItem>
+                <TabItem Header="Categories">
+                    <StackPanel Margin="10">
+                        <StackPanel Orientation="Horizontal"><TextBox Text="{Binding CategoryName}" Width="220" Margin="0,0,8,0"/><Button Command="{Binding CreateCategoryCommand}" Content="Create" Padding="10,4" Margin="0,0,8,0"/><Button Command="{Binding AssignAllUncategorizedCommand}" Content="Assign Uncategorized" Padding="10,4"/></StackPanel>
+                        <Button Command="{Binding RefreshCategoriesCommand}" Content="Refresh Categories" Padding="10,4" HorizontalAlignment="Left" Margin="0,8"/>
+                        <TextBlock Text="{Binding CategoryStatus}" Margin="0,6"/>
+                        <ItemsControl ItemsSource="{Binding CategoryFolders}"/>
+                    </StackPanel>
+                </TabItem>
+                <TabItem Header="Tools">
+                    <StackPanel Margin="10">
+                        <TextBlock Text="Mod directory migration" FontWeight="SemiBold"/>
+                        <TextBox Text="{Binding MigrationTarget}" Margin="0,6"/>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Command="{Binding MigrateModsCommand}" Content="Migrate and Link" Padding="10,4"/>
+                            <Button Command="{Binding RestoreModsCommand}" Content="Restore" Padding="10,4" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock Text="GitHub repository" FontWeight="SemiBold" Margin="0,18,0,0"/>
+                        <TextBox Text="{Binding UpdateRepository}" Margin="0,6"/>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Command="{Binding CheckUpdateCommand}" Content="Check for Updates" Padding="10,4"/>
+                            <Button Command="{Binding InstallUpdateCommand}" Content="Install Update" Padding="10,4" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock Text="{Binding UpdateStatus}" Margin="0,6" TextWrapping="Wrap"/>
+                        <TextBlock Text="External archive extractor" FontWeight="SemiBold" Margin="0,18,0,0"/>
+                        <TextBlock Text="{Binding ExtractorStatus}" Margin="0,4" TextWrapping="Wrap"/>
+                        <TextBox Text="{Binding ExtractorPackagePath}" Margin="0,4" ToolTip="Package path"/>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBox Text="{Binding ExtractorEntryName}" Width="220"/>
+                            <Button Command="{Binding ExtractEntryCommand}" Content="Extract Entry" Padding="10,4" Margin="8,0,0,0"/>
+                        </StackPanel>
+                        <TextBox Text="{Binding ExtractorOutput}" Margin="0,6" MinHeight="100" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsReadOnly="True"/>
+                    </StackPanel>
+                </TabItem>
+            </TabControl>
         </Grid>
     </DockPanel>
 </Window>
