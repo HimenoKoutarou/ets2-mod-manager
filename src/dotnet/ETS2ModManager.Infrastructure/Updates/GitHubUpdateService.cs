@@ -52,6 +52,8 @@ public sealed class GitHubUpdateService : IUpdateService
     public async Task<UpdateInstallResult> DownloadAndInstallAsync(UpdateInfo update, string installDirectory, string executableName, CancellationToken cancellationToken)
     {
         if (!update.IsAvailable || string.IsNullOrWhiteSpace(update.DownloadUrl)) return new UpdateInstallResult(false, "No downloadable update is available.", null);
+        if (string.IsNullOrWhiteSpace(executableName) || !string.Equals(Path.GetFileName(executableName), executableName, StringComparison.Ordinal))
+            return new UpdateInstallResult(false, "Executable name must be a file name without directory components.", null);
         var root = Path.GetFullPath(installDirectory);
         if (!Directory.Exists(root)) return new UpdateInstallResult(false, "Install directory does not exist.", null);
         var tempRoot = Path.Combine(Path.GetTempPath(), "ets2mm-update-" + Guid.NewGuid().ToString("N"));
@@ -74,22 +76,31 @@ public sealed class GitHubUpdateService : IUpdateService
             {
                 "@echo off",
                 "setlocal",
-                $"set ROOT={QuoteCmd(root)}",
-                $"set PAYLOAD={QuoteCmd(payload)}",
-                $"set PID={pid}",
+                $"set \"ROOT={EscapeCmdValue(root)}\"",
+                $"set \"PAYLOAD={EscapeCmdValue(payload)}\"",
+                $"set \"EXE={EscapeCmdValue(executableName)}\"",
+                $"set \"PID={pid}\"",
                 ":wait",
                 "tasklist /FI \"PID eq %PID%\" | find \"%PID%\" >nul",
                 "if not errorlevel 1 (timeout /t 1 /nobreak >nul & goto wait)",
                 "robocopy \"%PAYLOAD%\" \"%ROOT%\" /E /COPY:DAT /R:3 /W:1 >nul",
-                $"start \"\" \"{Path.Combine(root, executableName)}\"",
+                "start \"\" \"%ROOT%\\%EXE%\"",
                 "rmdir /s /q \"%~dp0\"",
                 "endlocal"
             };
             File.WriteAllLines(script, lines, new UTF8Encoding(false));
-            Process.Start(new ProcessStartInfo { FileName = "cmd.exe", Arguments = $"/c \"{script}\"", UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden });
+            var startInfo = new ProcessStartInfo { FileName = "cmd.exe", UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/c");
+            startInfo.ArgumentList.Add(script);
+            Process.Start(startInfo);
             return new UpdateInstallResult(true, "Update staged. The application will restart after it exits.", staged);
         }
-        catch (OperationCanceledException) { throw; }
+        catch (OperationCanceledException)
+        {
+            try { Directory.Delete(tempRoot, true); } catch { }
+            throw;
+        }
         catch (Exception error) { try { Directory.Delete(tempRoot, true); } catch { } return new UpdateInstallResult(false, $"Update installation failed: {error.Message}", null); }
     }
 
@@ -100,7 +111,15 @@ public sealed class GitHubUpdateService : IUpdateService
         return directories.Length == 1 ? directories[0] : staging;
     }
 
-    private static string QuoteCmd(string value) => value.Replace("%", "%%");
+    private static string EscapeCmdValue(string value) => value
+        .Replace("%", "%%", StringComparison.Ordinal)
+        .Replace("^", "^^", StringComparison.Ordinal)
+        .Replace("&", "^&", StringComparison.Ordinal)
+        .Replace("|", "^|", StringComparison.Ordinal)
+        .Replace("<", "^<", StringComparison.Ordinal)
+        .Replace(">", "^>", StringComparison.Ordinal)
+        .Replace("(", "^(", StringComparison.Ordinal)
+        .Replace(")", "^)", StringComparison.Ordinal);
 
     private static int CompareVersions(string left, string right)
     {

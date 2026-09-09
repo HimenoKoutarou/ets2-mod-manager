@@ -121,6 +121,7 @@ public sealed class ExternalArchiveService : IExternalArchiveService
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var relative = NormalizeArchivePath(Path.GetRelativePath(sourceDirectory, file));
+                if (relative.Length == 0) continue;
                 if (!MatchesRoot(relative, roots)) continue;
                 var destination = Path.Combine(destinationDirectory, relative.Replace('/', Path.DirectorySeparatorChar));
                 var parent = Path.GetDirectoryName(destination);
@@ -156,6 +157,7 @@ public sealed class ExternalArchiveService : IExternalArchiveService
                 cancellationToken.ThrowIfCancellationRequested();
                 if (string.IsNullOrEmpty(entry.Name)) continue;
                 var relative = NormalizeArchivePath(entry.FullName);
+                if (relative.Length == 0) continue;
                 if (!MatchesRoot(relative, roots)) continue;
                 var destination = Path.Combine(destinationDirectory, relative.Replace('/', Path.DirectorySeparatorChar));
                 var parent = Path.GetDirectoryName(destination);
@@ -293,8 +295,16 @@ public sealed class ExternalArchiveService : IExternalArchiveService
 
     private static string NormalizeArchivePath(string value)
     {
-        var normalized = (value ?? string.Empty).Replace('\\', '/').Trim().TrimStart('/');
-        while (normalized.StartsWith("./", StringComparison.Ordinal)) normalized = normalized[2..];
-        return normalized;
+        var raw = (value ?? string.Empty).Replace('\\', '/').Trim();
+        if (raw.Length == 0 || raw.StartsWith("/", StringComparison.Ordinal)) return string.Empty;
+
+        var segments = new List<string>();
+        foreach (var segment in raw.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (segment == ".") continue;
+            if (segment == ".." || segment.IndexOf(':') >= 0) return string.Empty;
+            segments.Add(segment);
+        }
+        return string.Join("/", segments);
     }
 }

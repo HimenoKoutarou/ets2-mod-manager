@@ -196,6 +196,8 @@ static async Task RunAdapterContractsAsync()
         var archivePath = Path.Combine(root, "package.zip");
         using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Create))
         using (var writer = new StreamWriter(archive.CreateEntry("def/manifest.sii").Open(), Encoding.UTF8)) writer.Write("package_name: \"zip_mod\"\n");
+        using (var archive = ZipFile.Open(archivePath, ZipArchiveMode.Update))
+        using (var writer = new StreamWriter(archive.CreateEntry("def/../../escaped.txt").Open(), Encoding.UTF8)) writer.Write("must not escape");
         var extraction = await new ExternalArchiveService(Path.Combine(root, "tools")).ExtractManifestAsync(archivePath, CancellationToken.None);
         if (!extraction.Success || extraction.Text is null || !extraction.Text.Contains("zip_mod", StringComparison.Ordinal)) throw new InvalidOperationException("ZIP extraction contract failed.");
         var treeDestination = Path.Combine(root, "tree-output");
@@ -203,6 +205,12 @@ static async Task RunAdapterContractsAsync()
             archivePath, treeDestination, ["def", "locale/zh_cn"], CancellationToken.None);
         if (!tree.Success || !File.Exists(Path.Combine(treeDestination, "def", "manifest.sii")))
             throw new InvalidOperationException("ZIP tree extraction contract failed.");
+        if (File.Exists(Path.Combine(root, "escaped.txt")))
+            throw new InvalidOperationException("ZIP tree extraction allowed path traversal.");
+        var traversalRoot = await new ExternalArchiveService(Path.Combine(root, "tools")).ExtractTreeAsync(
+            archivePath, treeDestination, ["../def"], CancellationToken.None);
+        if (traversalRoot.Success)
+            throw new InvalidOperationException("Archive extraction accepted a traversal root.");
         var toolRoot = Path.Combine(root, "tools");
         Directory.CreateDirectory(toolRoot);
         File.WriteAllBytes(Path.Combine(toolRoot, "sxc64.exe"), [0]);
@@ -348,6 +356,10 @@ static async Task RunAdapterContractsAsync()
             new UpdateInfo(true, "1.0.0", "2.0.0", null, "missing URL"), root, "ETS2ModManager.WpfClient.exe", CancellationToken.None);
         if (noUrl.Success || !noUrl.Message.Contains("No downloadable update", StringComparison.Ordinal))
             throw new InvalidOperationException("Update missing URL contract failed.");
+        var invalidExecutable = await updater.DownloadAndInstallAsync(
+            update, root, "nested\\ETS2ModManager.WpfClient.exe", CancellationToken.None);
+        if (invalidExecutable.Success || !invalidExecutable.Message.Contains("file name without directory", StringComparison.Ordinal))
+            throw new InvalidOperationException("Update executable name validation contract failed.");
         var missingInstall = await updater.DownloadAndInstallAsync(
             update, Path.Combine(root, "missing-install"), "ETS2ModManager.WpfClient.exe", CancellationToken.None);
         if (missingInstall.Success || !missingInstall.Message.Contains("Install directory does not exist", StringComparison.Ordinal))
