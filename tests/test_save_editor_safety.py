@@ -180,6 +180,54 @@ class SaveSlotCopyTests(unittest.TestCase):
         )
         return profile, slot
 
+    def test_list_save_slots_uses_names_and_places_autosaves_last(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            profile_dir = root / "profile"
+            profile_dir.mkdir()
+            profile = ProfileInfo(
+                profile_id="local-profile",
+                location="local",
+                folder=profile_dir,
+                profile_sii=profile_dir / "profile.sii",
+            )
+            plain_game = b"game-save-payload"
+            for slot_name, display_name in [
+                ("1", "Zulu Save"),
+                ("2", "Alpha Save"),
+                ("autosave_drive", "Autosave Drive"),
+                ("autosave", "Autosave"),
+            ]:
+                slot_dir = profile_dir / "save" / slot_name
+                slot_dir.mkdir(parents=True)
+                (slot_dir / "game.sii").write_bytes(plain_game)
+                info = (
+                    'SiiNunit\n{\n'
+                    'save_container : .save {\n'
+                    f' name: "{_escape_profile_str_for_sii(display_name)}"\n'
+                    '}\n}\n'
+                ).encode("utf-8")
+                (slot_dir / "info.sii").write_bytes(encrypt_scsc(info))
+
+            service = SaveEditorService(profile_service=None)
+            slots = service.list_save_slots(profile)
+            self.assertEqual(
+                ["Alpha Save", "Zulu Save", "Autosave", "Autosave Drive"],
+                [slot.display_name for slot in slots],
+            )
+            self.assertEqual(
+                ["2", "1", "autosave", "autosave_drive"],
+                [slot.slot_name for slot in slots],
+            )
+
+            cloud = ProfileInfo(
+                profile_id="cloud-profile",
+                location="cloud",
+                folder=profile_dir,
+                profile_sii=profile_dir / "profile.sii",
+            )
+            self.assertEqual([], service.list_save_slots(cloud))
+
     def test_copy_save_slot_creates_numbered_copy_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as td:
             _, slot = self._make_slot(Path(td))

@@ -509,8 +509,20 @@ static async Task RunSaveContractAsync(string root, IBackupStore backup)
     var gamePath = Path.Combine(slotFolder, "game.sii");
     var plain = BuildCanonicalBsii(279375, 1253729);
     File.WriteAllBytes(gamePath, ScsCCodec.Encrypt(plain));
-    var slot = new SaveSlotRef(profile.ProfileId, "1", slotFolder, gamePath, "Contract Save", File.GetLastWriteTimeUtc(gamePath), profile.Location);
     var service = new SaveEditorService(backup);
+    WriteSaveSlot(profileFolder, "1", "Zulu Save", plain);
+    WriteSaveSlot(profileFolder, "2", "Alpha Save", plain);
+    WriteSaveSlot(profileFolder, "autosave", "Autosave", plain);
+    WriteSaveSlot(profileFolder, "autosave_drive", "Autosave Drive", plain);
+    var listed = service.ListSlots(profile);
+    EqualSequence(["Alpha Save", "Zulu Save", "Autosave", "Autosave Drive"], listed.Select(slot => slot.DisplayName));
+    EqualSequence(["2", "1", "autosave", "autosave_drive"], listed.Select(slot => slot.SlotId));
+    var cloudFolder = Path.Combine(root, "profiles", "cloud-save-contract");
+    WriteSaveSlot(cloudFolder, "1", "Remote Save", plain);
+    var cloud = new ProfileRef("cloud-save-contract", "cloud", cloudFolder, Path.Combine(cloudFolder, "profile.sii"), "Cloud", "", 0);
+    if (service.ListSlots(cloud).Count != 0) throw new InvalidOperationException("Cloud saves must not be listed.");
+
+    var slot = listed.First(slot => slot.SlotId == "1");
     var snapshot = service.ReadSnapshot(slot);
     if (!snapshot.Fields.Any(x => x.FieldName == "money_account" && x.Value == "1253729")) throw new InvalidOperationException("BSII money read contract failed.");
     if (!snapshot.Fields.Any(x => x.FieldName == "experience_points" && x.Value == "279375")) throw new InvalidOperationException("BSII experience read contract failed.");
@@ -529,6 +541,23 @@ static async Task RunSaveContractAsync(string root, IBackupStore backup)
     var dealerResult = service.UnlockAllDealers(slot);
     if (dealerResult.Success || !dealerResult.Message.Contains("No compatible boolean field", StringComparison.Ordinal)) throw new InvalidOperationException("BSII dealer capability boundary contract failed.");
     await Task.CompletedTask;
+
+    static void WriteSaveSlot(string profileRoot, string slotId, string name, byte[] payload)
+    {
+        var folder = Path.Combine(profileRoot, "save", slotId);
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(Path.Combine(folder, "game.sii"), ScsCCodec.Encrypt(payload));
+        File.WriteAllText(
+            Path.Combine(folder, "info.sii"),
+            $"SiiNunit\n{{\n save_info : .save {{\n  name: \"{EncodeSii(name)}\"\n }}\n}}\n",
+            Encoding.UTF8);
+    }
+
+    static string EncodeSii(string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        return string.Concat(bytes.Select(value => $"\\x{value:X2}"));
+    }
 }
 
 static byte[] BuildCanonicalBsii(uint experience, long money)

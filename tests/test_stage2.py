@@ -192,7 +192,7 @@ def main():
     all_pns = [m.mod_id for m in pseudo_mods]
     ps = PriorityService(pseudo_mods)
     active_init = ["rusmap_models_255", "promods_eurasia_280_def", "sound_fmod_pack_real", "jbx_weather_graphics_2"]
-    wl = ps.build_worklist(active_init, all_pns)
+    wl = ps.build_worklist(list(reversed(active_init)), all_pns)
     check("build_worklist 条目数", len(wl) == len(all_pns), f"{len(wl)} vs {len(all_pns)}")
     check("active 在最前", [x["package_name"] for x in wl[:4]] == active_init)
 
@@ -211,18 +211,17 @@ def main():
     # 拖拽：把第 4 条（sound_...）拖到第 0 条前
     wl3 = ps.reorder_before(wl2, indices=[2], target_before_index=0)
     first_en = [x["package_name"] for x in wl3 if x["enabled"]][0]
-    check("拖拽：sound 应在首位（最高优先级最后加载前，我们这里用 load order 先排先加载）",
+    check("拖拽：sound 应在首位（UI 首位 = 最高优先级）",
           first_en == "sound_fmod_pack_real", f"实际首个={first_en}")
 
-    # 一键预设：地图底（先加载）→ 中间素材 → 功能/声音/天气在上（后加载，覆盖）
+    # 一键预设：UI 从上到下为功能/声音/天气 → 中间素材 → 地图底
     wl4 = ps.apply_preset(wl2)
     en_list = [x["package_name"] for x in wl4 if x["enabled"]]
     map_positions = [i for i, n in enumerate(en_list) if "map" in n or "promods" in n or "rusmap" in n]
     func_positions = [i for i, n in enumerate(en_list) if any(k in n for k in ["trafficpack", "weather", "sound", "graphics"])]
-    min_map, max_func = min(map_positions), max(func_positions)
-    # 预设要求"地图在前，功能类在后"（地图底 = 先加载），所以 map 的最小位置应该小于 func 的最大位置
-    check("apply_preset：promods/map/rusmap 条目整体早于 traffic/weather/sound",
-          min_map < max_func or (len(map_positions) >= 2 and len(func_positions) >= 2 and max(map_positions) <= min(func_positions) + 1),
+    max_map, min_func = max(map_positions), min(func_positions)
+    check("apply_preset：traffic/weather/sound 的 UI 优先级高于 promods/map/rusmap",
+          max(func_positions) < min(map_positions),
           f"map@idx={map_positions}  func@idx={func_positions}  full={en_list}")
 
     # move_top / move_bottom

@@ -52,6 +52,7 @@ from application.profile_use_cases import ProfileUseCases
 from application.mod_scan_use_cases import ModScanUseCases
 from application.category_use_cases import CategoryUseCases
 from application.crash_diagnosis_use_cases import CrashDiagnosisUseCases
+from application.profile_lifecycle_use_cases import ProfileLifecycleUseCases
 from services.i18n_service import _, tr, I18nNotifier, set_language, current_language, available_languages, language_display_name
 from version import __version__
 from services.update_service import UpdateService
@@ -191,6 +192,11 @@ class MainWindow(QMainWindow, _SignalMixin, _TableDataMixin, _ToolbarMixin, _Dia
         # Composition root: the UI talks to the Profile application boundary;
         # ProfileService remains the compatibility repository/game-state port.
         self.profile_use_cases = ProfileUseCases(self.profile_svc, self.profile_svc)
+        self.profile_lifecycle_use_cases = ProfileLifecycleUseCases(
+            self.profile_svc,
+            self.profile_svc,
+            self.backup_svc,
+        )
         self.all_mods: List[Mod] = []
         self.all_mods_by_pkg: Dict[str, Mod] = {}
         self.priority_svc = PriorityService([])

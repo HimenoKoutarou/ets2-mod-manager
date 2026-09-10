@@ -341,15 +341,34 @@ class _ProfileReadWorker(QThread):
 
     result_ready = Signal(object, list, str, int)  # (profile, active_mods, error, token)
 
-    def __init__(self, profile_svc, profile, token: int = 0, parent=None):
+    def __init__(self, profile_svc, profile, token: int = 0, parent=None, profile_use_cases=None):
         super().__init__(parent)
         self._svc = profile_svc
         self._profile = profile
         self._token = int(token or 0)
+        self._profile_use_cases = profile_use_cases
 
     def run(self):
         try:
-            active = self._svc.get_active_mods(self._profile)
+            # Enrich only the profile the user actually selected. This fills
+            # its display name and active-mod cache in the same read, instead
+            # of decrypting every profile during application startup.
+            self._svc.enrich_profile(self._profile)
+            if self._profile_use_cases is None:
+                from application.profile_use_cases import ProfileUseCases
+
+                game_state = self._svc
+                if not callable(getattr(game_state, "is_running", None)):
+                    class _GameStateAdapter:
+                        def __init__(self, service):
+                            self._service = service
+
+                        def is_running(self):
+                            return bool(self._service.is_game_running())
+
+                    game_state = _GameStateAdapter(self._svc)
+                self._profile_use_cases = ProfileUseCases(self._svc, game_state)
+            active = self._profile_use_cases.read_active_mods(self._profile)
             self.result_ready.emit(self._profile, list(active or []), "", self._token)
         except Exception as exc:
             self.result_ready.emit(self._profile, [], f"{type(exc).__name__}: {exc}", self._token)

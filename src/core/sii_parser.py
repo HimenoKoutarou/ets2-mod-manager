@@ -142,7 +142,9 @@ class _SiiLexer:
                 # as ``Kasepää`` and ``Åre`` into replacement glyphs.  Repair
                 # only unmistakable UTF-8-as-latin-1 mojibake markers.
                 final_str = raw
-                if any(marker in raw for marker in ("Ã", "Â", "â", "ð", "�")):
+                if any(marker in raw for marker in (
+                    "Ã", "Â", "â", "ð", "Ð", "Ñ", "Р", "С", "�"
+                )):
                     try:
                         repaired = raw.encode("latin-1").decode("utf-8")
                         if "�" not in repaired:

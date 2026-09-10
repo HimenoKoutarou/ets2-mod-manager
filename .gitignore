@@ -37,6 +37,7 @@ src/dotnet/**/bin/
 src/dotnet/**/obj/
 src/core/rust/target/
 src/core/rust/Cargo.lock
+dist-dotnet/
 
 # Logs
 *.log

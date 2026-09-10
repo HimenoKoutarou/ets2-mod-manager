@@ -9,7 +9,7 @@ namespace ETS2ModManager.Infrastructure.Saves;
 public sealed class SaveEditorService(IBackupStore backup) : ISaveEditorService
 {
     private delegate void SpanWriter(Span<byte> value);
-    private static readonly Regex SaveName = new(@"(?m)^\s*name\s*:\s*""(?<v>(?:\\.|[^""])*)""", RegexOptions.Compiled);
+    private static readonly Regex SaveName = new(@"(?m)^\s*name\s*:\s*""(?<v>(?:\\.|[^""\\])*)""\s*$", RegexOptions.Compiled);
     private static readonly Regex SaveNameLine = new(@"(?m)^(\s*name\s*:\s*)""(?:\\.|[^""\\])*""\s*$", RegexOptions.Compiled);
     private static readonly Regex FileTimeLine = new(@"(?m)^(\s*file_time\s*:\s*)-?\d+\s*$", RegexOptions.Compiled);
     private static readonly string[] WearFields = [
@@ -21,6 +21,11 @@ public sealed class SaveEditorService(IBackupStore backup) : ISaveEditorService
 
     public IReadOnlyList<SaveSlotRef> ListSlots(ProfileRef profile)
     {
+        // Save editing is intentionally limited to the user's local profile tree.
+        // Steam and Steam Cloud profiles remain visible for Mod management, but
+        // their remote save data must never be mixed into the local save picker.
+        if (!profile.IsWritable) return [];
+
         var root = Path.Combine(profile.Folder, "save");
         var result = new List<SaveSlotRef>();
         if (!Directory.Exists(root)) return result;
@@ -35,14 +40,18 @@ public sealed class SaveEditorService(IBackupStore backup) : ISaveEditorService
                 if (File.Exists(info))
                 {
                     var text = Encoding.UTF8.GetString(ScsCCodec.Decrypt(File.ReadAllBytes(info)));
-                    display = SaveName.Match(text).Groups["v"].Value;
+                    display = UnescapeSii(SaveName.Match(text).Groups["v"].Value);
                     if (string.IsNullOrWhiteSpace(display)) display = Path.GetFileName(folder);
                 }
             }
             catch { }
             result.Add(new SaveSlotRef(profile.ProfileId, Path.GetFileName(folder), folder, game, display, File.GetLastWriteTimeUtc(game), profile.Location));
         }
-        return result;
+        return result
+            .OrderBy(slot => AutosaveRank(slot.SlotId))
+            .ThenBy(slot => slot.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(slot => slot.SlotId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     public SaveSnapshot ReadSnapshot(SaveSlotRef slot)
@@ -222,6 +231,57 @@ public sealed class SaveEditorService(IBackupStore backup) : ISaveEditorService
         }
         return result.ToString();
     }
+
+    private static int AutosaveRank(string slotId)
+    {
+        if (string.Equals(slotId, "autosave", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (slotId.StartsWith("autosave", StringComparison.OrdinalIgnoreCase)) return 2;
+        return 0;
+    }
+
+    private static string UnescapeSii(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        var result = new StringBuilder(value.Length);
+        for (var index = 0; index < value.Length;)
+        {
+            if (value[index] == '\\' && index + 3 < value.Length && value[index + 1] == 'x'
+                && IsHex(value[index + 2]) && IsHex(value[index + 3]))
+            {
+                var bytes = new List<byte>();
+                while (index + 3 < value.Length && value[index] == '\\' && value[index + 1] == 'x'
+                       && IsHex(value[index + 2]) && IsHex(value[index + 3]))
+                {
+                    bytes.Add((byte)((Hex(value[index + 2]) << 4) | Hex(value[index + 3])));
+                    index += 4;
+                }
+                result.Append(Encoding.UTF8.GetString(bytes.ToArray()));
+                continue;
+            }
+
+            if (value[index] == '\\' && index + 1 < value.Length)
+            {
+                var escaped = value[index + 1];
+                if (escaped is '"' or '\\') result.Append(escaped);
+                else result.Append('\\').Append(escaped);
+                index += 2;
+                continue;
+            }
+
+            result.Append(value[index++]);
+        }
+        return result.ToString();
+    }
+
+    private static bool IsHex(char value) =>
+        value is >= '0' and <= '9' or >= 'a' and <= 'f' or >= 'A' and <= 'F';
+
+    private static int Hex(char value) => value switch
+    {
+        >= '0' and <= '9' => value - '0',
+        >= 'a' and <= 'f' => value - 'a' + 10,
+        _ => value - 'A' + 10,
+    };
 
     private static void CopyDirectory(string source, string target)
     {

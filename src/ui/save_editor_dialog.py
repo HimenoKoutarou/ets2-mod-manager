@@ -31,13 +31,21 @@ from PySide6.QtWidgets import (
 )
 
 from services.profile_service import ProfileService, ProfileInfo
-from services.save_editor_service import SaveEditorService, SaveSlotInfo
+from services.save_editor_service import (
+    SaveEditorService,
+    SaveSlotInfo,
+    _combine_unlock_results,
+)
 from services.i18n_service import _
+from ui.theme import DARK_THEME, LIGHT_THEME, ThemeManager
 
 
 # =========================================================================
 #  后台线程：读取/修改存档（防止 UI 卡顿）
 # =========================================================================
+
+from application.profile_lifecycle_use_cases import ProfileLifecycleUseCases
+
 
 class _ReadStatsWorker(QThread):
     """后台读取当前金钱/经验/等级。"""
@@ -98,6 +106,16 @@ class SaveEditorDialog(QDialog):
         self.ps = profile_svc
         self.profiles = profiles
         self.svc = SaveEditorService(profile_svc)
+        self.profile_lifecycle_use_cases = (
+            ProfileLifecycleUseCases(
+                profile_svc,
+                profile_svc,
+                profile_svc.backup,
+                self.svc,
+            )
+            if profile_svc is not None
+            else None
+        )
         self._current_slots: List[SaveSlotInfo] = []
         self._current_slot: Optional[SaveSlotInfo] = None
         self._worker: Optional[QThread] = None
@@ -192,7 +210,7 @@ class SaveEditorDialog(QDialog):
         self.cb_profile.currentIndexChanged.connect(self._on_profile_changed)
         prof_row.addWidget(self.cb_profile, 1)
         self.btn_refresh = QPushButton(_("se.btn_refresh"))
-        self.btn_refresh.clicked.connect(self._refresh_slots)
+        self.btn_refresh.clicked.connect(lambda: self._refresh_slots())
         prof_row.addWidget(self.btn_refresh)
         sel_form.addRow(QLabel(_("se.profile")), prof_row)
 
@@ -205,6 +223,17 @@ class SaveEditorDialog(QDialog):
         self.lbl_slot_info.setStyleSheet("color:#a6adc8;")
         slot_row.addWidget(self.lbl_slot_info, 1)
         sel_form.addRow(QLabel(_("se.save_slot")), slot_row)
+
+        save_as_row = QHBoxLayout()
+        self.edt_save_as_name = QLineEdit()
+        self.edt_save_as_name.setPlaceholderText(_("se.ph_save_as_name"))
+        self.edt_save_as_name.returnPressed.connect(self._on_save_as)
+        save_as_row.addWidget(self.edt_save_as_name, 1)
+        self.btn_save_as = QPushButton(_("se.btn_save_as"))
+        self.btn_save_as.setObjectName("primary")
+        self.btn_save_as.clicked.connect(self._on_save_as)
+        save_as_row.addWidget(self.btn_save_as)
+        sel_form.addRow(QLabel(_("se.save_as_name")), save_as_row)
 
         outer.addWidget(sel_box)
 
@@ -538,7 +567,7 @@ class SaveEditorDialog(QDialog):
         self.edt_new_company.setText(prof.company_name or "")
         self._refresh_slots()
 
-    def _refresh_slots(self):
+    def _refresh_slots(self, select_slot_name: Optional[str] = None):
         idx = self.cb_profile.currentIndex()
         if idx < 0:
             return
@@ -555,17 +584,25 @@ class SaveEditorDialog(QDialog):
             return
         self._current_slots = slots
         for slot in slots:
-            label = slot.slot_name
+            label = getattr(slot, "display_name", "") or slot.slot_name
             if slot.file_time:
                 try:
                     import datetime as _dt
-                    label = f"{slot.slot_name}  ({_dt.datetime.fromtimestamp(slot.file_time).strftime('%Y-%m-%d %H:%M')})"
+                    label = f"{label}  ({_dt.datetime.fromtimestamp(slot.file_time).strftime('%Y-%m-%d %H:%M')})"
                 except Exception:
                     pass
             self.cb_slot.addItem(label, userData=slot)
+        selected_index = 0
+        if select_slot_name is not None:
+            for i, slot in enumerate(slots):
+                if slot.slot_name == str(select_slot_name):
+                    selected_index = i
+                    break
+        if slots:
+            self.cb_slot.setCurrentIndex(selected_index)
         self.cb_slot.blockSignals(False)
         if slots:
-            self._on_slot_changed(0)
+            self._on_slot_changed(selected_index)
         else:
             self._current_slot = None
             self.lbl_slot_info.setText(_("se.no_slots"))
@@ -647,7 +684,7 @@ class SaveEditorDialog(QDialog):
         prof = self.cb_profile.currentData() if hasattr(self, "cb_profile") else None
         editable = bool(prof is not None and getattr(prof, "location", "") == "local")
         for btn in (self.btn_set_money, self.btn_set_xp, self.btn_set_level,
-                    self.btn_rename, self.btn_unlock_dealers,
+                    self.btn_rename, self.btn_save_as, self.btn_unlock_dealers,
                     self.btn_unlock_garages, self.btn_unlock_all,
                     self.btn_repair, self.btn_refuel,
                     self.btn_money_1m, self.btn_money_10m, self.btn_money_100m,
@@ -656,6 +693,50 @@ class SaveEditorDialog(QDialog):
         # Copy settings may read a Cloud source, but the destination is
         # validated separately and must be local.
         self.btn_copy.setEnabled(bool(enabled))
+
+    # ---------- 另存为新存档 ----------
+
+    def _on_save_as(self):
+        if not self._require_slot():
+            return
+        new_name = self.edt_save_as_name.text().strip()
+        if not new_name:
+            QMessageBox.warning(self, _("se.error"), _("se.save_as_empty"))
+            return
+        if self.svc.is_game_running():
+            QMessageBox.warning(self, _("se.error"), _("se.game_running_save_as"))
+            return
+
+        source_slot = self._current_slot
+        ans = QMessageBox.question(
+            self,
+            _("se.confirm_title"),
+            _("se.confirm_save_as", slot=source_slot.slot_name, name=new_name),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        copied = {}
+
+        def _copy_slot():
+            copied["slot"] = self.svc.copy_save_slot(source_slot, new_name)
+            return True
+
+        def _select_copy():
+            new_slot = copied.get("slot")
+            self.edt_save_as_name.clear()
+            self._refresh_slots(new_slot.slot_name if new_slot is not None else None)
+
+        self._run_apply(
+            _("se.status_save_as"),
+            _copy_slot,
+            success_msg=_("se.ok_save_as", name=new_name),
+            fail_msg=_("se.fail_save_as"),
+            post_callback=_select_copy,
+            refresh_stats=False,
+        )
 
     # ---------- 功能 5: 金钱 / 经验 / 等级 ----------
 
@@ -768,7 +849,8 @@ class SaveEditorDialog(QDialog):
             return
         self._run_apply(
             _("se.status_renaming"),
-            self.svc.rename_profile, prof, new_name, new_company,
+            self.profile_lifecycle_use_cases.rename_profile,
+            prof, new_name, new_company,
             success_msg=_("se.ok_rename"),
             fail_msg=_("se.fail_rename"),
             post_callback=self._refresh_slots,
@@ -804,7 +886,7 @@ class SaveEditorDialog(QDialog):
             return
         self._run_apply(
             _("se.status_copying"),
-            self.svc.copy_profile_settings, src, dst,
+            self.profile_lifecycle_use_cases.copy_profile_settings, src, dst,
             self.chk_copy_mods.isChecked(), self.chk_copy_controls.isChecked(),
             success_msg=_("se.ok_copy"),
             fail_msg=_("se.fail_copy"),
@@ -859,7 +941,7 @@ class SaveEditorDialog(QDialog):
                 r2 = self.svc.unlock_all_garages(slot)
             except Exception:
                 r2 = False
-            return (r1 or r2), ""
+            return _combine_unlock_results(r1, r2)
         self._run_apply(
             _("se.status_unlocking_all"), _do_all,
             success_msg=_("se.ok_unlock_all"),
@@ -918,13 +1000,13 @@ class SaveEditorDialog(QDialog):
 
     def _run_apply(self, status_msg: str, fn, *args,
                    success_msg: str = "", fail_msg: str = "",
-                   post_callback=None):
+                   post_callback=None, refresh_stats: bool = True):
         """在后台执行一个修改操作，并在完成后显示结果。"""
+        if self._apply_worker is not None and self._apply_worker.isRunning():
+            return
         self._set_apply_buttons_enabled(False)
         self.progress.show()
         self.lbl_status.setText(status_msg)
-        if self._apply_worker is not None and self._apply_worker.isRunning():
-            return
         worker = _ApplyWorker(fn, *args, parent=self)
         self._live_workers.add(worker)
         # 用闭包保存 post_callback
@@ -947,7 +1029,7 @@ class SaveEditorDialog(QDialog):
                 except Exception:
                     pass
             # 自动刷新统计
-            if self._current_slot is not None:
+            if refresh_stats and self._current_slot is not None:
                 self._refresh_stats()
         worker.result_ready.connect(_on_done)
         worker.finished.connect(lambda w=worker: self._on_worker_finished(w))

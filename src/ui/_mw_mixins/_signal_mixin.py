@@ -66,6 +66,20 @@ class _SignalMixin:
         self.category_use_cases = use_cases
         return use_cases
 
+    def _get_profile_lifecycle_use_cases(self):
+        """Return the Profile lifecycle facade with a legacy fallback."""
+        use_cases = getattr(self, "profile_lifecycle_use_cases", None)
+        if use_cases is not None:
+            return use_cases
+        from application.profile_lifecycle_use_cases import ProfileLifecycleUseCases
+        repository = getattr(self, "profile_svc", None)
+        backup = getattr(self, "backup_svc", None)
+        if repository is None or backup is None:
+            raise RuntimeError("Profile lifecycle adapters are not configured")
+        use_cases = ProfileLifecycleUseCases(repository, repository, backup)
+        self.profile_lifecycle_use_cases = use_cases
+        return use_cases
+
     def _background_workers(self):
         """Return live main-window workers without duplicate objects."""
         attrs = (
@@ -1548,7 +1562,9 @@ class _SignalMixin:
             self._open_save_editor(prof)
         elif act == a_bk:
             try:
-                self.backup_svc.backup(getattr(prof, "profile_sii", None), tag="ui-menu-snapshot")
+                self._get_profile_lifecycle_use_cases().backup_profile(
+                    prof, tag="ui-menu-snapshot"
+                )
                 QMessageBox.information(self, _("dlg.backup_ok_title"), _("dlg.backup_ok2", prof=str(prof)))
             except Exception as e:
                 QMessageBox.warning(self, _("dlg.backup_fail_title"), str(e))
@@ -1567,7 +1583,9 @@ class _SignalMixin:
                 return
             new_company = new_company.strip()
             try:
-                new_prof = self.profile_svc.copy_profile(prof, new_name, new_company)
+                new_prof = self._get_profile_lifecycle_use_cases().copy_profile(
+                    prof, new_name, new_company
+                )
                 QMessageBox.information(self, _("dlg.copy_profile_title"),
                                         _("dlg.copy_profile_ok", prof=str(new_prof)))
                 self._load_profiles()
@@ -1587,7 +1605,9 @@ class _SignalMixin:
             if ans2 != QMessageBox.Yes:
                 return
             try:
-                self.profile_svc.delete_profile(prof, backup_first=True)
+                self._get_profile_lifecycle_use_cases().delete_profile(
+                    prof, backup_first=True
+                )
                 QMessageBox.information(self, _("dlg.delete_profile_title"),
                                         _("dlg.delete_profile_ok"))
                 if self.current_profile is not None and getattr(self.current_profile, "profile_id", None) == prof.profile_id:

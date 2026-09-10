@@ -207,6 +207,7 @@ class SaveSlotInfo:
     game_sii: Path
     info_sii: Path
     file_time: int = 0
+    display_name: str = ""
     # 性能缓存（不参与 dataclass 默认 repr）
     _cached_bsii: Optional[bytes] = None
     _cached_magic: Optional[bytes] = None
@@ -260,10 +261,12 @@ class SaveEditorService:
         """列出存档槽位。
 
         性能优化：直接用 game.sii 的文件 mtime 作为时间戳，
-        跳过对每个 info.sii 的解密+正则解析（原实现是 O(n × decrypt)）。
-        info_sii 路径仍保留，供需要详细信息的调用方按需使用。
+        只对 info.sii 读取存档显示名。Steam/Cloud Profile 不参与存档
+        列表，避免把远程副本混进本地存档编辑器。
         """
         slots: List[SaveSlotInfo] = []
+        if getattr(prof, "location", "") != "local":
+            return slots
         save_dir = prof.folder / "save"
         if not save_dir.exists():
             return slots
@@ -283,8 +286,42 @@ class SaveEditorService:
                 slot.file_time = int(game_sii.stat().st_mtime)
             except Exception:
                 pass
+            slot.display_name = self._read_save_display_name(info_sii, d.name)
             slots.append(slot)
-        return slots
+        def autosave_rank(slot: SaveSlotInfo) -> int:
+            name = slot.slot_name.casefold()
+            if name == "autosave":
+                return 1
+            if name.startswith("autosave"):
+                return 2
+            return 0
+        return sorted(
+            slots,
+            key=lambda slot: (
+                autosave_rank(slot),
+                (slot.display_name or slot.slot_name).casefold(),
+                slot.slot_name.casefold(),
+            ),
+        )
+
+    @staticmethod
+    def _read_save_display_name(info_sii: Path, fallback: str) -> str:
+        """Read the user-facing save name from info.sii without mutating it."""
+        if not info_sii.is_file():
+            return fallback
+        try:
+            text = _decode_text(decrypt_scsc(info_sii.read_bytes()))
+            match = re.search(
+                r'(?m)^\s*name\s*:\s*"(?P<value>(?:\\.|[^"\\])*)"\s*$',
+                text,
+            )
+            if match:
+                value = _unescape_profile_str(match.group("value")).strip()
+                if value:
+                    return value
+        except Exception:
+            pass
+        return fallback
 
     # ---------- game.sii 解密 / 加密（带缓存）----------
 
@@ -600,6 +637,7 @@ class SaveEditorService:
             game_sii=copied_game,
             info_sii=copied_info,
             file_time=now,
+            display_name=display_name,
         )
 
     # ---------- 功能 5：修改金钱 / 经验 / 等级 ----------

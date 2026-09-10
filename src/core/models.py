@@ -105,7 +105,7 @@ class Mod:
 
     # 运行时状态
     is_enabled: bool = False        # 是否在当前 profile 中启用
-    priority_index: int = -1        # 在 active_mods 中的位置（-1=未启用）
+    priority_index: int = -1        # UI 优先级位置（0=最高，-1=未启用）
     mods_info_timestamp: int = 0    # 来自 mods_info.sii 的时间戳
 
     # 虚拟分类标签：UI "文件夹" 分类（空串 = 未分类），持久化到 category_service
