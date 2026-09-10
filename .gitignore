@@ -38,6 +38,16 @@ src/dotnet/**/obj/
 src/core/rust/target/
 src/core/rust/Cargo.lock
 dist-dotnet/
+build-temp-*/
+dist-temp-*/
+
+# Legacy release archives and ad-hoc scan exports
+/*.zip
+/.l10n20_scan.json
+/l10n20_*.json
+/selected_map_mods_*.json
+/sample-l10n-*.json
+/sample-l10n-*.scs
 
 # Logs
 *.log
