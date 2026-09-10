@@ -528,8 +528,11 @@ fn unescape_sii(value: &str) -> String {
 fn parse_field(text: &str, field: &str) -> Option<String> {
     text.lines().find_map(|line| {
         let trimmed = line.trim();
-        let prefix = format!("{field}:");
-        let value = trimmed.strip_prefix(&prefix)?.trim();
+        let (raw_key, raw_value) = trimmed.split_once(':')?;
+        if !raw_key.trim().eq_ignore_ascii_case(field) {
+            return None;
+        }
+        let value = raw_value.trim();
         let value = value.strip_prefix('"')?.strip_suffix('"')?;
         Some(unescape_sii(value))
     })
@@ -2323,6 +2326,74 @@ fn preset_delete(request: PresetRequest, state: State<'_, BackendState>) -> Resu
     Ok(changed > 0)
 }
 
+fn list_local_saves(profile: &ProfileDto) -> Vec<SaveSlotDto> {
+    if !profile.writable {
+        return Vec::new();
+    }
+    let root = Path::new(&profile.folder).join("save");
+    let mut rows: Vec<(u8, String, String, SaveSlotDto)> = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let folder = entry.path();
+        let game = folder.join("game.sii");
+        if !folder.is_dir() || !game.is_file() {
+            continue;
+        }
+        let info = folder.join("info.sii");
+        let display_name = read_sii(&info)
+            .ok()
+            .and_then(|text| parse_field(&text, "name"))
+            .filter(|x| !x.trim().is_empty())
+            .unwrap_or_else(|| {
+                folder
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or_default()
+                    .into()
+            });
+        let slot_id = folder
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let rank = if slot_id.eq_ignore_ascii_case("autosave") {
+            1
+        } else if slot_id.to_ascii_lowercase().starts_with("autosave") {
+            2
+        } else {
+            0
+        };
+        let last_modified_ms = fs::metadata(&game)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or_default();
+        rows.push((
+            rank,
+            display_name.to_lowercase(),
+            slot_id.to_lowercase(),
+            SaveSlotDto {
+                profile_id: profile.id.clone(),
+                slot_id,
+                folder: normalize_path(&folder),
+                game_sii: normalize_path(&game),
+                display_name,
+                last_modified_ms,
+                profile_location: profile.location.clone(),
+            },
+        ));
+    }
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn save_list_local(
     profile_id: String,
@@ -2333,65 +2404,7 @@ fn save_list_local(
         .lock()
         .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &profile_id).ok_or("Profile not found.")?;
-    if !profile.writable {
-        return Ok(Vec::new());
-    }
-    let root = Path::new(&profile.folder).join("save");
-    let mut rows: Vec<(u8, String, SaveSlotDto)> = Vec::new();
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let folder = entry.path();
-            let game = folder.join("game.sii");
-            if !folder.is_dir() || !game.is_file() {
-                continue;
-            }
-            let info = folder.join("info.sii");
-            let display_name = read_sii(&info)
-                .ok()
-                .and_then(|text| parse_field(&text, "name"))
-                .filter(|x| !x.trim().is_empty())
-                .unwrap_or_else(|| {
-                    folder
-                        .file_name()
-                        .and_then(|x| x.to_str())
-                        .unwrap_or_default()
-                        .into()
-                });
-            let slot_id = folder
-                .file_name()
-                .and_then(|x| x.to_str())
-                .unwrap_or_default()
-                .to_string();
-            let rank = if slot_id.eq_ignore_ascii_case("autosave") {
-                1
-            } else if slot_id.to_ascii_lowercase().starts_with("autosave") {
-                2
-            } else {
-                0
-            };
-            let last_modified_ms = fs::metadata(&game)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis() as i64)
-                .unwrap_or_default();
-            rows.push((
-                rank,
-                display_name.to_lowercase(),
-                SaveSlotDto {
-                    profile_id: profile.id.clone(),
-                    slot_id,
-                    folder: normalize_path(&folder),
-                    game_sii: normalize_path(&game),
-                    display_name,
-                    last_modified_ms,
-                    profile_location: profile.location.clone(),
-                },
-            ));
-        }
-    }
-    rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    Ok(rows.into_iter().map(|(_, _, row)| row).collect())
+    Ok(list_local_saves(&profile))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2665,6 +2678,55 @@ mod tests {
             rows.into_iter().map(|row| row.1).collect::<Vec<_>>(),
             ["Alpha", "Zeta", "自动保存", "autosave2"]
         );
+    }
+
+    #[test]
+    fn local_save_listing_reads_info_names_and_excludes_readonly_profiles() {
+        let root = std::env::temp_dir().join(format!("ets2modmanager-saves-{}", now_ms()));
+        let save_root = root.join("save");
+        fs::create_dir_all(&save_root).expect("create save directory");
+        for (slot_id, display_name) in [
+            ("1", "Zulu Save"),
+            ("2", "Alpha Save"),
+            ("autosave_drive", "Autosave Drive"),
+            ("autosave", "Autosave"),
+        ] {
+            let slot = save_root.join(slot_id);
+            fs::create_dir_all(&slot).expect("create slot");
+            fs::write(slot.join("game.sii"), b"game-save").expect("write game");
+            let info = format!(
+                "SiiNunit\n{{\n save_container : .save {{\n  name : \"{}\"\n }}\n}}\n",
+                escape_sii(display_name)
+            );
+            fs::write(slot.join("info.sii"), encode_scsc(info.as_bytes()).expect("encode info"))
+                .expect("write info");
+        }
+        let profile = ProfileDto {
+            id: "local:demo".into(),
+            name: "Demo".into(),
+            company: String::new(),
+            location: "local".into(),
+            folder: normalize_path(&root),
+            mod_count: 0,
+            writable: true,
+        };
+        let slots = list_local_saves(&profile);
+        assert_eq!(
+            slots.iter().map(|slot| slot.display_name.as_str()).collect::<Vec<_>>(),
+            ["Alpha Save", "Zulu Save", "Autosave", "Autosave Drive"]
+        );
+        assert_eq!(
+            slots.iter().map(|slot| slot.slot_id.as_str()).collect::<Vec<_>>(),
+            ["2", "1", "autosave", "autosave_drive"]
+        );
+
+        let readonly = ProfileDto {
+            writable: false,
+            location: "cloud".into(),
+            ..profile
+        };
+        assert!(list_local_saves(&readonly).is_empty());
+        let _ = fs::remove_dir_all(&root);
     }
 }
 
