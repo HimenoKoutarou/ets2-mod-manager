@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type ModBackend, type PresetRecord } from "./backend";
+import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type PresetRecord } from "./backend";
 import type { Language, ModRecord, ModView, Profile, SaveSlot } from "./types";
 
 export const fixtureProfiles: Profile[] = [
@@ -99,6 +99,34 @@ export const fixtureBackend: ModBackend = {
           },
         ]
       : [],
+  scanLocalization: async () => ({
+    entries: [
+      {
+        key: "city.demo",
+        value: "示例城市",
+        sourcePath: "",
+        packageName: "fixture",
+        category: "city",
+        status: "native",
+        localeKeyPresent: true,
+        defLocaleKeyPresent: true,
+        unitName: "",
+        localeKey: "city.demo",
+      },
+    ],
+    packages: 2,
+    inspected: 0,
+    cached: 2,
+    elapsedMs: 1,
+  }),
+  precheckCrash: async () => ({
+    profileId: "fixture",
+    scannedMods: 0,
+    redCount: 0,
+    yellowCount: 0,
+    issues: [],
+  }),
+  inspectBsii: async () => ({ version: 0, definitions: 0, objects: 0 }),
   scan: async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
@@ -143,6 +171,9 @@ interface ModState {
   selectedProfileId: string;
   mods: ModRecord[];
   saves: SaveSlot[];
+  localization: LocalizationScan | null;
+  diagnostics: CrashPrecheck | null;
+  secondaryPanel: "none" | "localization" | "diagnostics" | "saves";
   view: ModView;
   selectedCategory: string;
   query: string;
@@ -153,6 +184,9 @@ interface ModState {
   error: string;
   presets: Record<string, PresetSnapshot[]>;
   selectedPresetName: string;
+  setSecondaryPanel: (panel: "none" | "localization" | "diagnostics" | "saves") => void;
+  scanLocalization: () => Promise<void>;
+  runDiagnostics: () => Promise<void>;
   initialize: () => Promise<void>;
   setLanguage: (language: Language) => void;
   selectProfile: (id: string) => Promise<void>;
@@ -178,6 +212,9 @@ export const useModStore = create<ModState>((set, get) => ({
   selectedProfileId: fixtureProfiles[0]?.id ?? "",
   mods: initialMods.map((mod) => ({ ...mod })),
   saves: [],
+  localization: null,
+  diagnostics: null,
+  secondaryPanel: "none",
   view: "all",
   selectedCategory: "all",
   query: "",
@@ -188,6 +225,33 @@ export const useModStore = create<ModState>((set, get) => ({
   error: "",
   presets: {},
   selectedPresetName: "",
+  setSecondaryPanel: (secondaryPanel) => set({ secondaryPanel }),
+  scanLocalization: async () => {
+    const { selectedProfileId, language } = get();
+    if (!selectedProfileId) return;
+    set({ loading: true, error: "" });
+    try {
+      const result = await backend.scanLocalization(selectedProfileId, language === "zh_CN" ? "zh_cn" : language === "ru_RU" ? "ru_ru" : "en_us");
+      set({ localization: result, secondaryPanel: "localization" });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ loading: false });
+    }
+  },
+  runDiagnostics: async () => {
+    const { selectedProfileId } = get();
+    if (!selectedProfileId) return;
+    set({ loading: true, error: "" });
+    try {
+      const result = await backend.precheckCrash(selectedProfileId);
+      set({ diagnostics: result, secondaryPanel: "diagnostics" });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ loading: false });
+    }
+  },
   initialize: async () => {
     set({ loading: true, error: "" });
     try {
@@ -224,6 +288,9 @@ export const useModStore = create<ModState>((set, get) => ({
       set({
         mods,
         saves,
+        secondaryPanel: "none",
+        localization: null,
+        diagnostics: null,
         selectedModId: mods[0]?.id ?? null,
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",

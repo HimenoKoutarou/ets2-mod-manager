@@ -127,6 +127,13 @@ button { color: inherit; }
 .save-item-copy { min-width: 0; display: grid; gap: 3px; }
 .save-item-copy strong { overflow: hidden; color: #e6edf3; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .save-item-copy small { overflow: hidden; color: #71808d; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.panel-action { margin-top: 18px; }
+.support-list { display: grid; gap: 4px; margin-top: 14px; max-height: calc(100vh - 300px); overflow: auto; }
+.support-row { display: grid; gap: 4px; padding: 9px 8px; border-bottom: 1px solid #2a343d; }
+.support-row strong { overflow: hidden; color: #e6edf3; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.support-row span { overflow: hidden; color: #71808d; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.support-row.issue-red { border-left: 2px solid #d08770; }
+.support-row.issue-yellow { border-left: 2px solid #f0c674; }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1180px) {

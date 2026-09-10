@@ -5,6 +5,7 @@ use aes::{cipher::generic_array::GenericArray, Aes256};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use getrandom::fill as fill_random;
 use rusqlite::{params, Connection, OptionalExtension};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -18,6 +19,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::State;
+use zip::ZipArchive;
 
 const SCSC_KEY: [u8; 32] = [
     0x2A, 0x5F, 0xCB, 0x17, 0x91, 0xD2, 0x2F, 0xB6, 0x02, 0x45, 0xB3, 0xD8, 0x36, 0x9E,
@@ -34,6 +36,7 @@ struct Backend {
     paths: Paths,
     database_path: PathBuf,
     scan_cancelled: Arc<AtomicBool>,
+    localization_cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +146,10 @@ struct LocalizationEntryDto {
     package_name: String,
     category: String,
     status: String,
+    locale_key_present: bool,
+    def_locale_key_present: bool,
+    unit_name: String,
+    locale_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +160,19 @@ struct LocalizationScanDto {
     inspected: usize,
     cached: usize,
     elapsed_ms: u128,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalizationScanRequest {
+    profile_id: String,
+    target_locale: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashPrecheckRequest {
+    profile_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -182,6 +202,20 @@ struct CrashPrecheckDto {
     red_count: usize,
     yellow_count: usize,
     issues: Vec<CrashIssueDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BsiiSummaryDto {
+    version: u32,
+    definitions: u32,
+    objects: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BsiiInspectRequest {
+    path: String,
 }
 
 impl Paths {
@@ -486,7 +520,34 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                name TEXT NOT NULL,
                active_mods_json TEXT NOT NULL,
                PRIMARY KEY(profile_id, name)
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS localization_package_v2 (
+               package_path TEXT NOT NULL,
+               target_locale TEXT NOT NULL,
+               package_type TEXT NOT NULL,
+               file_size INTEGER NOT NULL,
+               modified_ms INTEGER NOT NULL,
+               scanned_at_ms INTEGER NOT NULL,
+               PRIMARY KEY(package_path, target_locale)
+             );
+             CREATE TABLE IF NOT EXISTS localization_entry_v2 (
+               package_path TEXT NOT NULL,
+               target_locale TEXT NOT NULL,
+               entry_order INTEGER NOT NULL,
+               key TEXT NOT NULL,
+               value TEXT NOT NULL,
+               source_path TEXT NOT NULL,
+               package_name TEXT NOT NULL,
+               category TEXT NOT NULL,
+               status TEXT NOT NULL,
+               locale_key_present INTEGER NOT NULL,
+               def_locale_key_present INTEGER NOT NULL,
+               unit_name TEXT NOT NULL,
+               locale_key TEXT NOT NULL,
+               PRIMARY KEY(package_path, target_locale, entry_order)
+             );
+             CREATE INDEX IF NOT EXISTS ix_localization_entry_v2_key
+               ON localization_entry_v2(target_locale, key);",
         )
         .map_err(|e| format!("initialize database failed: {e}"))?;
     Ok(connection)
@@ -716,6 +777,776 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
         removed,
         inspected: added + updated,
         elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn package_fingerprint(path: &Path) -> (String, i64, i64) {
+    if path.is_dir() {
+        let mut hash = 1469598103934665603u64;
+        let mut stack = vec![path.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(current) = stack.pop() {
+            let Ok(metadata) = fs::metadata(&current) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                if let Ok(entries) = fs::read_dir(&current) {
+                    for entry in entries.flatten() {
+                        stack.push(entry.path());
+                    }
+                }
+                continue;
+            }
+            let normalized = current
+                .strip_prefix(path)
+                .unwrap_or(&current)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !is_localization_path(&normalized) && !is_definition_path(&normalized) {
+                continue;
+            }
+            files.push((normalized, metadata));
+        }
+        files.sort_by(|left, right| left.0.cmp(&right.0));
+        for (normalized, metadata) in files {
+            for byte in normalized.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            hash ^= metadata.len();
+            hash = hash.wrapping_mul(1099511628211);
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default();
+            hash ^= modified;
+            hash = hash.wrapping_mul(1099511628211);
+        }
+        return ("directory".into(), 0, hash as i64);
+    }
+    let metadata = fs::metadata(path).ok();
+    let size = metadata.as_ref().map(|value| value.len()).unwrap_or_default() as i64;
+    let modified = metadata
+        .and_then(|value| value.modified().ok())
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_default();
+    let kind = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file")
+        .to_ascii_lowercase();
+    (kind, size, modified)
+}
+
+fn is_localization_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    (normalized.ends_with(".sii") || normalized.ends_with(".sui"))
+        && (normalized.contains("/locale/")
+            || normalized.starts_with("locale/")
+            || normalized.contains("localization")
+            || normalized.contains("translation")
+            || normalized.contains("language")
+            || normalized.contains("/local/"))
+}
+
+fn is_definition_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    (normalized.ends_with(".sii") || normalized.ends_with(".sui"))
+        && (normalized.starts_with("def/")
+            || normalized.contains("/def/")
+            || normalized.contains("/city/")
+            || normalized.contains("/country/")
+            || normalized.contains("/ferry/"))
+}
+
+fn category_for_path(path: &str) -> String {
+    let value = path.to_ascii_lowercase();
+    if value.contains("country") {
+        "country".into()
+    } else if value.contains("ferry") {
+        "ferry".into()
+    } else if value.contains("city") {
+        "city".into()
+    } else {
+        "unknown".into()
+    }
+}
+
+fn quoted_value(value: &str) -> String {
+    let trimmed = value.trim().trim_end_matches(',');
+    let Some(start) = trimmed.find('"') else {
+        return trimmed.to_string();
+    };
+    let Some(end) = trimmed[start + 1..].rfind('"') else {
+        return trimmed[start + 1..].to_string();
+    };
+    unescape_sii(&trimmed[start + 1..start + 1 + end])
+}
+
+fn parse_localization_text(
+    text: &str,
+    source_path: &str,
+    package_name: &str,
+    category: &str,
+) -> Vec<LocalizationEntryDto> {
+    let mut keys = Vec::new();
+    let mut values = Vec::new();
+    let mut scalar = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let Some((raw_key, raw_value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = quoted_value(raw_value);
+        if key.eq_ignore_ascii_case("key[]") {
+            if !value.is_empty() {
+                keys.push(value);
+            }
+        } else if key.eq_ignore_ascii_case("val[]") {
+            values.push(value);
+        } else if !key.contains("[]")
+            && !key.contains(' ')
+            && !key.eq_ignore_ascii_case("active_mods")
+            && !key.eq_ignore_ascii_case("SiiNunit")
+            && !key.eq_ignore_ascii_case("localization_db")
+        {
+            scalar.push((key.to_string(), value));
+        }
+    }
+
+    let mut output = Vec::new();
+    for (index, key) in keys.into_iter().enumerate() {
+        let value = values.get(index).cloned().unwrap_or_default();
+        output.push(LocalizationEntryDto {
+            key: key.clone(),
+            value: value.clone(),
+            source_path: source_path.to_string(),
+            package_name: package_name.to_string(),
+            category: category.to_string(),
+            status: if value.is_empty() {
+                "missing_value".into()
+            } else {
+                "native".into()
+            },
+            locale_key_present: true,
+            def_locale_key_present: true,
+            unit_name: String::new(),
+            locale_key: key,
+        });
+    }
+    for (key, value) in scalar {
+        if key.eq_ignore_ascii_case("name")
+            || key.eq_ignore_ascii_case("city_name")
+            || key.eq_ignore_ascii_case("country_name")
+            || key.eq_ignore_ascii_case("ferry_name")
+        {
+            continue;
+        }
+        output.push(LocalizationEntryDto {
+            key: key.clone(),
+            value: value.clone(),
+            source_path: source_path.to_string(),
+            package_name: package_name.to_string(),
+            category: category.to_string(),
+            status: if value.is_empty() {
+                "missing_value".into()
+            } else {
+                "native".into()
+            },
+            locale_key_present: true,
+            def_locale_key_present: true,
+            unit_name: String::new(),
+            locale_key: key,
+        });
+    }
+    output
+}
+
+fn parse_definition_text(
+    text: &str,
+    source_path: &str,
+    package_name: &str,
+    category: &str,
+) -> Vec<LocalizationEntryDto> {
+    let block = Regex::new(
+        r"(?is)(city_data|country_data|ferry_data)\s*:\s*([A-Za-z0-9_.-]+)\s*\{(.*?)\}",
+    )
+    .expect("definition regex");
+    let field = Regex::new(
+        r#"(?m)(city_name|city_name_localized|name|name_localized|ferry_name|ferry_name_localized)\s*:\s*"((?:\\.|[^"\\])*)""#,
+    )
+    .expect("definition field regex");
+    let mut output = Vec::new();
+    for unit in block.captures_iter(text) {
+        let type_name = unit.get(1).map(|value| value.as_str()).unwrap_or_default();
+        let unit_name = unit.get(2).map(|value| value.as_str()).unwrap_or_default();
+        let body = unit.get(3).map(|value| value.as_str()).unwrap_or_default();
+        let mut fields = HashMap::new();
+        for capture in field.captures_iter(body) {
+            let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
+            let value = capture.get(2).map(|value| unescape_sii(value.as_str())).unwrap_or_default();
+            fields.insert(name.to_ascii_lowercase(), value);
+        }
+        let source_field = match type_name.to_ascii_lowercase().as_str() {
+            "city_data" => "city_name",
+            "ferry_data" => "ferry_name",
+            _ => "name",
+        };
+        let localized_field = match type_name.to_ascii_lowercase().as_str() {
+            "city_data" => "city_name_localized",
+            "ferry_data" => "ferry_name_localized",
+            _ => "name_localized",
+        };
+        let source = fields
+            .get(source_field)
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| unit_name.to_string());
+        let localized = fields.get(localized_field).cloned().unwrap_or_default();
+        let wrapped = localized.starts_with("@@") && localized.ends_with("@@") && localized.len() > 4;
+        let key = if wrapped {
+            localized[2..localized.len() - 2].to_string()
+        } else {
+            source.clone()
+        };
+        if key.trim().is_empty() {
+            continue;
+        }
+        let value = if wrapped { String::new() } else { localized };
+        output.push(LocalizationEntryDto {
+            key: key.clone(),
+            value: value.clone(),
+            source_path: source_path.to_string(),
+            package_name: package_name.to_string(),
+            category: category.to_string(),
+            status: if value.is_empty() {
+                "missing_locale".into()
+            } else {
+                "native".into()
+            },
+            locale_key_present: false,
+            def_locale_key_present: fields.contains_key(localized_field),
+            unit_name: unit_name.to_string(),
+            locale_key: key,
+        });
+    }
+    output
+}
+
+fn scan_localization_directory(
+    root: &Path,
+    package_name: &str,
+    cancelled: &AtomicBool,
+) -> Vec<LocalizationEntryDto> {
+    let mut output = Vec::new();
+    let Ok(files) = fs::read_dir(root) else {
+        return output;
+    };
+    let mut stack: Vec<PathBuf> = files.flatten().map(|entry| entry.path()).collect();
+    stack.sort_by(|left, right| right.cmp(left));
+    while let Some(path) = stack.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if path.is_dir() {
+            if let Ok(entries) = fs::read_dir(&path) {
+                let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+                children.sort_by(|left, right| right.cmp(left));
+                stack.extend(children);
+            }
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !is_localization_path(&relative) && !is_definition_path(&relative) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let source_path = format!("{}::{}", root.display(), relative);
+        if is_definition_path(&relative) {
+            output.extend(parse_definition_text(
+                &text,
+                &source_path,
+                package_name,
+                &category_for_path(&relative),
+            ));
+        } else {
+            output.extend(parse_localization_text(
+                &text,
+                &source_path,
+                package_name,
+                &category_for_path(&relative),
+            ));
+        }
+    }
+    output
+}
+
+fn scan_localization_archive(
+    path: &Path,
+    locale: &str,
+    cancelled: &AtomicBool,
+) -> Vec<LocalizationEntryDto> {
+    let mut output = Vec::new();
+    let Ok(file) = fs::File::open(path) else {
+        return output;
+    };
+    let Ok(mut archive) = ZipArchive::new(file) else {
+        return output;
+    };
+    let package_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    for index in 0..archive.len() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        if entry.name().ends_with('/') {
+            continue;
+        }
+        let normalized = entry.name().replace('\\', "/");
+        let locale_match = normalized.to_ascii_lowercase().contains(
+            &format!("locale/{}/", locale.to_ascii_lowercase()),
+        );
+        if (!locale_match && !is_definition_path(&normalized))
+            || (!is_localization_path(&normalized) && !is_definition_path(&normalized))
+        {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let source_path = format!("{}::{}", path.display(), normalized);
+        if is_definition_path(&normalized) {
+            output.extend(parse_definition_text(
+                &text,
+                &source_path,
+                package_name,
+                &category_for_path(&normalized),
+            ));
+        } else {
+            output.extend(parse_localization_text(
+                &text,
+                &source_path,
+                package_name,
+                &category_for_path(&normalized),
+            ));
+        }
+    }
+    output
+}
+
+fn scan_localization_package(
+    path: &Path,
+    locale: &str,
+    cancelled: &AtomicBool,
+) -> Vec<LocalizationEntryDto> {
+    if path.is_dir() {
+        return scan_localization_directory(
+            path,
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default(),
+            cancelled,
+        );
+    }
+    scan_localization_archive(path, locale, cancelled)
+}
+
+fn load_localization_snapshot(
+    connection: &Connection,
+    path: &str,
+    locale: &str,
+    fingerprint: &(String, i64, i64),
+) -> Result<Option<Vec<LocalizationEntryDto>>, String> {
+    let metadata = connection
+        .query_row(
+            "SELECT package_type, file_size, modified_ms FROM localization_package_v2
+             WHERE package_path = ?1 AND target_locale = ?2",
+            params![path, locale],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| format!("read localization snapshot failed: {error}"))?;
+    if metadata.as_ref() != Some(fingerprint) {
+        return Ok(None);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT key, value, source_path, package_name, category, status,
+                    locale_key_present, def_locale_key_present, unit_name, locale_key
+             FROM localization_entry_v2
+             WHERE package_path = ?1 AND target_locale = ?2
+             ORDER BY entry_order",
+        )
+        .map_err(|error| format!("prepare localization snapshot failed: {error}"))?;
+    let rows = statement
+        .query_map(params![path, locale], |row| {
+            Ok(LocalizationEntryDto {
+                key: row.get(0)?,
+                value: row.get(1)?,
+                source_path: row.get(2)?,
+                package_name: row.get(3)?,
+                category: row.get(4)?,
+                status: row.get(5)?,
+                locale_key_present: row.get::<_, i64>(6)? != 0,
+                def_locale_key_present: row.get::<_, i64>(7)? != 0,
+                unit_name: row.get(8)?,
+                locale_key: row.get(9)?,
+            })
+        })
+        .map_err(|error| format!("read localization snapshot failed: {error}"))?;
+    rows.map(|row| row.map_err(|error| format!("read localization entry failed: {error}")))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn save_localization_snapshots(
+    connection: &mut Connection,
+    locale: &str,
+    current_paths: &[String],
+    snapshots: &[(String, (String, i64, i64), Vec<LocalizationEntryDto>)],
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("begin localization transaction failed: {error}"))?;
+    for (path, fingerprint, entries) in snapshots {
+        transaction
+            .execute(
+                "DELETE FROM localization_entry_v2 WHERE package_path = ?1 AND target_locale = ?2",
+                params![path, locale],
+            )
+            .map_err(|error| format!("clear localization entries failed: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO localization_package_v2
+                 (package_path, target_locale, package_type, file_size, modified_ms, scanned_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(package_path, target_locale) DO UPDATE SET
+                   package_type=excluded.package_type, file_size=excluded.file_size,
+                   modified_ms=excluded.modified_ms, scanned_at_ms=excluded.scanned_at_ms",
+                params![path, locale, fingerprint.0, fingerprint.1, fingerprint.2, now_ms()],
+            )
+            .map_err(|error| format!("write localization package snapshot failed: {error}"))?;
+        for (index, entry) in entries.iter().enumerate() {
+            transaction
+                .execute(
+                    "INSERT INTO localization_entry_v2
+                     (package_path, target_locale, entry_order, key, value, source_path,
+                      package_name, category, status, locale_key_present,
+                      def_locale_key_present, unit_name, locale_key)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        path,
+                        locale,
+                        index as i64,
+                        entry.key,
+                        entry.value,
+                        entry.source_path,
+                        entry.package_name,
+                        entry.category,
+                        entry.status,
+                        if entry.locale_key_present { 1 } else { 0 },
+                        if entry.def_locale_key_present { 1 } else { 0 },
+                        entry.unit_name,
+                        entry.locale_key
+                    ],
+                )
+                .map_err(|error| format!("write localization entry snapshot failed: {error}"))?;
+        }
+    }
+    let current_paths: HashSet<&str> = current_paths.iter().map(String::as_str).collect();
+    let mut stale = Vec::new();
+    {
+        let mut statement = transaction
+            .prepare(
+                "SELECT package_path FROM localization_package_v2
+                 WHERE target_locale = ?1",
+            )
+            .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
+        let rows = statement
+            .query_map(params![locale], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
+        for row in rows {
+            let path = row.map_err(|error| format!("read stale localization snapshot failed: {error}"))?;
+            if !current_paths.contains(path.as_str()) {
+                stale.push(path);
+            }
+        }
+    }
+    for path in stale {
+        transaction
+            .execute(
+                "DELETE FROM localization_entry_v2 WHERE package_path = ?1 AND target_locale = ?2",
+                params![path, locale],
+            )
+            .map_err(|error| format!("remove stale localization entries failed: {error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM localization_package_v2 WHERE package_path = ?1 AND target_locale = ?2",
+                params![path, locale],
+            )
+            .map_err(|error| format!("remove stale localization snapshot failed: {error}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("commit localization snapshots failed: {error}"))?;
+    Ok(())
+}
+
+fn merge_localization_entries(
+    packages: impl IntoIterator<Item = Vec<LocalizationEntryDto>>,
+) -> Vec<LocalizationEntryDto> {
+    let mut result: Vec<LocalizationEntryDto> = Vec::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for entries in packages {
+        for entry in entries {
+            let merge_key = entry.key.to_ascii_lowercase();
+            if let Some(index) = positions.get(&merge_key).copied() {
+                if result[index].value.is_empty() && !entry.value.is_empty() {
+                    result[index] = entry;
+                }
+            } else {
+                positions.insert(merge_key, result.len());
+                result.push(entry);
+            }
+        }
+    }
+    result
+}
+
+fn local_packages_for_profile(
+    paths: &Paths,
+    connection: &mut Connection,
+    profile: &ProfileDto,
+    cancelled: &AtomicBool,
+) -> Result<Vec<ModDto>, String> {
+    let mut mods = load_cached(connection)?;
+    if mods.is_empty() {
+        let mut discovered = discover_packages(Some(&paths.mod_root), false, cancelled);
+        discovered.extend(discover_packages(paths.workshop_root.as_deref(), true, cancelled));
+        if !discovered.is_empty() {
+            sync_index(connection, &discovered)?;
+            mods = load_cached(connection)?;
+        }
+    }
+    let active = active_for_profile(profile)?;
+    apply_enabled(&mut mods, &active);
+    Ok(mods.into_iter().filter(|row| row.enabled && !row.path.is_empty()).collect())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn localization_scan(
+    request: LocalizationScanRequest,
+    state: State<'_, BackendState>,
+) -> Result<LocalizationScanDto, String> {
+    let started = std::time::Instant::now();
+    let locale = request
+        .target_locale
+        .unwrap_or_else(|| "zh_cn".into())
+        .trim()
+        .to_ascii_lowercase();
+    let locale_bytes = locale.as_bytes();
+    if locale_bytes.len() != 5
+        || locale_bytes[2] != b'_'
+        || !locale_bytes[..2].iter().all(|value| value.is_ascii_lowercase())
+        || !locale_bytes[3..].iter().all(|value| value.is_ascii_lowercase())
+    {
+        return Err("Target locale must use the xx_yy format.".into());
+    }
+    let (paths, database_path, cancelled) = {
+        let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+        (
+            backend.paths.clone(),
+            backend.database_path.clone(),
+            Arc::clone(&backend.localization_cancelled),
+        )
+    };
+    cancelled.store(false, Ordering::Relaxed);
+    let profile = find_profile(&paths, &request.profile_id).ok_or("Profile not found.")?;
+    let mut connection = open_db(&database_path)?;
+    let packages = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
+    let mut snapshots = Vec::new();
+    let mut all_entries = Vec::new();
+    let mut inspected = 0usize;
+    let mut cached = 0usize;
+    for package in &packages {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Localization scan cancelled.".into());
+        }
+        let fingerprint = package_fingerprint(Path::new(&package.path));
+        if let Some(entries) =
+            load_localization_snapshot(&connection, &package.path, &locale, &fingerprint)?
+        {
+            cached += 1;
+            all_entries.push(entries);
+            continue;
+        }
+        inspected += 1;
+        let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled);
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Localization scan cancelled.".into());
+        }
+        snapshots.push((package.path.clone(), fingerprint, entries.clone()));
+        all_entries.push(entries);
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Localization scan cancelled.".into());
+    }
+    let current_paths = packages.iter().map(|package| package.path.clone()).collect::<Vec<_>>();
+    save_localization_snapshots(&mut connection, &locale, &current_paths, &snapshots)?;
+    let entries = merge_localization_entries(all_entries);
+    Ok(LocalizationScanDto {
+        packages: packages.len(),
+        inspected,
+        cached,
+        elapsed_ms: started.elapsed().as_millis(),
+        entries,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn localization_cancel(state: State<'_, BackendState>) -> Result<(), String> {
+    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    backend.localization_cancelled.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+fn crash_pair(paths: &Paths) -> CrashPairDto {
+    let documents = paths
+        .game_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let candidates = [
+        ("ets2", documents.join("Euro Truck Simulator 2")),
+        ("ats", documents.join("American Truck Simulator")),
+    ];
+    let mut latest = None;
+    for (source, root) in candidates {
+        let crash = root.join("game.crash.txt");
+        if !crash.is_file() {
+            continue;
+        }
+        let modified = fs::metadata(&crash)
+            .and_then(|value| value.modified())
+            .ok()
+            .unwrap_or(UNIX_EPOCH);
+        if latest.as_ref().is_none_or(|(_, current, _)| modified > *current) {
+            latest = Some((source, modified, crash));
+        }
+    }
+    if let Some((source, _, crash)) = latest {
+        let log = crash
+            .parent()
+            .map(|root| root.join("game.log.txt"))
+            .filter(|path| path.is_file());
+        return CrashPairDto {
+            crash_path: Some(normalize_path(&crash)),
+            log_path: log.map(|path| normalize_path(&path)),
+            source: Some(source.into()),
+        };
+    }
+    CrashPairDto {
+        crash_path: None,
+        log_path: None,
+        source: None,
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn crash_discover(state: State<'_, BackendState>) -> Result<CrashPairDto, String> {
+    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    Ok(crash_pair(&backend.paths))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_inspect_bsii(request: BsiiInspectRequest) -> Result<BsiiSummaryDto, String> {
+    let path = PathBuf::from(request.path);
+    if !path.is_file() {
+        return Err(format!("Save file was not found: {}", path.display()));
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("read BSII file failed: {error}"))?;
+    let summary = bsii_core::parse_summary(&bytes).map_err(|error| format!("parse BSII failed: {error}"))?;
+    Ok(BsiiSummaryDto {
+        version: summary.version,
+        definitions: summary.definitions,
+        objects: summary.objects,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn crash_precheck(
+    request: CrashPrecheckRequest,
+    state: State<'_, BackendState>,
+) -> Result<CrashPrecheckDto, String> {
+    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let profile = find_profile(&backend.paths, &request.profile_id).ok_or("Profile not found.")?;
+    let active = active_for_profile(&profile)?;
+    let db = open_db(&backend.database_path)?;
+    let mods = dedupe_mods(load_cached(&db)?);
+    let mut aliases = HashMap::new();
+    for row in &mods {
+        for value in [&row.id, &row.package_name, &row.display_name] {
+            for alias in package_aliases(value) {
+                aliases.entry(alias).or_insert(row);
+            }
+        }
+    }
+    let mut issues = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, package) in active.iter().rev().enumerate() {
+        let canonical = canonical_package(package);
+        let matched = package_aliases(package)
+            .into_iter()
+            .find_map(|alias| aliases.get(&alias).copied());
+        if !canonical.is_empty() && !seen.insert(canonical) {
+            issues.push(CrashIssueDto {
+                mod_id: package.clone(),
+                display_name: matched.map(|row| row.display_name.clone()).unwrap_or_else(|| package.clone()),
+                severity: "yellow".into(),
+                code: "DUPLICATE_ACTIVE_MOD".into(),
+                evidence: "The profile lists this mod more than once.".into(),
+                priority_index: Some(index),
+            });
+        } else if matched.is_none() {
+            issues.push(CrashIssueDto {
+                mod_id: package.clone(),
+                display_name: package.clone(),
+                severity: "red".into(),
+                code: "MISSING_PACKAGE".into(),
+                evidence: "The active profile entry was not found in the scanned package catalog.".into(),
+                priority_index: Some(index),
+            });
+        }
+    }
+    Ok(CrashPrecheckDto {
+        profile_id: profile.id,
+        scanned_mods: active.len(),
+        red_count: issues.iter().filter(|issue| issue.severity == "red").count(),
+        yellow_count: issues.iter().filter(|issue| issue.severity == "yellow").count(),
+        issues,
     })
 }
 
@@ -1367,6 +2198,67 @@ mod tests {
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path, first.path);
     }
+
+    #[test]
+    fn localization_parser_reads_key_value_arrays() {
+        let entries = parse_localization_text(
+            "SiiNunit\n{\n localization_db : .x {\n  key[]: \"city.demo\"\n  val[]: \"Demo City\"\n }\n}\n",
+            "mod.scs::locale/en_us/localization.sii",
+            "mod.scs",
+            "city",
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "city.demo");
+        assert_eq!(entries[0].value, "Demo City");
+        assert_eq!(entries[0].status, "native");
+    }
+
+    #[test]
+    fn localization_merge_keeps_first_priority_value() {
+        let high = LocalizationEntryDto {
+            key: "city.demo".into(),
+            value: String::new(),
+            source_path: "high".into(),
+            package_name: "high".into(),
+            category: "city".into(),
+            status: "missing_value".into(),
+            locale_key_present: true,
+            def_locale_key_present: true,
+            unit_name: String::new(),
+            locale_key: "city.demo".into(),
+        };
+        let low = LocalizationEntryDto {
+            key: "city.demo".into(),
+            value: "低优先级翻译".into(),
+            source_path: "low".into(),
+            package_name: "low".into(),
+            category: "city".into(),
+            status: "native".into(),
+            locale_key_present: true,
+            def_locale_key_present: true,
+            unit_name: String::new(),
+            locale_key: "city.demo".into(),
+        };
+        let merged = merge_localization_entries(vec![vec![high], vec![low]]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].value, "低优先级翻译");
+        assert_eq!(merged[0].package_name, "low");
+    }
+
+    #[test]
+    fn local_save_order_puts_autosave_after_named_saves() {
+        let mut rows = vec![
+            (1u8, "自动保存".to_string()),
+            (0u8, "Zeta".to_string()),
+            (0u8, "Alpha".to_string()),
+            (2u8, "autosave2".to_string()),
+        ];
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        assert_eq!(
+            rows.into_iter().map(|row| row.1).collect::<Vec<_>>(),
+            ["Alpha", "Zeta", "自动保存", "autosave2"]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1390,7 +2282,34 @@ fn open_db_schema(connection: &Connection) -> Result<(), String> {
                name TEXT NOT NULL,
                active_mods_json TEXT NOT NULL,
                PRIMARY KEY(profile_id, name)
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS localization_package_v2 (
+               package_path TEXT NOT NULL,
+               target_locale TEXT NOT NULL,
+               package_type TEXT NOT NULL,
+               file_size INTEGER NOT NULL,
+               modified_ms INTEGER NOT NULL,
+               scanned_at_ms INTEGER NOT NULL,
+               PRIMARY KEY(package_path, target_locale)
+             );
+             CREATE TABLE IF NOT EXISTS localization_entry_v2 (
+               package_path TEXT NOT NULL,
+               target_locale TEXT NOT NULL,
+               entry_order INTEGER NOT NULL,
+               key TEXT NOT NULL,
+               value TEXT NOT NULL,
+               source_path TEXT NOT NULL,
+               package_name TEXT NOT NULL,
+               category TEXT NOT NULL,
+               status TEXT NOT NULL,
+               locale_key_present INTEGER NOT NULL,
+               def_locale_key_present INTEGER NOT NULL,
+               unit_name TEXT NOT NULL,
+               locale_key TEXT NOT NULL,
+               PRIMARY KEY(package_path, target_locale, entry_order)
+             );
+             CREATE INDEX IF NOT EXISTS ix_localization_entry_v2_key
+               ON localization_entry_v2(target_locale, key);",
         )
         .map_err(|e| format!("initialize database failed: {e}"))
 }
@@ -1400,11 +2319,12 @@ pub fn run() {
     let paths = Paths::detect();
     let database_path = paths.game_root.join("ets2modmanager.db");
     tauri::Builder::default()
-        .manage(BackendState {
+            .manage(BackendState {
             inner: Arc::new(Mutex::new(Backend {
                 paths,
                 database_path,
                 scan_cancelled: Arc::new(AtomicBool::new(false)),
+                localization_cancelled: Arc::new(AtomicBool::new(false)),
             })),
         })
         .invoke_handler(tauri::generate_handler![
@@ -1421,7 +2341,12 @@ pub fn run() {
             preset_load,
             preset_delete,
             save_list_local,
-            game_launch
+            game_launch,
+            localization_scan,
+            localization_cancel,
+            crash_discover,
+            crash_precheck,
+            save_inspect_bsii
         ])
         .run(tauri::generate_context!())
         .expect("error while running ETS2 Mod Manager");

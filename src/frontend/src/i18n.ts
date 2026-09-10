@@ -51,6 +51,9 @@ const copy: Record<Language, UiCopy> = {
     noSaves: "没有可用的本地存档",
     saveUpdated: "最后修改",
     autosave: "自动保存",
+    entriesSummary: (entries, cached, scanned) => `${entries} 条词条 · ${cached} 个缓存 · ${scanned} 个扫描`,
+    issueSummary: (red, yellow) => `${red} 个严重 · ${yellow} 个警告`,
+    noneFound: "暂无结果",
   },
   en_US: {
     appTitle: "ETS2 Mod Manager",
@@ -102,6 +105,9 @@ const copy: Record<Language, UiCopy> = {
     noSaves: "No local saves found",
     saveUpdated: "Modified",
     autosave: "Autosave",
+    entriesSummary: (entries, cached, scanned) => `${entries} entries · ${cached} cached · ${scanned} scanned`,
+    issueSummary: (red, yellow) => `${red} critical · ${yellow} warnings`,
+    noneFound: "No results",
   },
   ru_RU: {
     appTitle: "ETS2 Mod Manager",
@@ -153,6 +159,9 @@ const copy: Record<Language, UiCopy> = {
     noSaves: "Локальные сохранения не найдены",
     saveUpdated: "Изменено",
     autosave: "Автосохранение",
+    entriesSummary: (entries, cached, scanned) => `Записей: ${entries} · кэш: ${cached} · сканировано: ${scanned}`,
+    issueSummary: (red, yellow) => `Критических: ${red} · предупреждений: ${yellow}`,
+    noneFound: "Результатов нет",
   },
 };
 

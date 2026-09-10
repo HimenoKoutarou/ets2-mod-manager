@@ -27,12 +27,16 @@ function App() {
     selectedProfileId,
     mods,
     saves,
+    localization,
+    diagnostics,
+    secondaryPanel,
     view,
     selectedCategory,
     query,
     selectedModId,
     dirty,
     scanning,
+    loading,
     presets,
     selectedPresetName,
     setLanguage,
@@ -51,6 +55,9 @@ function App() {
     savePreset,
     selectPreset,
     loadPreset,
+    setSecondaryPanel,
+    scanLocalization,
+    runDiagnostics,
     initialize,
     error,
   } = useModStore();
@@ -58,7 +65,6 @@ function App() {
     void initialize();
   }, []);
   const [presetName, setPresetName] = useState("");
-  const [showSaves, setShowSaves] = useState(false);
   const text = getCopy(language);
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
     id: "",
@@ -165,9 +171,13 @@ function App() {
           </section>
           <section className="sidebar-secondary">
             <div className="section-heading"><span>{text.secondary}</span></div>
-            <button className="secondary-item" disabled><Sparkles size={15} />{text.localization}</button>
-            <button className="secondary-item" disabled><LayoutGrid size={15} />{text.diagnostics}</button>
-            <button className={`secondary-item ${showSaves ? "is-selected" : ""}`} onClick={() => setShowSaves((value) => !value)}>
+            <button className={`secondary-item ${secondaryPanel === "localization" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("localization"); void scanLocalization(); }}>
+              <Sparkles size={15} />{text.localization}<span className="secondary-count">{localization?.entries.length ?? 0}</span>
+            </button>
+            <button className={`secondary-item ${secondaryPanel === "diagnostics" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("diagnostics"); void runDiagnostics(); }}>
+              <LayoutGrid size={15} />{text.diagnostics}<span className="secondary-count">{diagnostics?.redCount ?? 0}</span>
+            </button>
+            <button className={`secondary-item ${secondaryPanel === "saves" ? "is-selected" : ""}`} onClick={() => setSecondaryPanel(secondaryPanel === "saves" ? "none" : "saves")}>
               <FolderOpen size={15} />{text.saves}<span className="secondary-count">{saves.length}</span>
             </button>
             <button className="secondary-item" disabled><Wrench size={15} />{text.tools}</button>
@@ -242,7 +252,7 @@ function App() {
         </section>
 
         <aside className="details-panel">
-          {showSaves ? (
+          {secondaryPanel === "saves" ? (
             <div className="save-panel">
               <div className="save-panel-heading">
                 <div>
@@ -273,6 +283,46 @@ function App() {
                   ))}
                 </div>
               )}
+            </div>
+          ) : secondaryPanel === "localization" ? (
+            <div className="save-panel">
+              <div className="save-panel-heading">
+                <div>
+                  <div className="detail-title">{text.localization}</div>
+                  <div className="detail-package">{localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</div>
+                </div>
+                <Sparkles size={18} />
+              </div>
+              <button className="button button-small panel-action" onClick={() => { void scanLocalization(); }} disabled={loading}>{text.scan}</button>
+              {localization?.entries.length ? (
+                <div className="support-list">
+                  {localization.entries.slice(0, 80).map((entry) => (
+                    <div className="support-row" key={`${entry.packageName}:${entry.key}`}>
+                      <strong>{entry.key}</strong><span>{entry.value || "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="detail-empty compact"><Sparkles size={24} /><span>{text.noneFound}</span></div>}
+            </div>
+          ) : secondaryPanel === "diagnostics" ? (
+            <div className="save-panel">
+              <div className="save-panel-heading">
+                <div>
+                  <div className="detail-title">{text.diagnostics}</div>
+                  <div className="detail-package">{diagnostics ? text.issueSummary(diagnostics.redCount, diagnostics.yellowCount) : text.noSelection}</div>
+                </div>
+                <LayoutGrid size={18} />
+              </div>
+              <button className="button button-small panel-action" onClick={() => { void runDiagnostics(); }} disabled={loading}>{text.scan}</button>
+              {diagnostics?.issues.length ? (
+                <div className="support-list">
+                  {diagnostics.issues.map((issue) => (
+                    <div className={`support-row issue-${issue.severity}`} key={`${issue.code}:${issue.modId}:${issue.priorityIndex ?? 0}`}>
+                      <strong>{issue.displayName}</strong><span>{issue.code}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="detail-empty compact"><LayoutGrid size={24} /><span>{text.noneFound}</span></div>}
             </div>
           ) : selectedMod ? (
             <>

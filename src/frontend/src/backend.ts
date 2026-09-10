@@ -15,6 +15,50 @@ export interface PresetRecord {
   activeMods: string[];
 }
 
+export interface LocalizationEntry {
+  key: string;
+  value: string;
+  sourcePath: string;
+  packageName: string;
+  category: string;
+  status: string;
+  localeKeyPresent: boolean;
+  defLocaleKeyPresent: boolean;
+  unitName: string;
+  localeKey: string;
+}
+
+export interface LocalizationScan {
+  entries: LocalizationEntry[];
+  packages: number;
+  inspected: number;
+  cached: number;
+  elapsedMs: number;
+}
+
+export interface CrashIssue {
+  modId: string;
+  displayName: string;
+  severity: string;
+  code: string;
+  evidence: string;
+  priorityIndex?: number;
+}
+
+export interface CrashPrecheck {
+  profileId: string;
+  scannedMods: number;
+  redCount: number;
+  yellowCount: number;
+  issues: CrashIssue[];
+}
+
+export interface BsiiSummary {
+  version: number;
+  definitions: number;
+  objects: number;
+}
+
 interface SaveSlotWire {
   profileId: string;
   slotId: string;
@@ -91,6 +135,9 @@ export interface ModBackend {
   listProfiles(): Promise<Profile[]>;
   listMods(profileId: string): Promise<ModRecord[]>;
   listSaves(profileId: string): Promise<SaveSlot[]>;
+  scanLocalization(profileId: string, targetLocale: string): Promise<LocalizationScan>;
+  precheckCrash(profileId: string): Promise<CrashPrecheck>;
+  inspectBsii(path: string): Promise<BsiiSummary>;
   scan(): Promise<ScanSummary>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
   launchGame(): Promise<void>;
@@ -120,6 +167,19 @@ const tauriBackend: ModBackend = {
       lastModifiedMs: row.lastModifiedMs,
       profileLocation: row.profileLocation === "local" ? "local" : "readonly",
     }));
+  },
+  scanLocalization(profileId, targetLocale) {
+    return invoke<LocalizationScan>("localization_scan", {
+      request: { profileId, targetLocale },
+    });
+  },
+  precheckCrash(profileId) {
+    return invoke<CrashPrecheck>("crash_precheck", {
+      request: { profileId },
+    });
+  },
+  inspectBsii(path) {
+    return invoke<BsiiSummary>("save_inspect_bsii", { request: { path } });
   },
   scan() {
     return invoke<ScanSummary>("mod_scan");

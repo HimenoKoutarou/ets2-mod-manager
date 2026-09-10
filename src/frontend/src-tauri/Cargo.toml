@@ -20,7 +20,10 @@ aes = "0.8"
 flate2 = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 archive_core = { path = "../../core/rust/archive_core" }
+bsii_core = { path = "../../core/rust/bsii_core" }
 getrandom = "0.3"
+zip = "2"
+regex = "1"
 
 [features]
 default = ["custom-protocol"]

@@ -88,4 +88,7 @@ export interface UiCopy {
   noSaves: string;
   saveUpdated: string;
   autosave: string;
+  entriesSummary: (entries: number, cached: number, scanned: number) => string;
+  issueSummary: (red: number, yellow: number) => string;
+  noneFound: string;
 }
