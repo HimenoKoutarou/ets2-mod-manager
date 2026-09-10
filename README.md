@@ -145,6 +145,9 @@ src/
 # 构建并启动 Tauri 客户端
 build-tauri.bat
 start.bat
+
+# 运行 Tauri 后端单元测试（不启动 WebView2）
+test-tauri.bat
 ```
 
 `start.bat` 只启动 `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`。

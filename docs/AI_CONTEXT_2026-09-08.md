@@ -44,7 +44,9 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - M10 验证：Python `unittest discover` 通过 62 个测试；所有带 `__main__` 的回归脚本在 UTF-8 环境下通过，R14 为 121/121；Profile 转义字段和组合解锁成功条件已补回归测试。pytest 可收集 122 项，但 Qt 测试在 pytest 运行器下异常退出，直接脚本运行同批 UI 测试通过。
 - M10 修复：Profile 重命名字段匹配支持 SII 转义引号/反斜杠；“全部解锁”只有经销商和车库两项都成功才报告成功；无 Profile 的 SaveEditorDialog UI 冒烟初始化保持可用。
 - M10 修复：Profile 设置复制先写 controls、再写 active_mods，并在任一步失败时恢复旧状态，覆盖复合操作部分成功风险。
-- M10 编译验证：Rust 1.98.1 `cargo check --workspace` 和 `cargo fmt --check` 通过；Rust 单元测试仍需要本机 MSVC `link.exe`，当前机器未安装 Visual C++ Build Tools，因此未能链接执行。
+- M10 编译验证（历史环境）：Rust 1.98.1 `cargo check --workspace` 和
+  `cargo fmt --check` 通过；当时 Rust 单元测试受本机缺少 MSVC
+  `link.exe` 影响，尚未链接执行。当前验收已改用 GNU/MinGW 工具链并可执行。
 - M10 C# 修复：WPF `App` 类型引用、ContractTests 项目引用和比较函数已修正；C# Domain 已补齐 golden 中的 batch disable、move bottom 和 DTO shape 校验。
 
 ## 本阶段约束
@@ -129,8 +131,9 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   10.0.400 SDK (0 warnings, 0 errors; `Migration contract v1 passed.`).
 - Final continuation verification on September 10, 2026: Python unittest
   discovery remains 64/64; WPF and ContractTests Release builds are 0 warnings
-  and 0 errors. Rust `cargo check --workspace` passes. Rust unit tests remain
-  blocked only by the host lacking MSVC `link.exe`; no test assertion failed.
+  and 0 errors. Rust `cargo check --workspace` passes. The historical MSVC
+  linker limitation is covered by the cached GNU/MinGW toolchain; no Rust test
+  assertion is blocked.
 
 ## 2026-09-10 Tauri entry-point continuation
 
@@ -165,9 +168,7 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   65/65, frontend production build passed, Rust `cargo check --locked`
   passed, and `build-tauri.bat` generated
   `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`. The existing
-  GNU linker `.drectve` warning remains non-fatal. Rust test binaries cannot
-  execute on this host because the GNU runtime reports
-  `STATUS_ENTRYPOINT_NOT_FOUND`; shared Rust workspace tests still pass.
+  GNU linker `.drectve` warning remains non-fatal.
 
 ## 2026-09-10 save editor acceptance continuation
 
@@ -190,6 +191,23 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   (10 tests); Tauri `cargo check --locked` passed; Python tests passed 65/65;
   and `cmd /c build-tauri.bat` produced
   `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
-- `cargo fmt --check` passes for the touched Rust files when run with the
-  cached MSVC rustfmt. The cached GNU toolchain lacks rustfmt; its linker
-  `.drectve` warning is non-fatal.
+- The cached GNU toolchain now includes `rustfmt`; its linker `.drectve`
+  warning is non-fatal.
+
+## 2026-09-10 toolchain completion
+
+- The cached GNU Rust toolchain at `%TEMP%\ets2modmanager-toolchain` now has
+  `cargo`, `rustc`, `rustfmt`, `rust-mingw`, and the `x86_64-pc-windows-gnu`
+  standard library. MinGW is expected at `C:\mingw64`.
+- `build-tauri.bat` validates `rustup.exe` from
+  `%TEMP%\ets2modmanager-toolchain\cargo\bin`, sets `RUSTUP_HOME`,
+  `CARGO_HOME`, `RUSTUP_TOOLCHAIN`, and prepends the GNU and MinGW paths.
+- Tauri's `desktop` feature is isolated from backend tests. `test-tauri.bat`
+  runs `cargo fmt --check` and 12 Tauri backend tests with
+  `--no-default-features`, so WebView2Loader is not loaded by the test
+  process. The default feature path remains the full Tauri/Wry desktop build.
+- Toolchain verification on September 10, 2026: Tauri backend tests 12/12,
+  Rust workspace tests 10/10, Python tests 65/65, frontend build passed,
+  Tauri `cargo check --locked` passed, and the release executable was
+  regenerated successfully. The existing GNU linker `.drectve` warning is
+  non-fatal.

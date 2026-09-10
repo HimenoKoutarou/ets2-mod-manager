@@ -6,17 +6,59 @@ cd /d "%~dp0"
 echo Building ETS2 Mod Manager Tauri release...
 
 set "TOOLCHAIN_ROOT=%TEMP%\ets2modmanager-toolchain"
-if exist "%TOOLCHAIN_ROOT%\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin\rustc.exe" (
+set "RUSTUP_EXE=%TOOLCHAIN_ROOT%\cargo\bin\rustup.exe"
+set "CARGO_EXE=%TOOLCHAIN_ROOT%\cargo\bin\cargo.exe"
+set "RUSTC_EXE=%TOOLCHAIN_ROOT%\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin\rustc.exe"
+set "RUSTFMT_EXE=%TOOLCHAIN_ROOT%\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin\rustfmt.exe"
+set "MINGW_ROOT=C:\mingw64"
+
+if exist "%RUSTUP_EXE%" if exist "%CARGO_EXE%" if exist "%RUSTC_EXE%" (
   set "RUSTUP_HOME=%TOOLCHAIN_ROOT%\rustup"
   set "CARGO_HOME=%TOOLCHAIN_ROOT%\cargo"
   set "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu"
-  set "PATH=%TOOLCHAIN_ROOT%\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;%TOOLCHAIN_ROOT%\cargo\bin;C:\mingw64\bin;%PATH%"
+  set "PATH=%TOOLCHAIN_ROOT%\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;%TOOLCHAIN_ROOT%\cargo\bin;%MINGW_ROOT%\bin;%PATH%"
+  echo Rust toolchain: stable-x86_64-pc-windows-gnu
+) else (
+  where cargo >nul 2>nul
+  if errorlevel 1 (
+    echo Rust toolchain was not found. Install Rust or populate %TOOLCHAIN_ROOT%.
+    exit /b 1
+  )
+  where rustc >nul 2>nul
+  if errorlevel 1 (
+    echo rustc was not found.
+    exit /b 1
+  )
 )
 
 where npm >nul 2>nul
 if errorlevel 1 (
   echo npm was not found. Install Node.js LTS first.
   exit /b 1
+)
+
+where cargo >nul 2>nul
+if errorlevel 1 (
+  echo cargo was not found.
+  exit /b 1
+)
+where rustc >nul 2>nul
+if errorlevel 1 (
+  echo rustc was not found.
+  exit /b 1
+)
+if defined USE_CACHED_RUST if not exist "%RUSTFMT_EXE%" (
+  echo rustfmt is missing from the GNU Rust toolchain.
+  echo Run: "%RUSTUP_EXE%" component add rustfmt --toolchain %RUSTUP_TOOLCHAIN%
+  exit /b 1
+)
+if defined USE_CACHED_RUST (
+  if exist "%MINGW_ROOT%\bin\gcc.exe" (
+    echo MinGW: %MINGW_ROOT%\bin
+  ) else (
+    echo MinGW gcc was not found at %MINGW_ROOT%\bin\gcc.exe.
+    exit /b 1
+  )
 )
 
 pushd "src\frontend"

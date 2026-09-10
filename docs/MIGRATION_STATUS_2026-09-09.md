@@ -80,9 +80,9 @@ optimization remains an optional future performance slice.
   Python runtime and responds with the expected main window title.
 - Final legacy evidence on September 10, 2026: .NET Release build 0
   warnings/0 errors; migration ContractTests passed; Python regression suite
-  64/64; the Tauri frontend build passed; Rust source checks remain subject to
-  the local toolchain cache being complete. The old `build-dotnet.bat` release
-  remains reproducible for parity work.
+  64/64; the Tauri frontend build passed; Rust source checks and GNU-target
+  tests pass with the completed local toolchain cache. The old
+  `build-dotnet.bat` release remains reproducible for parity work.
 
 ## Tauri migration checkpoints
 
@@ -135,6 +135,10 @@ optimization remains an optional future performance slice.
   Rust workspace tests passed (10 tests); Tauri `cargo check --locked`
   passed; Python unittest discovery passed 65/65; and
   `cmd /c build-tauri.bat` produced the optimized release executable.
-- Rust `cargo fmt --check` is available only from the cached MSVC toolchain
-  on this host; the GNU toolchain used for release builds lacks the
-  `rustfmt` component. The GNU linker emits a non-fatal `.drectve` warning.
+- The cached GNU toolchain now includes `rustfmt`. `test-tauri.bat` runs the
+  Tauri backend unit tests with the desktop/WebView2 feature disabled, avoiding
+  the host's native WebView2 loader during logic tests. The GNU linker still
+  emits a non-fatal `.drectve` warning for the Windows target.
+- `build-dotnet.bat` now uses the same cached .NET 10 + GNU Rust + MinGW
+  environment for legacy parity builds, so the compatibility path no longer
+  selects the unavailable MSVC Rust toolchain.

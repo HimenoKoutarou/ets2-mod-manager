@@ -24,8 +24,12 @@ auxiliary feature surface is either migrated or explicitly removed.
 - Rust `cargo fmt --check`: passed for the touched Rust files.
 - Rust GNU-target workspace tests: passed, 10 tests; the existing `.drectve`
   linker warning remains non-fatal.
+- Tauri backend unit tests: passed, 12 tests, through `test-tauri.bat` with the
+  desktop/WebView2 feature disabled.
 - Python regression suite: passed, 65 tests.
 - Frontend production build: `npm run build` passed.
+- Legacy compatibility build: `build-dotnet.bat` passed with the cached .NET
+  10 SDK, GNU Rust target, and MinGW linker.
 - `start.bat`: starts only `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
 - Tauri local save workflow: local-only listing by `info.sii` display name,
   named saves before `autosave*`, numeric snapshot reads, and verified
@@ -61,6 +65,9 @@ auxiliary feature surface is either migrated or explicitly removed.
   for acceptance.
 - The Rust archive slice remains dependency-light. Proprietary archive formats
   continue through the managed external-tool adapter where required.
-- The cached GNU Rust toolchain has no `rustfmt` component and emits a
-  non-fatal `.drectve` linker warning; the touched Rust files pass `rustfmt`
-  checks through the cached MSVC toolchain.
+- The cached GNU Rust toolchain now includes `rustfmt`. Its linker emits a
+  non-fatal `.drectve` warning when building the Windows Tauri target.
+- `build-tauri.bat`, `test-tauri.bat`, and `build-dotnet.bat` share the cached
+  GNU/MinGW toolchain when it is available; the Tauri test path additionally
+  disables the desktop feature so WebView2 native loading cannot mask backend
+  test results.
