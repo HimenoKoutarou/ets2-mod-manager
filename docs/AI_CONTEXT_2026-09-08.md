@@ -97,3 +97,29 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - Do not reset or clean the dirty worktree. Generated archives, caches, and
   old Python compatibility changes remain outside the focused migration
   commits.
+
+## 2026-09-10 localization incremental-cache continuation
+
+- The .NET localization path now persists raw per-package entries in SQLite via
+  `SqliteLocalizationIndex`; the existing Mod index and localization snapshots
+  share the application database but have separate tables and responsibilities.
+- `FileLocalizationService` no longer stores resolved dictionary/Baseline/UFL
+  values in the package snapshot. It stores raw locale/definition components,
+  then reapplies the current resolution and priority merge on every scan.
+- Cache identity includes normalized package path, target locale, package type,
+  package fingerprint, and parser scan version. Directory fingerprints include
+  relative file names, sizes, and timestamps so nested add/delete/modify cases
+  invalidate correctly; archive fingerprints use file size and last-write time.
+- Package snapshots are written only after all requested packages finish reading.
+  Cancellation therefore cannot publish a partial localization cache.
+- WPF now constructs the shared localization index against `paths.DatabasePath`.
+  A cache hit reports `Using cached localization`; dictionary, Baseline, and UFL
+  changes reuse raw package data and only rerun the merge layer.
+- Contract coverage now includes unchanged cache hits, dictionary-only remerge,
+  modified package invalidation, added package inclusion, and removed package
+  exclusion. ContractTests build and run successfully with the temporary .NET
+  10.0.400 SDK (0 warnings, 0 errors; `Migration contract v1 passed.`).
+- Final continuation verification on September 10, 2026: Python unittest
+  discovery remains 64/64; WPF and ContractTests Release builds are 0 warnings
+  and 0 errors. Rust `cargo check --workspace` passes. Rust unit tests remain
+  blocked only by the host lacking MSVC `link.exe`; no test assertion failed.

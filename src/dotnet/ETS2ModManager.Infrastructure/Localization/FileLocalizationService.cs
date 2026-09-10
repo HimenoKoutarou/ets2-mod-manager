@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using ETS2ModManager.Application;
 using ETS2ModManager.Contracts;
 using ETS2ModManager.Infrastructure.Archives;
+using ETS2ModManager.Infrastructure.Indexing;
 
 namespace ETS2ModManager.Infrastructure.Localization;
 
@@ -15,6 +16,7 @@ namespace ETS2ModManager.Infrastructure.Localization;
 /// </summary>
 public sealed class FileLocalizationService : ILocalizationService
 {
+    private const int LocalizationScanVersion = 1;
     private static readonly Regex ArrayKey = new(
         "(?m)key\\[\\]\\s*:\\s*[\\\"](?<key>(?:\\\\.|[^\\\"\\\\])*)[\\\"]",
         RegexOptions.Compiled);
@@ -34,6 +36,7 @@ public sealed class FileLocalizationService : ILocalizationService
     private readonly object _sync = new();
     private readonly string _dictionaryPath;
     private readonly IExternalArchiveService _archiveService;
+    private readonly SqliteLocalizationIndex? _index;
     private Dictionary<string, string> _dictionary = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, string> _baselineDictionary = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, string> _uflDictionary = new(StringComparer.OrdinalIgnoreCase);
@@ -43,12 +46,16 @@ public sealed class FileLocalizationService : ILocalizationService
     public string TargetLocale => _targetLocale;
     public string? BaselinePackagePath => _baselinePackagePath;
 
-    public FileLocalizationService(string? dictionaryPath = null, IExternalArchiveService? archiveService = null)
+    public FileLocalizationService(
+        string? dictionaryPath = null,
+        IExternalArchiveService? archiveService = null,
+        SqliteLocalizationIndex? index = null)
     {
         _dictionaryPath = dictionaryPath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "ETS2ModManager", "l10n_dict.json");
         _archiveService = archiveService ?? new ExternalArchiveService();
+        _index = index;
         LoadDictionary();
     }
 
@@ -58,14 +65,14 @@ public sealed class FileLocalizationService : ILocalizationService
         if (!Regex.IsMatch(locale, "^[a-z]{2}_[a-z]{2}$", RegexOptions.CultureInvariant)) return false;
         _targetLocale = locale;
         if (!string.IsNullOrWhiteSpace(_baselinePackagePath))
-            _baselineDictionary = LoadLocaleDictionary(_baselinePackagePath, _targetLocale);
+            _baselineDictionary = LoadLocaleDictionaryCached(_baselinePackagePath, _targetLocale);
         return true;
     }
 
     public bool SetBaselinePackage(string path)
     {
         if (string.IsNullOrWhiteSpace(path) || (!Directory.Exists(path) && !File.Exists(path))) return false;
-        var values = LoadLocaleDictionary(path, _targetLocale);
+        var values = LoadLocaleDictionaryCached(path, _targetLocale);
         if (values.Count == 0) return false;
         _baselinePackagePath = Path.GetFullPath(path);
         _baselineDictionary = values;
@@ -83,7 +90,7 @@ public sealed class FileLocalizationService : ILocalizationService
         var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var path in paths.Where(path => !string.IsNullOrWhiteSpace(path)))
         {
-            foreach (var pair in LoadLocaleDictionary(path, _targetLocale)) merged[pair.Key] = pair.Value;
+            foreach (var pair in LoadLocaleDictionaryCached(path, _targetLocale)) merged[pair.Key] = pair.Value;
         }
         _uflDictionary = merged;
     }
@@ -214,6 +221,7 @@ public sealed class FileLocalizationService : ILocalizationService
     {
         var stopwatch = Stopwatch.StartNew();
         var packageEntries = new List<IReadOnlyList<LocalizationEntry>>();
+        var pendingSaves = new List<(string Path, (string PackageType, long FileSize, long ModifiedAtMs) Fingerprint, IReadOnlyList<LocalizationEntry> Entries)>();
         var packages = packagePaths
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .Select(Path.GetFullPath)
@@ -224,13 +232,51 @@ public sealed class FileLocalizationService : ILocalizationService
         {
             cancellationToken.ThrowIfCancellationRequested();
             var package = packages[packageIndex];
+            cancellationToken.ThrowIfCancellationRequested();
+            var fingerprint = Fingerprint(package);
+            if (_index is not null && _index.TryLoad(
+                    package,
+                    _targetLocale,
+                    fingerprint.PackageType,
+                    fingerprint.FileSize,
+                    fingerprint.ModifiedAtMs,
+                    LocalizationScanVersion,
+                    out var cachedEntries))
+            {
+                progress?.Report(new ProgressEvent("localization", "cache", packageIndex, packages.Length, package,
+                    ScanStatus.Running, $"Using cached localization: {Path.GetFileName(package)}"));
+                packageEntries.Add(cachedEntries);
+                continue;
+            }
+
             var entries = new List<LocalizationEntry>();
             progress?.Report(new ProgressEvent("localization", "scan", packageIndex, packages.Length, package,
                 ScanStatus.Running, $"Scanning localization: {Path.GetFileName(package)}"));
             if (Directory.Exists(package)) ScanDirectory(package, entries, cancellationToken, package);
             else if (File.Exists(package) && IsArchive(package)) ScanArchive(package, entries, cancellationToken);
+            pendingSaves.Add((package, fingerprint, entries));
             packageEntries.Add(entries);
         }
+
+        // Do not persist package snapshots until every package has been read.
+        // If cancellation happens during extraction, the previous complete
+        // snapshot remains intact and the next scan cannot consume a partial one.
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_index is not null)
+        {
+            foreach (var pending in pendingSaves)
+            {
+                _index.Save(
+                    pending.Path,
+                    _targetLocale,
+                    pending.Fingerprint.PackageType,
+                    pending.Fingerprint.FileSize,
+                    pending.Fingerprint.ModifiedAtMs,
+                    LocalizationScanVersion,
+                    pending.Entries);
+            }
+        }
+        _index?.RemoveExcept(_targetLocale, packages.ToHashSet(StringComparer.OrdinalIgnoreCase));
         var merged = MergeEntries(packageEntries);
         stopwatch.Stop();
         progress?.Report(new ProgressEvent("localization", "complete", packages.Length, packages.Length, "",
@@ -325,14 +371,14 @@ public sealed class FileLocalizationService : ILocalizationService
         {
             var key = keys[index];
             if (key.Length == 0) continue;
-            output.Add(Resolve(key, index < values.Length ? values[index] : string.Empty, sourcePath, packageName, true));
+            output.Add(RawEntry(key, index < values.Length ? values[index] : string.Empty, sourcePath, packageName, true));
         }
         foreach (Match match in ScalarEntry.Matches(text))
         {
             var key = Unescape(match.Groups["key"].Value);
             if (key.Length == 0 || key.Contains("[]", StringComparison.Ordinal)) continue;
             var value = Unescape(match.Groups["value"].Value);
-            output.Add(Resolve(key, value, sourcePath, packageName, true));
+            output.Add(RawEntry(key, value, sourcePath, packageName, true));
         }
     }
 
@@ -365,15 +411,7 @@ public sealed class FileLocalizationService : ILocalizationService
             var category = type switch { "country_data" => "country", "ferry_data" => "ferry", _ => "city" };
             var resolved = directValue.Length > 0
                 ? new LocalizationEntry(key, directValue, sourcePath, packageName, category, "native", false, defPresent, key, unitName, key)
-                : Resolve(key, string.Empty, sourcePath, packageName, false) with
-                {
-                    Category = category,
-                    DefLocaleKeyPresent = defPresent,
-                    UnitName = unitName,
-                    LocaleKey = key,
-                    LocaleKeyPresent = false,
-                    Status = "missing_locale",
-                };
+                : new LocalizationEntry(key, string.Empty, sourcePath, packageName, category, "missing_locale", false, defPresent, key, unitName, key);
             output.Add(resolved);
         }
     }
@@ -384,20 +422,58 @@ public sealed class FileLocalizationService : ILocalizationService
     private static bool IsWrappedLocale(string value) =>
         !string.IsNullOrWhiteSpace(value) && value.StartsWith("@@", StringComparison.Ordinal) && value.EndsWith("@@", StringComparison.Ordinal) && value.Length > 4;
 
-    private LocalizationEntry Resolve(string key, string nativeValue, string sourcePath, string packageName, bool localeKeyPresent)
+    private static LocalizationEntry RawEntry(string key, string nativeValue, string sourcePath, string packageName, bool localeKeyPresent) =>
+        new(
+            key,
+            nativeValue,
+            sourcePath,
+            packageName,
+            GuessCategory(sourcePath),
+            nativeValue.Length > 0 ? "native" : localeKeyPresent ? "missing_value" : "missing_locale",
+            localeKeyPresent,
+            true,
+            key,
+            "",
+            key);
+
+    private LocalizationEntry Resolve(
+        LocalizationEntry value,
+        LocalizationEntry? locale,
+        LocalizationEntry? definition)
     {
+        var output = value with
+        {
+            Category = definition is not null && definition.Category != "unknown"
+                ? definition.Category : value.Category,
+            LocaleKeyPresent = locale?.LocaleKeyPresent ?? value.LocaleKeyPresent,
+            DefLocaleKeyPresent = definition?.DefLocaleKeyPresent ?? value.DefLocaleKeyPresent,
+            UnitName = definition?.UnitName ?? value.UnitName,
+            LocaleKey = definition is not null && definition.LocaleKey.Length > 0
+                ? definition.LocaleKey : value.LocaleKey,
+        };
+
+        // A direct definition value historically bypasses dictionary/baseline
+        // resolution. Preserve that behavior when no locale component exists.
+        if (locale is null && definition is not null && definition.Value.Length > 0)
+            return output with { Value = definition.Value, Status = "native" };
+
+        var nativeValue = locale?.Value ?? definition?.Value ?? string.Empty;
         lock (_sync)
         {
-            if (_baselineDictionary.TryGetValue(key, out var baselineValue) && baselineValue.Length > 0)
-                return new LocalizationEntry(key, baselineValue, sourcePath, packageName, GuessCategory(sourcePath), "baseline", true, true, key);
+            if (_baselineDictionary.TryGetValue(output.Key, out var baselineValue) && baselineValue.Length > 0)
+                return output with { Value = baselineValue, Status = "baseline" };
             if (nativeValue.Length > 0)
-                return new LocalizationEntry(key, nativeValue, sourcePath, packageName, GuessCategory(sourcePath), "native", true, true, key);
-            if (_dictionary.TryGetValue(key, out var localValue) && localValue.Length > 0)
-                return new LocalizationEntry(key, localValue, sourcePath, packageName, GuessCategory(sourcePath), "local", true, true, key);
-            if (_uflDictionary.TryGetValue(key, out var uflValue) && uflValue.Length > 0)
-                return new LocalizationEntry(key, uflValue, sourcePath, packageName, GuessCategory(sourcePath), "ufl", true, true, key);
+                return output with { Value = nativeValue, Status = "native" };
+            if (_dictionary.TryGetValue(output.Key, out var localValue) && localValue.Length > 0)
+                return output with { Value = localValue, Status = "local" };
+            if (_uflDictionary.TryGetValue(output.Key, out var uflValue) && uflValue.Length > 0)
+                return output with { Value = uflValue, Status = "ufl" };
         }
-        return new LocalizationEntry(key, string.Empty, sourcePath, packageName, GuessCategory(sourcePath), localeKeyPresent ? "missing_value" : "missing_locale", localeKeyPresent, true, key);
+        return output with
+        {
+            Value = string.Empty,
+            Status = output.LocaleKeyPresent ? "missing_value" : "missing_locale",
+        };
     }
 
     private Dictionary<string, string> LoadLocaleDictionary(string path, string locale)
@@ -463,7 +539,31 @@ public sealed class FileLocalizationService : ILocalizationService
         return values;
     }
 
-    private static IReadOnlyList<LocalizationEntry> MergeEntries(
+    private Dictionary<string, string> LoadLocaleDictionaryCached(string path, string locale)
+    {
+        path = Path.GetFullPath(path);
+        if (_index is not null)
+        {
+            var fingerprint = Fingerprint(path);
+            if (_index.TryLoad(
+                    path,
+                    locale,
+                    fingerprint.PackageType,
+                    fingerprint.FileSize,
+                    fingerprint.ModifiedAtMs,
+                    LocalizationScanVersion,
+                    out var entries))
+            {
+                var cached = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var entry in entries.Where(entry => entry.UnitName.Length == 0))
+                    cached[entry.Key] = entry.Value;
+                return cached;
+            }
+        }
+        return LoadLocaleDictionary(path, locale);
+    }
+
+    private IReadOnlyList<LocalizationEntry> MergeEntries(
         IReadOnlyList<IReadOnlyList<LocalizationEntry>> packages)
     {
         var merged = new Dictionary<string, LocalizationParts>(StringComparer.OrdinalIgnoreCase);
@@ -499,18 +599,61 @@ public sealed class FileLocalizationService : ILocalizationService
             var value = parts.Locale ?? parts.Definition;
             if (value is null) continue;
             var definition = parts.Definition;
-            result.Add(value with
-            {
-                Category = definition is not null && definition.Category != "unknown"
-                    ? definition.Category : value.Category,
-                LocaleKeyPresent = parts.Locale?.LocaleKeyPresent ?? value.LocaleKeyPresent,
-                DefLocaleKeyPresent = definition?.DefLocaleKeyPresent ?? value.DefLocaleKeyPresent,
-                UnitName = definition?.UnitName ?? value.UnitName,
-                LocaleKey = definition is not null && definition.LocaleKey.Length > 0
-                    ? definition.LocaleKey : value.LocaleKey,
-            });
+            result.Add(Resolve(value, parts.Locale, definition));
         }
         return result;
+    }
+
+    private static (string PackageType, long FileSize, long ModifiedAtMs) Fingerprint(string package)
+    {
+        if (Directory.Exists(package))
+        {
+            var hash = 1469598103934665603UL;
+            Mix(ref hash, package);
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(package, "*", SearchOption.AllDirectories)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+                {
+                    var normalized = file.Replace('\\', '/');
+                    if (!IsLocalizationPath(normalized) && !IsDefinitionPath(normalized)) continue;
+                    var info = new FileInfo(file);
+                    Mix(ref hash, Path.GetRelativePath(package, file).Replace('\\', '/'));
+                    MixValue(ref hash, (ulong)info.Length);
+                    MixValue(ref hash, (ulong)info.LastWriteTimeUtc.Ticks);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return ("directory", 0, unchecked((long)hash));
+        }
+
+        if (File.Exists(package))
+        {
+            var info = new FileInfo(package);
+            var packageType = IsArchive(package) ? Path.GetExtension(package).TrimStart('.').ToLowerInvariant() : "file";
+            return (packageType, info.Length, new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds());
+        }
+
+        return ("missing", 0, 0);
+
+        static void Mix(ref ulong hash, string value)
+        {
+            foreach (var character in value)
+            {
+                hash ^= character;
+                hash *= 1099511628211UL;
+            }
+        }
+
+        static void MixValue(ref ulong hash, ulong value)
+        {
+            for (var index = 0; index < sizeof(ulong); index++)
+            {
+                hash ^= (byte)(value >> (index * 8));
+                hash *= 1099511628211UL;
+            }
+        }
     }
 
     private sealed class LocalizationParts

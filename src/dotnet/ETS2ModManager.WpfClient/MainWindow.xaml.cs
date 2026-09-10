@@ -35,12 +35,13 @@ public partial class MainWindow : Window
         var decryptor = Path.Combine(AppContext.BaseDirectory, "assets", "bin", "SII_Decrypt.exe");
         var profiles = new FileProfileRepository(paths.ProfilesDirectory, paths.SteamProfilesDirectory, paths.SteamCloudDirectory, backup, decryptor);
         var index = new SqliteModIndex(paths.DatabasePath);
+        var localizationIndex = new SqliteLocalizationIndex(paths.DatabasePath);
         var application = new ProfileApplicationService(profiles, new WindowsGameState(), backup);
         var gameState = new WindowsGameState();
         var save = new SaveApplicationService(new SaveEditorService(backup), gameState);
         var crash = new CrashApplicationService(new CrashDiagnosisService());
         var archiveAdapter = new ExternalArchiveService(Path.Combine(AppContext.BaseDirectory, "assets", "tools"));
-        var localization = new LocalizationApplicationService(new FileLocalizationService(null, archiveAdapter));
+        var localization = new LocalizationApplicationService(new FileLocalizationService(null, archiveAdapter, localizationIndex));
         var links = new LinkMigrationApplicationService(new LinkMigrationService());
         var updates = new UpdateApplicationService(new GitHubUpdateService());
         var launcher = new GameLaunchApplicationService(new WindowsGameLauncherService());

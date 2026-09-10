@@ -324,15 +324,53 @@ static async Task RunAdapterContractsAsync()
         File.WriteAllText(Path.Combine(l10nLocale, "localization.sii"),
             "SiiNunit\n{\nlocalization_db : .localization\n{\n key[]: \"city.berlin\"\n val[]: \"柏林\"\n key[]: \"city.empty\"\n val[]: \"\"\n}\n}\n");
         var dictPath = Path.Combine(root, "l10n_dict.json");
-        var l10n = new FileLocalizationService(dictPath);
+        var l10nIndex = new SqliteLocalizationIndex(Path.Combine(root, "cache", "localization.db"));
+        var l10n = new FileLocalizationService(dictPath, null, l10nIndex);
         var l10nScan = await l10n.ScanAsync([l10nPackage], null, CancellationToken.None);
         if (l10nScan.Entries.Count != 2 || l10nScan.Entries[0].Status != "native" || l10nScan.Entries[1].Status != "missing_value")
             throw new InvalidOperationException("Localization array scan contract failed.");
+        var localizationProgress = new List<string>();
+        var cachedL10nScan = await l10n.ScanAsync(
+            [l10nPackage],
+            new ImmediateProgress<ProgressEvent>(eventValue => localizationProgress.Add(eventValue.Message)),
+            CancellationToken.None);
+        if (cachedL10nScan.Entries.Count != 2 || !localizationProgress.Any(message => message.Contains("Using cached localization", StringComparison.Ordinal)))
+            throw new InvalidOperationException("Localization unchanged scan did not reuse cache.");
         File.WriteAllText(Path.Combine(root, "custom.csv"), "city.empty,空城市\n");
         var imported = l10n.ImportDictionary(Path.Combine(root, "custom.csv"), true);
         if (imported.Imported != 1 || l10n.ReadDictionary()["city.empty"] != "空城市") throw new InvalidOperationException("Localization dictionary import contract failed.");
-        l10nScan = await l10n.ScanAsync([l10nPackage], null, CancellationToken.None);
+        localizationProgress.Clear();
+        l10nScan = await l10n.ScanAsync(
+            [l10nPackage],
+            new ImmediateProgress<ProgressEvent>(eventValue => localizationProgress.Add(eventValue.Message)),
+            CancellationToken.None);
         if (l10nScan.Entries[1].Status != "local" || l10nScan.Entries[1].Value != "空城市") throw new InvalidOperationException("Localization dictionary resolution contract failed.");
+        if (!localizationProgress.Any(message => message.Contains("Using cached localization", StringComparison.Ordinal)))
+            throw new InvalidOperationException("Localization dictionary change rescanned package data.");
+
+        var changedLocalizationText = "SiiNunit\n{\nlocalization_db : .localization\n{\n key[]: \"city.berlin\"\n val[]: \"柏林更新\"\n key[]: \"city.empty\"\n val[]: \"\"\n}\n}\n";
+        File.WriteAllText(Path.Combine(l10nLocale, "localization.sii"), changedLocalizationText);
+        localizationProgress.Clear();
+        var changedL10nScan = await l10n.ScanAsync(
+            [l10nPackage],
+            new ImmediateProgress<ProgressEvent>(eventValue => localizationProgress.Add(eventValue.Message)),
+            CancellationToken.None);
+        if (changedL10nScan.Entries[0].Value != "柏林更新"
+            || !localizationProgress.Any(message => message.Contains("Scanning localization", StringComparison.Ordinal)))
+            throw new InvalidOperationException("Localization modified package invalidation failed.");
+
+        var addedL10nPackage = Path.Combine(root, "l10n-added-package");
+        var addedL10nLocale = Path.Combine(addedL10nPackage, "locale", "zh_cn");
+        Directory.CreateDirectory(addedL10nLocale);
+        File.WriteAllText(Path.Combine(addedL10nLocale, "added.sii"),
+            "SiiNunit { localization_db : .added { key[]: \"city.added\" val[]: \"新增城市\" } }");
+        var addedL10nScan = await l10n.ScanAsync([l10nPackage, addedL10nPackage], null, CancellationToken.None);
+        if (addedL10nScan.Entries.All(entry => entry.Key != "city.added"))
+            throw new InvalidOperationException("Localization added package contract failed.");
+
+        var removedL10nScan = await l10n.ScanAsync([l10nPackage], null, CancellationToken.None);
+        if (removedL10nScan.Entries.Any(entry => entry.Key == "city.added"))
+            throw new InvalidOperationException("Localization removed package contract failed.");
         l10n.SetTranslation("city.manual", "手动翻译");
         var exportPath = Path.Combine(root, "generated.scs");
         var exported = await l10n.ExportAsync(l10nScan.Entries.Append(new LocalizationEntry("city.manual", "手动翻译", "", "test", "city", "local")), exportPath, "zh_cn", "Contract L10n", CancellationToken.None);
