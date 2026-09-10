@@ -167,6 +167,7 @@ export const fixtureBackend: ModBackend = {
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
   },
   cancelScan: async () => undefined,
+  cancelLocalization: async () => undefined,
   saveProfile: async () => undefined,
   launchGame: async () => undefined,
   listPresets: async () => [],
@@ -176,6 +177,7 @@ export const fixtureBackend: ModBackend = {
 
 const backend = createBackend(fixtureBackend);
 let saveSelectionRequest = 0;
+let localizationRequest = 0;
 
 interface PresetSnapshot {
   id: string;
@@ -236,6 +238,7 @@ interface ModState {
   selectedModId: string | null;
   dirty: boolean;
   scanning: boolean;
+  localizationScanning: boolean;
   loading: boolean;
   error: string;
   scanSummary: ScanSummary | null;
@@ -244,6 +247,7 @@ interface ModState {
   selectedPresetName: string;
   setSecondaryPanel: (panel: "none" | "localization" | "diagnostics" | "saves") => void;
   scanLocalization: () => Promise<void>;
+  cancelLocalization: () => Promise<void>;
   runDiagnostics: () => Promise<void>;
   selectSave: (slot: SaveSlot | null) => Promise<void>;
   mutateSave: (operation: "set_money" | "set_experience" | "set_level", value: number) => Promise<void>;
@@ -284,6 +288,7 @@ export const useModStore = create<ModState>((set, get) => ({
   selectedModId: initialMods[0]?.id ?? null,
   dirty: false,
   scanning: false,
+  localizationScanning: false,
   loading: false,
   error: "",
   scanSummary: null,
@@ -291,17 +296,37 @@ export const useModStore = create<ModState>((set, get) => ({
   presets: {},
   selectedPresetName: "",
   setSecondaryPanel: (secondaryPanel) => set({ secondaryPanel }),
-  scanLocalization: async () => {
-    const { selectedProfileId, language } = get();
-    if (!selectedProfileId) return;
-    set({ loading: true, error: "" });
+  cancelLocalization: async () => {
+    if (!get().localizationScanning) return;
     try {
-      const result = await backend.scanLocalization(selectedProfileId, language === "zh_CN" ? "zh_cn" : language === "ru_RU" ? "ru_ru" : "en_us");
-      set({ localization: result, secondaryPanel: "localization" });
+      await backend.cancelLocalization();
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+  scanLocalization: async () => {
+    if (get().localizationScanning) return;
+    const requestId = ++localizationRequest;
+    const { selectedProfileId, language } = get();
+    if (!selectedProfileId) return;
+    set({ loading: true, localizationScanning: true, error: "" });
+    try {
+      const result = await backend.scanLocalization(selectedProfileId, language === "zh_CN" ? "zh_cn" : language === "ru_RU" ? "ru_ru" : "en_us");
+      if (
+        requestId !== localizationRequest
+        || get().selectedProfileId !== selectedProfileId
+      ) {
+        return;
+      }
+      set({ localization: result, secondaryPanel: "localization" });
+    } catch (error) {
+      if (requestId !== localizationRequest) return;
+      const message = error instanceof Error ? error.message : String(error);
+      set({ error: message.toLocaleLowerCase().includes("cancel") ? "" : message });
     } finally {
-      set({ loading: false });
+      if (requestId === localizationRequest) {
+        set({ loading: false, localizationScanning: false });
+      }
     }
   },
   runDiagnostics: async () => {
@@ -365,7 +390,11 @@ export const useModStore = create<ModState>((set, get) => ({
   },
   initialize: async () => {
     saveSelectionRequest += 1;
-    set({ loading: true, error: "" });
+    localizationRequest += 1;
+    if (get().localizationScanning) {
+      void backend.cancelLocalization();
+    }
+    set({ loading: true, localizationScanning: false, error: "" });
     try {
       const profiles = await backend.listProfiles();
       const selectedProfileId = profiles.some((profile) => profile.id === get().selectedProfileId)
@@ -399,7 +428,11 @@ export const useModStore = create<ModState>((set, get) => ({
       return;
     }
     saveSelectionRequest += 1;
-    set({ selectedProfileId, loading: true, error: "" });
+    localizationRequest += 1;
+    if (get().localizationScanning) {
+      void backend.cancelLocalization();
+    }
+    set({ selectedProfileId, loading: true, localizationScanning: false, error: "" });
     try {
       const mods = await backend.listMods(selectedProfileId);
       const saves = await backend.listSaves(selectedProfileId);

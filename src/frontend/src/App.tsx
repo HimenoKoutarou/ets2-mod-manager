@@ -55,6 +55,7 @@ function App() {
     selectedModId,
     dirty,
     scanning,
+    localizationScanning,
     scanSummary,
     scanWasCancelled,
     loading,
@@ -81,6 +82,7 @@ function App() {
     selectSave,
     mutateSave,
     scanLocalization,
+    cancelLocalization,
     runDiagnostics,
     initialize,
     error,
@@ -404,7 +406,9 @@ function App() {
                 </div>
                 <Sparkles size={18} />
               </div>
-              <button className="button button-small panel-action" onClick={() => { void scanLocalization(); }} disabled={loading || scanning}>{text.scan}</button>
+              <button className="button button-small panel-action" onClick={() => { void (localizationScanning ? cancelLocalization() : scanLocalization()); }} disabled={scanning}>
+                {localizationScanning ? text.cancelScan : text.scan}
+              </button>
               {localization?.entries.length ? (
                 <div className="support-list">
                   {localization.entries.slice(0, 80).map((entry) => (

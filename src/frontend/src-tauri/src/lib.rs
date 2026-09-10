@@ -1629,10 +1629,25 @@ fn order_localization_packages(mods: Vec<ModDto>, active: &[String]) -> Vec<ModD
     ordered
 }
 
-#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn localization_scan(
+fn localization_scan_inputs(
+    state: &State<'_, BackendState>,
+) -> Result<(Paths, PathBuf, Arc<AtomicBool>), String> {
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    Ok((
+        backend.paths.clone(),
+        backend.database_path.clone(),
+        Arc::clone(&backend.localization_cancelled),
+    ))
+}
+
+fn localization_scan_impl(
     request: LocalizationScanRequest,
-    state: State<'_, BackendState>,
+    paths: Paths,
+    database_path: PathBuf,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<LocalizationScanDto, String> {
     let started = std::time::Instant::now();
     let locale = request
@@ -1652,18 +1667,6 @@ fn localization_scan(
     {
         return Err("Target locale must use the xx_yy format.".into());
     }
-    let (paths, database_path, cancelled) = {
-        let backend = state
-            .inner
-            .lock()
-            .map_err(|_| "backend lock poisoned".to_string())?;
-        (
-            backend.paths.clone(),
-            backend.database_path.clone(),
-            Arc::clone(&backend.localization_cancelled),
-        )
-    };
-    cancelled.store(false, Ordering::Relaxed);
     let profile = find_profile(&paths, &request.profile_id).ok_or("Profile not found.")?;
     let mut connection = open_db(&database_path)?;
     let packages = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
@@ -1707,6 +1710,27 @@ fn localization_scan(
         elapsed_ms: started.elapsed().as_millis(),
         entries,
     })
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+async fn localization_scan(
+    request: LocalizationScanRequest,
+    state: State<'_, BackendState>,
+) -> Result<LocalizationScanDto, String> {
+    let (paths, database_path, cancelled) = localization_scan_inputs(&state)?;
+    cancelled.store(false, Ordering::Relaxed);
+
+    #[cfg(feature = "desktop")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            localization_scan_impl(request, paths, database_path, cancelled)
+        })
+        .await
+        .map_err(|error| format!("localization scan worker failed: {error}"))?;
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    localization_scan_impl(request, paths, database_path, cancelled)
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
