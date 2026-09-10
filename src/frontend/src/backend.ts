@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ModRecord, Profile } from "./types";
+import type { ModRecord, Profile, SaveSlot } from "./types";
 
 export interface ScanSummary {
   total: number;
@@ -13,6 +13,16 @@ export interface ScanSummary {
 export interface PresetRecord {
   name: string;
   activeMods: string[];
+}
+
+interface SaveSlotWire {
+  profileId: string;
+  slotId: string;
+  folder: string;
+  gameSii: string;
+  displayName: string;
+  lastModifiedMs: number;
+  profileLocation: string;
 }
 
 export function isTauriRuntime(): boolean {
@@ -80,6 +90,7 @@ export interface ModBackend {
   readonly real: boolean;
   listProfiles(): Promise<Profile[]>;
   listMods(profileId: string): Promise<ModRecord[]>;
+  listSaves(profileId: string): Promise<SaveSlot[]>;
   scan(): Promise<ScanSummary>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
   launchGame(): Promise<void>;
@@ -97,6 +108,18 @@ const tauriBackend: ModBackend = {
   async listMods(profileId) {
     const rows = await invoke<Array<Parameters<typeof mapMod>[0]>>("mod_list", { profileId });
     return rows.map(mapMod);
+  },
+  async listSaves(profileId) {
+    const rows = await invoke<SaveSlotWire[]>("save_list_local", { profileId });
+    return rows.map((row) => ({
+      profileId: row.profileId,
+      slotId: row.slotId,
+      folder: row.folder,
+      gameSii: row.gameSii,
+      displayName: row.displayName,
+      lastModifiedMs: row.lastModifiedMs,
+      profileLocation: row.profileLocation === "local" ? "local" : "readonly",
+    }));
   },
   scan() {
     return invoke<ScanSummary>("mod_scan");

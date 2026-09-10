@@ -56,6 +56,9 @@ button { color: inherit; }
 .dot-all { background: #4fd1c5; }
 .secondary-item { color: #71808d; }
 .secondary-item svg { color: #52616e; }
+.secondary-item.is-selected { background: rgba(79, 209, 197, .12); color: #e6edf3; }
+.secondary-item.is-selected svg { color: #4fd1c5; }
+.secondary-count { margin-left: auto; color: #71808d; font-size: 11px; }
 .mod-panel { display: flex; min-height: calc(100vh - 73px); flex-direction: column; padding: 24px 26px 0; background: #151a1f; }
 .error-banner { margin: -10px 0 12px; padding: 9px 12px; border: 1px solid #9d4b4b; border-radius: 4px; background: rgba(157, 75, 75, .18); color: #ffb4b4; font-size: 12px; }
 .panel-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
@@ -113,6 +116,17 @@ button { color: inherit; }
 .detail-meta div { display: flex; justify-content: space-between; gap: 10px; padding: 11px 0; border-bottom: 1px solid #2a343d; }
 .detail-meta dt { color: #71808d; font-size: 11px; }.detail-meta dd { margin: 0; color: #e6edf3; font-size: 11px; text-align: right; }
 .detail-empty { height: 100%; display: grid; align-content: center; justify-items: center; gap: 10px; color: #52616e; text-align: center; }.detail-empty strong { color: #a7b4bf; font-size: 13px; }.detail-empty span { max-width: 180px; font-size: 11px; line-height: 1.5; }
+.detail-empty.compact { min-height: 180px; height: auto; }
+.save-panel { min-height: 100%; }
+.save-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; color: #4fd1c5; }
+.save-list { display: grid; gap: 5px; margin-top: 20px; }
+.save-item { display: flex; align-items: center; gap: 9px; padding: 10px 8px; border: 1px solid #2a343d; border-radius: 5px; background: #202830; }
+.save-item.is-autosave { border-color: rgba(240, 198, 116, .45); }
+.save-item-icon { display: grid; place-items: center; width: 26px; height: 26px; color: #4fd1c5; }
+.save-item.is-autosave .save-item-icon { color: #f0c674; }
+.save-item-copy { min-width: 0; display: grid; gap: 3px; }
+.save-item-copy strong { overflow: hidden; color: #e6edf3; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.save-item-copy small { overflow: hidden; color: #71808d; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 1180px) {

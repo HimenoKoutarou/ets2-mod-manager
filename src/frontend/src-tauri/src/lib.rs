@@ -44,6 +44,7 @@ struct Paths {
     steam_profiles_root: Option<PathBuf>,
     cloud_profiles_root: Option<PathBuf>,
     workshop_root: Option<PathBuf>,
+    game_executable: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,6 +122,68 @@ struct MoveRequest {
     active_mods: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSlotDto {
+    profile_id: String,
+    slot_id: String,
+    folder: String,
+    game_sii: String,
+    display_name: String,
+    last_modified_ms: i64,
+    profile_location: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalizationEntryDto {
+    key: String,
+    value: String,
+    source_path: String,
+    package_name: String,
+    category: String,
+    status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalizationScanDto {
+    entries: Vec<LocalizationEntryDto>,
+    packages: usize,
+    inspected: usize,
+    cached: usize,
+    elapsed_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashPairDto {
+    crash_path: Option<String>,
+    log_path: Option<String>,
+    source: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashIssueDto {
+    mod_id: String,
+    display_name: String,
+    severity: String,
+    code: String,
+    evidence: String,
+    priority_index: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CrashPrecheckDto {
+    profile_id: String,
+    scanned_mods: usize,
+    red_count: usize,
+    yellow_count: usize,
+    issues: Vec<CrashIssueDto>,
+}
+
 impl Paths {
     fn detect() -> Self {
         let documents = std::env::var_os("USERPROFILE")
@@ -134,14 +197,17 @@ impl Paths {
         let steam_roots = [
             PathBuf::from(r"C:\Program Files (x86)\Steam"),
             PathBuf::from(r"C:\Program Files\Steam"),
+            PathBuf::from(r"E:\SteamLibrary"),
             PathBuf::from(r"D:\SteamLibrary"),
             PathBuf::from(r"F:\SteamLibrary"),
+            PathBuf::from(r"G:\SteamLibrary"),
         ];
         let workshop_root = steam_roots
             .iter()
             .map(|root| root.join("steamapps/workshop/content/227300"))
             .find(|candidate| candidate.is_dir());
         let cloud_profiles_root = find_cloud_profiles(&steam_roots);
+        let game_executable = find_game_executable(&steam_roots);
         Self {
             mod_root: game_root.join("mod"),
             game_root,
@@ -149,8 +215,27 @@ impl Paths {
             steam_profiles_root,
             cloud_profiles_root,
             workshop_root,
+            game_executable,
         }
     }
+}
+
+fn find_game_executable(steam_roots: &[PathBuf]) -> Option<PathBuf> {
+    for root in steam_roots {
+        let common = root.join("steamapps/common");
+        for (directory, executable) in [
+            ("Euro Truck Simulator 2", "eurotrucks2.exe"),
+            ("American Truck Simulator", "amtrucks.exe"),
+        ] {
+            for architecture in ["win_x64", "win_x86"] {
+                let candidate = common.join(directory).join("bin").join(architecture).join(executable);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_cloud_profiles(steam_roots: &[PathBuf]) -> Option<PathBuf> {
@@ -1111,14 +1196,14 @@ fn preset_delete(
 fn save_list_local(
     profile_id: String,
     state: State<'_, BackendState>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<SaveSlotDto>, String> {
     let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &profile_id).ok_or("Profile not found.")?;
     if !profile.writable {
         return Ok(Vec::new());
     }
     let root = Path::new(&profile.folder).join("save");
-    let mut rows = Vec::new();
+    let mut rows: Vec<(u8, String, SaveSlotDto)> = Vec::new();
     if let Ok(entries) = fs::read_dir(root) {
         for entry in entries.flatten() {
             let folder = entry.path();
@@ -1150,18 +1235,24 @@ fn save_list_local(
             } else {
                 0
             };
+            let last_modified_ms = fs::metadata(&game)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or_default();
             rows.push((
                 rank,
                 display_name.to_lowercase(),
-                serde_json::json!({
-                    "profileId": profile.id,
-                    "slotId": slot_id,
-                    "folder": normalize_path(&folder),
-                    "gameSii": normalize_path(&game),
-                    "displayName": display_name,
-                    "lastModifiedUtc": fs::metadata(&game).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or_default(),
-                    "profileLocation": profile.location,
-                }),
+                SaveSlotDto {
+                    profile_id: profile.id.clone(),
+                    slot_id,
+                    folder: normalize_path(&folder),
+                    game_sii: normalize_path(&game),
+                    display_name,
+                    last_modified_ms,
+                    profile_location: profile.location.clone(),
+                },
             ));
         }
     }
@@ -1170,8 +1261,46 @@ fn save_list_local(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn game_launch() -> Result<SaveResult, String> {
-    Err("Game launch adapter is not connected yet.".into())
+fn game_launch(state: State<'_, BackendState>) -> Result<SaveResult, String> {
+    let executable = {
+        let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+        backend.paths.game_executable.clone()
+    }
+    .ok_or_else(|| {
+        "ETS2/ATS executable was not found. Install the game through Steam or configure the Steam library path."
+            .to_string()
+    })?;
+
+    if !executable.is_file() {
+        return Err(format!("Game executable does not exist: {}", executable.display()));
+    }
+    if is_game_running() {
+        return Ok(SaveResult {
+            success: true,
+            message: "ETS2 or ATS is already running.".into(),
+        });
+    }
+
+    let working_directory = executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Could not determine the game working directory.".to_string())?;
+    let mut command = std::process::Command::new(&executable);
+    command.current_dir(&working_directory);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("launch game failed: {error}"))?;
+    Ok(SaveResult {
+        success: true,
+        message: format!("Started {}.", executable.display()),
+    })
 }
 
 #[cfg(test)]

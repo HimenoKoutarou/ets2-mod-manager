@@ -47,6 +47,10 @@ const copy: Record<Language, UiCopy> = {
     diagnostics: "诊断",
     saves: "存档",
     tools: "工具",
+    saveCount: (count) => `${count} 个本地存档`,
+    noSaves: "没有可用的本地存档",
+    saveUpdated: "最后修改",
+    autosave: "自动保存",
   },
   en_US: {
     appTitle: "ETS2 Mod Manager",
@@ -94,6 +98,10 @@ const copy: Record<Language, UiCopy> = {
     diagnostics: "Diagnostics",
     saves: "Saves",
     tools: "Tools",
+    saveCount: (count) => `${count} local saves`,
+    noSaves: "No local saves found",
+    saveUpdated: "Modified",
+    autosave: "Autosave",
   },
   ru_RU: {
     appTitle: "ETS2 Mod Manager",
@@ -141,6 +149,10 @@ const copy: Record<Language, UiCopy> = {
     diagnostics: "Диагностика",
     saves: "Сохранения",
     tools: "Инструменты",
+    saveCount: (count) => `Локальных сохранений: ${count}`,
+    noSaves: "Локальные сохранения не найдены",
+    saveUpdated: "Изменено",
+    autosave: "Автосохранение",
   },
 };
 

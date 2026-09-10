@@ -26,6 +26,7 @@ function App() {
     profiles,
     selectedProfileId,
     mods,
+    saves,
     view,
     selectedCategory,
     query,
@@ -57,6 +58,7 @@ function App() {
     void initialize();
   }, []);
   const [presetName, setPresetName] = useState("");
+  const [showSaves, setShowSaves] = useState(false);
   const text = getCopy(language);
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
     id: "",
@@ -80,6 +82,13 @@ function App() {
   }, [mods, query, selectedCategory, view]);
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
   const activeCount = mods.filter((mod) => mod.enabled).length;
+  const formatSaveDate = (value: number) =>
+    value > 0
+      ? new Intl.DateTimeFormat(language.replace("_", "-"), {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(new Date(value))
+      : "—";
 
   function moveSelected(target: "top" | "up" | "down" | "bottom") {
     if (!selectedMod) return;
@@ -158,7 +167,9 @@ function App() {
             <div className="section-heading"><span>{text.secondary}</span></div>
             <button className="secondary-item" disabled><Sparkles size={15} />{text.localization}</button>
             <button className="secondary-item" disabled><LayoutGrid size={15} />{text.diagnostics}</button>
-            <button className="secondary-item" disabled><FolderOpen size={15} />{text.saves}</button>
+            <button className={`secondary-item ${showSaves ? "is-selected" : ""}`} onClick={() => setShowSaves((value) => !value)}>
+              <FolderOpen size={15} />{text.saves}<span className="secondary-count">{saves.length}</span>
+            </button>
             <button className="secondary-item" disabled><Wrench size={15} />{text.tools}</button>
           </section>
         </aside>
@@ -231,7 +242,39 @@ function App() {
         </section>
 
         <aside className="details-panel">
-          {selectedMod ? (
+          {showSaves ? (
+            <div className="save-panel">
+              <div className="save-panel-heading">
+                <div>
+                  <div className="detail-title">{text.saves}</div>
+                  <div className="detail-package">{text.saveCount(saves.length)}</div>
+                </div>
+                <FolderOpen size={18} />
+              </div>
+              {saves.length === 0 ? (
+                <div className="detail-empty compact"><FolderOpen size={24} /><span>{text.noSaves}</span></div>
+              ) : (
+                <div className="save-list">
+                  {saves.map((save) => (
+                    <div
+                      className={`save-item ${save.slotId.toLowerCase().startsWith("autosave") ? "is-autosave" : ""}`}
+                      key={save.slotId}
+                    >
+                      <div className="save-item-icon"><FolderOpen size={15} /></div>
+                      <div className="save-item-copy">
+                        <strong>{save.displayName}</strong>
+                        <small>
+                          {save.slotId.toLowerCase().startsWith("autosave") ? text.autosave : text.saveUpdated}
+                          {" · "}
+                          {formatSaveDate(save.lastModifiedMs)}
+                        </small>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : selectedMod ? (
             <>
               <div className="detail-art"><Sparkles size={34} /><span>{selectedMod.category}</span></div>
               <div className="detail-heading"><div className="detail-title">{selectedMod.displayName}</div><span className={`source source-${selectedMod.source}`}>{selectedMod.source === "local" ? text.sourceLocal : text.sourceWorkshop}</span></div>

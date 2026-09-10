@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { createBackend, type ModBackend, type PresetRecord } from "./backend";
-import type { Language, ModRecord, ModView, Profile } from "./types";
+import type { Language, ModRecord, ModView, Profile, SaveSlot } from "./types";
 
 export const fixtureProfiles: Profile[] = [
   { id: "profile-main", name: "长途运输", company: "Himeno Logistics", location: "local", modCount: 4, writable: true },
@@ -76,6 +76,29 @@ export const fixtureBackend: ModBackend = {
   real: false,
   listProfiles: async () => fixtureProfiles.map((profile) => ({ ...profile })),
   listMods: async () => initialMods.map((mod) => ({ ...mod })),
+  listSaves: async (profileId) =>
+    profileId.startsWith("profile-")
+      ? [
+          {
+            profileId,
+            slotId: "career-1",
+            folder: "",
+            gameSii: "",
+            displayName: "示例存档",
+            lastModifiedMs: Date.now() - 86_400_000,
+            profileLocation: "local",
+          },
+          {
+            profileId,
+            slotId: "autosave",
+            folder: "",
+            gameSii: "",
+            displayName: "自动保存",
+            lastModifiedMs: Date.now(),
+            profileLocation: "local",
+          },
+        ]
+      : [],
   scan: async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
@@ -119,6 +142,7 @@ interface ModState {
   profiles: Profile[];
   selectedProfileId: string;
   mods: ModRecord[];
+  saves: SaveSlot[];
   view: ModView;
   selectedCategory: string;
   query: string;
@@ -153,6 +177,7 @@ export const useModStore = create<ModState>((set, get) => ({
   profiles: fixtureProfiles,
   selectedProfileId: fixtureProfiles[0]?.id ?? "",
   mods: initialMods.map((mod) => ({ ...mod })),
+  saves: [],
   view: "all",
   selectedCategory: "all",
   query: "",
@@ -171,11 +196,13 @@ export const useModStore = create<ModState>((set, get) => ({
         ? get().selectedProfileId
         : profiles[0]?.id ?? "";
       const mods = selectedProfileId ? await backend.listMods(selectedProfileId) : [];
+      const saves = selectedProfileId ? await backend.listSaves(selectedProfileId) : [];
       const presets = selectedProfileId ? await backend.listPresets(selectedProfileId) : [];
       set({
         profiles,
         selectedProfileId,
         mods,
+        saves,
         selectedModId: mods[0]?.id ?? null,
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",
@@ -192,9 +219,11 @@ export const useModStore = create<ModState>((set, get) => ({
     set({ selectedProfileId, loading: true, error: "" });
     try {
       const mods = await backend.listMods(selectedProfileId);
+      const saves = await backend.listSaves(selectedProfileId);
       const presets = await backend.listPresets(selectedProfileId);
       set({
         mods,
+        saves,
         selectedModId: mods[0]?.id ?? null,
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",

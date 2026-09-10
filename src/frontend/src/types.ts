@@ -28,6 +28,16 @@ export interface Profile {
   writable?: boolean;
 }
 
+export interface SaveSlot {
+  profileId: string;
+  slotId: string;
+  folder: string;
+  gameSii: string;
+  displayName: string;
+  lastModifiedMs: number;
+  profileLocation: "local" | "readonly";
+}
+
 export interface UiCopy {
   appTitle: string;
   modWorkspace: string;
@@ -74,4 +84,8 @@ export interface UiCopy {
   diagnostics: string;
   saves: string;
   tools: string;
+  saveCount: (count: number) => string;
+  noSaves: string;
+  saveUpdated: string;
+  autosave: string;
 }
