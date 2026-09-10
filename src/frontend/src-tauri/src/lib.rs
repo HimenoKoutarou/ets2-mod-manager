@@ -1342,18 +1342,42 @@ fn local_packages_for_profile(
     profile: &ProfileDto,
     cancelled: &AtomicBool,
 ) -> Result<Vec<ModDto>, String> {
-    let mut mods = load_cached(connection)?;
+    let mut mods = dedupe_mods(load_cached(connection)?);
     if mods.is_empty() {
         let mut discovered = discover_packages(Some(&paths.mod_root), false, cancelled);
         discovered.extend(discover_packages(paths.workshop_root.as_deref(), true, cancelled));
         if !discovered.is_empty() {
             sync_index(connection, &discovered)?;
-            mods = load_cached(connection)?;
+            mods = dedupe_mods(load_cached(connection)?);
         }
     }
     let active = active_for_profile(profile)?;
     apply_enabled(&mut mods, &active);
-    Ok(mods.into_iter().filter(|row| row.enabled && !row.path.is_empty()).collect())
+    Ok(order_localization_packages(mods, &active))
+}
+
+fn order_localization_packages(mods: Vec<ModDto>, active: &[String]) -> Vec<ModDto> {
+    let mut remaining: Vec<ModDto> = mods
+        .into_iter()
+        .filter(|row| row.enabled && !row.path.is_empty())
+        .collect();
+    let mut ordered = Vec::with_capacity(remaining.len());
+    for package in profile_order_to_ui(active) {
+        if let Some(index) = remaining
+            .iter()
+            .position(|row| rows_match(&row.package_name, &package))
+        {
+            ordered.push(remaining.remove(index));
+        }
+    }
+    remaining.sort_by(|left, right| {
+        left.display_name
+            .to_lowercase()
+            .cmp(&right.display_name.to_lowercase())
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+    ordered.extend(remaining);
+    ordered
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2243,6 +2267,47 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].value, "低优先级翻译");
         assert_eq!(merged[0].package_name, "low");
+    }
+
+    #[test]
+    fn localization_packages_follow_profile_ui_priority() {
+        let mods = vec![
+            ModDto {
+                id: "low".into(),
+                package_name: "low".into(),
+                path: "low.scs".into(),
+                package_type: "scs".into(),
+                display_name: "Low".into(),
+                author: String::new(),
+                version: String::new(),
+                size: 1,
+                modified_ms: 1,
+                enabled: true,
+                category: "map".into(),
+            },
+            ModDto {
+                id: "high".into(),
+                package_name: "high".into(),
+                path: "high.scs".into(),
+                package_type: "scs".into(),
+                display_name: "High".into(),
+                author: String::new(),
+                version: String::new(),
+                size: 1,
+                modified_ms: 1,
+                enabled: true,
+                category: "map".into(),
+            },
+        ];
+        // Profile order is low -> high; UI and localization merge use its reverse.
+        let ordered = order_localization_packages(mods, &["low".into(), "high".into()]);
+        assert_eq!(
+            ordered
+                .into_iter()
+                .map(|row| row.package_name)
+                .collect::<Vec<_>>(),
+            ["high", "low"]
+        );
     }
 
     #[test]
