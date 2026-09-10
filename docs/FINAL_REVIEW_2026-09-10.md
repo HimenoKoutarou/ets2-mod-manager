@@ -2,20 +2,22 @@
 
 ## Scope
 
-This review covers the five-stage migration plan for the ETS2 Mod Manager:
+This review covers the migration plan for the ETS2 Mod Manager:
 
 1. Behavior contracts and core Mod rules.
 2. Pure domain/application services.
 3. Windows, profile, save, backup, and archive infrastructure.
-4. Rust archive/BSII/scanner cores and WPF composition.
-5. Final functional parity, publishing, and acceptance.
+4. Rust archive/BSII/scanner cores and desktop composition.
+5. Tauri frontend integration and acceptance.
 
-All five stages are complete. The production entry point is the self-contained
-.NET/WPF client; Python remains only for compatibility and regression tests.
+The Tauri frontend is the production entry point. The `.NET/WPF` client and
+Python implementation remain compatibility references until their remaining
+auxiliary feature surface is either migrated or explicitly removed.
 
 ## Final Checks
 
-- `build-dotnet.bat`: passed; self-contained `win-x64` publish completed.
+- `build-tauri.bat`: is the production build entry point.
+- `build-dotnet.bat`: remains available for legacy parity builds.
 - .NET migration ContractTests: passed, including ScsC profile roundtrip,
   ZIP tree extraction, archive path traversal rejection, localization priority,
   update validation, and BSII save editing.
@@ -23,8 +25,8 @@ All five stages are complete. The production entry point is the self-contained
 - Rust GNU-target workspace tests: passed, 7 tests; the existing `.drectve`
   linker warning remains non-fatal.
 - Python regression suite: passed, 64 tests.
-- Published executable smoke test: `ETS2 Mod Manager`, responding normally.
-- `start.bat`: starts only `dist-dotnet/ETS2ModManager.WpfClient.exe`.
+- Frontend production build: `npm run build` passed.
+- `start.bat`: starts only `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
 
 ## Boundary Fixes in Final Review
 
@@ -40,7 +42,8 @@ All five stages are complete. The production entry point is the self-contained
 
 - A local MSVC `link.exe` is not installed in the default shell. The supported
   build path uses the GNU Rust target and succeeds through `build-dotnet.bat`.
-- The optional screenshot-level WPF inspection is not part of the automated
-  acceptance run; process-level startup and responsiveness were verified.
+- The optional screenshot-level desktop inspection is not part of the
+  automated acceptance run; frontend build and command-level checks are used
+  for acceptance.
 - The Rust archive slice remains dependency-light. Proprietary archive formats
   continue through the managed external-tool adapter where required.

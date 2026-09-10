@@ -30,17 +30,18 @@
 
 ## 🧱 技术栈
 
-当前发布路线是 `.NET 10 + WPF/MVVM + Rust + SQLite`。Python/PySide6
-保留为迁移期兼容实现，详见 `docs/MIGRATION_STATUS_2026-09-09.md`。
+当前发布路线是 `Tauri 2 + React/TypeScript + Rust + SQLite`。
+Python/PySide6 和旧 `.NET/WPF` 客户端保留为迁移期兼容实现与回归参考，
+不属于生产启动路径，详见 `docs/MIGRATION_STATUS_2026-09-09.md`。
 
 | 层 | 技术 |
 |---|---|
-| 桌面客户端 | C#/.NET 10 + WPF + CommunityToolkit.Mvvm |
-| 高吞吐核心 | Rust C ABI（扫描、manifest、BSII） |
-| 索引缓存 | SQLite WAL（Microsoft.Data.Sqlite） |
-| 兼容实现 | Python 3.11 + PySide6 |
-| 发布 | self-contained `dotnet publish`（`build-dotnet.bat`） |
-| 图片 | Qt 原生解码 + Pillow 兜底 |
+| 桌面客户端 | Tauri 2 + React + TypeScript + Vite |
+| 高吞吐核心 | Rust（扫描、manifest、BSII、文件操作） |
+| 索引缓存 | SQLite WAL（rusqlite） |
+| 兼容实现 | Python 3.11 + PySide6；旧 C#/.NET 10 + WPF |
+| 发布 | `npm run desktop:build`（`build-tauri.bat`） |
+| 图标 | Lucide React |
 
 ## 🏗️ 架构概览
 
@@ -141,31 +142,31 @@ src/
 ## 🚀 快速开始
 
 ```bash
-# 构建并启动迁移后的 .NET/WPF 客户端
-build-dotnet.bat
+# 构建并启动 Tauri 客户端
+build-tauri.bat
 start.bat
 ```
 
-Python/PySide6 保留为迁移后的兼容工具和回归测试，不再作为生产启动入口；
-生产入口 `start.bat` 只启动 `dist-dotnet/ETS2ModManager.WpfClient.exe`。
+`start.bat` 只启动 `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`。
+Python/PySide6 与旧 `.NET/WPF` 客户端仍可用于兼容回归，但不再作为生产启动入口。
 
 ## 📦 打包发布
 
 ```bash
-# PyInstaller 一键打包
+# Python/PyInstaller 历史兼容包（非生产）
 python build.py
 # 或
 build.bat
 ```
 
-构建脚本生成以下产物：
+生产构建由 Tauri 完成：
 
-- `dist-dotnet/ETS2ModManager.WpfClient.exe`：self-contained .NET/WPF 客户端
-- `dist-dotnet/assets/`：外部解包工具、SII 解密工具和语言资源
-- `dist-dotnet/ets2_core_ffi.dll`：Rust native core
+- `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`：Tauri Windows 客户端
+- `src/frontend/src-tauri/target/release/bundle/`：NSIS 安装包
+- `src/frontend/dist/`：React 静态资源
 
-`dist/` 和 `ETS2ModManager-win-x64.zip` 是迁移前 PyInstaller 流程的历史产物，
-不属于当前生产启动路径。
+`build-dotnet.bat` 仍保留为旧 WPF 兼容构建脚本；`dist-dotnet/`、`dist/` 和历史
+`ETS2ModManager-win-x64*.zip` 不属于当前生产启动路径。
 
 运行缓存不会随发布包打包，首次运行时会在用户数据目录或 `assets/cache/` 自动创建。
 
@@ -187,7 +188,9 @@ ETS2ModManager/
 ├── tests/                  # 测试
 ├── docs/                   # 文档（spec / plan）
 ├── run.py                  # 迁移期 Python 兼容入口（非生产）
-├── build.py                # 打包脚本
+├── build-tauri.bat         # Tauri 生产构建入口
+├── build-dotnet.bat        # 旧 WPF 兼容构建入口（非生产）
+├── build.py                # PyInstaller 历史兼容打包脚本
 ├── requirements.txt        # 依赖
 └── README.md
 ```

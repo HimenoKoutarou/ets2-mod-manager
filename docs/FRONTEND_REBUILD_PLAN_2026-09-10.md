@@ -125,15 +125,19 @@ Mod 表格必须支持：
 - 迁移汉化扫描、城市搜索、Workshop 元数据、崩溃诊断。
 - 存档和辅助页面只作为次级导航，不改变 Mod 首屏布局。
 
-### 阶段 5：删除 WPF 和 sidecar
+### 阶段 5：切换生产入口，收敛旧客户端
 
-- 将 Profile SII 和存档 ScsC 逻辑迁入 Rust。
-- 对比 C# sidecar 与 Rust 输出，逐项通过 golden tests 后删除 sidecar。
-- 删除 WPF 项目、WPF 资源和旧启动入口。
+- 将 Tauri 设为生产启动和构建入口。
+- 保留 WPF/C# 和 Python 作为兼容、parity 与故障回退参考，直到剩余
+  辅助功能完成迁移或明确从产品范围移除。
+- 对比旧实现与 Tauri 输出，逐项通过 golden tests；不要在 parity 未完成
+  前删除旧客户端。
+- 旧 `start.bat`/`.NET` 入口不得继续伪装成生产路径。
 
 ### 阶段 6：发布验收
 
-- `cargo tauri build` 生成 Windows 安装包。
+- `npm run desktop:build`（或根目录 `build-tauri.bat`）生成 Windows
+  安装包。
 - 真实 500+ Mod、多个 Profile、普通存档和 autosave 回归。
 - 测试排序写回、重启后增量扫描、语言切换、取消扫描和失败回滚。
 

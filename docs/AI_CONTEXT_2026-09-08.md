@@ -2,7 +2,12 @@
 
 ## 当前阶段
 
-核心 Mod 管理重构 M10 已完成：M5 的 Mod 管理、M6 的扫描/分类/Crash DTO 边界、M7 的 Profile 生命周期 facade、M8 的跨实现 golden fixtures、M9 的 Rust/C# 迁移骨架和 M10 的功能回归/整体 Review 均已完成。Python/PySide6 仍是当前可运行实现；C#/.NET 10 + Rust Core 进入并行迁移阶段。
+当前生产路线已切换为 **阶段 5/6：Tauri 生产入口切换**。阶段 5
+完成后进入阶段 6/6：完整回归与发布验收。Tauri 2 + React/TypeScript
+是生产客户端；旧 C#/.NET 10 + WPF 与 Python/PySide6 仅作为兼容和
+parity 参考，不再由 `start.bat` 启动。
+
+核心 Mod 管理重构 M10 已完成：M5 的 Mod 管理、M6 的扫描/分类/Crash DTO 边界、M7 的 Profile 生命周期 facade、M8 的跨实现 golden fixtures、M9 的 Rust/C# 迁移骨架和 M10 的功能回归/整体 Review 均已完成。Python/PySide6 与旧 WPF 客户端保留为迁移期兼容实现。
 
 M1 已完成：Mod 身份 alias、Profile/UI 顺序转换和工作列表重建统一走 Domain 规则。
 
@@ -50,13 +55,15 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 
 ## 目标技术栈决策（迁移总约束）
 
-- 桌面应用与 Application 层：C#/.NET 10 + WPF + MVVM（CommunityToolkit.Mvvm）。
+- 桌面应用与 UI：Tauri 2 + React/TypeScript + Vite。
+- 兼容 Application/参考实现：C#/.NET 10 + WPF + MVVM（CommunityToolkit.Mvvm）。
 - Domain 规则：先保持纯 Python 规则可验证，迁移目标为 C# Domain；不得依赖 Qt、Path、进程或具体文件系统。
 - 高吞吐核心：Rust，优先承载 Mod 扫描、ZIP/SCS/HashFS 读取和 BSII 二进制解析，通过稳定 DTO/C ABI 与 C# 通信。
 - Profile 文本读写、业务事务、备份、游戏关闭检查：C# Application + Infrastructure。
 - Windows 特有能力：集中在 C# Win32 Adapter（Process、Symlink/Junction、注册表）。
 - Mod/Profile 索引缓存：SQLite；用户配置继续使用 JSON。
-- 迁移顺序：先纯业务规则，再 Profile/存档基础设施，再 Rust 核心，最后 WPF UI；Python 仅作为迁移期工具和回归脚本。
+- 迁移顺序：先纯业务规则，再 Profile/存档基础设施，再 Rust 核心，最后
+  Tauri UI；Python 与 WPF 仅作为迁移期工具和回归脚本。
 - Rust/C# 边界第一阶段只允许 UTF-8 字符串、路径、`byte[]`、DTO 和错误码，不暴露复杂对象所有权。
 
 ## 已完成提交
@@ -76,8 +83,9 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 
 ## 2026-09-10 continuation state
 
-- The production migration is now in stage 5/5: final parity, publish, and
-  acceptance.
+- The production migration is now in stage 5/6: switch the production entry
+  point to Tauri and retire the old WPF launch path. Stage 6/6 is the final
+  regression and release acceptance pass.
 - `IExternalArchiveService.ExtractTreeAsync` is implemented by
   `ExternalArchiveService` and covered by contract tests. Directories and
   readable ZIP files are copied without invoking external tools; SCS#/HashFS
@@ -87,13 +95,12 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   proprietary packages through extracted `def` and target-locale trees, and
   merges locale/definition records by key. The first package is treated as
   highest UI priority; a high-priority blank locale value remains blank.
-- WPF `MainWindow` creates one archive adapter and shares it with the
+- Legacy WPF `MainWindow` creates one archive adapter and shares it with the
   localization service, Mod scanner, and Tools page.
-- Final verification on September 10, 2026: .NET Release build is 0 warnings
+- Legacy verification on September 10, 2026: .NET Release build is 0 warnings
   and 0 errors; C# migration ContractTests pass; Python regression suite is
-  64/64; Rust fmt/check/tests pass; `build-dotnet.bat` creates a self-contained
-  `win-x64` publish; the published WPF process starts with title `ETS2 Mod
-  Manager` and remains responsive.
+  64/64. The Tauri frontend production build passes; `build-tauri.bat` and
+  `start.bat` are the production build/launch path.
 - Do not reset or clean the dirty worktree. Generated archives, caches, and
   old Python compatibility changes remain outside the focused migration
   commits.
@@ -123,3 +130,14 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   discovery remains 64/64; WPF and ContractTests Release builds are 0 warnings
   and 0 errors. Rust `cargo check --workspace` passes. Rust unit tests remain
   blocked only by the host lacking MSVC `link.exe`; no test assertion failed.
+
+## 2026-09-10 Tauri entry-point continuation
+
+- `start.bat` now launches `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
+- `build-tauri.bat` runs the React build and `npm run desktop:build`, using the
+  temporary Rust/MinGW toolchain when it is present.
+- The old `build-dotnet.bat` and `src/dotnet` tree are retained only for
+  compatibility and parity testing; they are not production launch paths.
+- Localization package order now follows the current Profile UI priority before
+  merging cached entries, preventing alphabetical cache order from overriding
+  active_mods priority.

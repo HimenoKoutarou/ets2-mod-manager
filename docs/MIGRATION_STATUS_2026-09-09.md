@@ -1,5 +1,14 @@
 # Migration Status: 2026-09-09
 
+## Production direction
+
+The production desktop client is now the Tauri 2 application in
+`src/frontend` (React/TypeScript UI, Rust command layer, SQLite persistence).
+The `.NET 10/WPF` client and Python/PySide6 implementation remain as
+compatibility and parity references while their remaining feature surface is
+retired incrementally. `start.bat` and `build-tauri.bat` target Tauri; use
+`build-dotnet.bat` only when reproducing the legacy WPF build.
+
 ## Completed stages
 
 - M11: C# infrastructure is executable. Profile discovery/read/write, atomic
@@ -7,9 +16,9 @@
   are covered by the .NET migration smoke contract.
 - M12: Rust archive helpers, manifest extraction, filesystem scan primitives,
   BSII schema/object walking, and C ABI JSON endpoints are implemented.
-- M13: WPF/MVVM is wired to the application layer. Profile selection, enabled
-  Mod rows, priority conversion, Save Profile, progress, and Rust-first hybrid
-  scanning are connected.
+- M13: The legacy WPF/MVVM client was wired to the application layer. Profile
+  selection, enabled Mod rows, priority conversion, Save Profile, progress,
+  and Rust-first hybrid scanning are connected.
 - M14: ScsC profile reads use the known AES/zlib container format; startup and
   self-contained publishing prefer the .NET client. Python remains only as a
   compatibility fallback for features not yet exposed by the WPF client.
@@ -29,17 +38,17 @@
 - M15: structured BSII save editing, profile copy/rename/settings, crash
   diagnosis, localization scan, link migration, update check, and game launch
   adapters are implemented behind Application ports.
-- M16: WPF tabs expose Mod management, save editing, localization scanning,
+- M16: Legacy WPF tabs expose Mod management, save editing, localization scanning,
   crash diagnosis, migration, and update workflows.
 - M17: Rust FFI builds on `x86_64-pc-windows-gnu` when MSVC `link.exe` is not
   installed; the native DLL is copied into the self-contained publish output.
-- M18: completed the remaining production capability migration. WPF now
+- M18: completed the remaining legacy-client capability migration. WPF now
   injects all Application services, exposes update installation, extractor
   entry extraction, link restore, categories, cities, Workshop metadata and
   localization workflows. Complete scans atomically replace the SQLite index,
   and Rust scan results receive managed manifest/extractor metadata fallback.
-- `start.bat` launches only the .NET client. Python remains test-only and
-  compatibility-only; it is no longer a production runtime dependency.
+- The Tauri frontend now owns the production Mod workflow. Python and WPF
+  remain compatibility-only and are no longer production runtime dependencies.
 - Published assets include the Rust FFI DLL, `SII_Decrypt.exe`, the three
   translation files, and all three external extractor executables.
 - Verification: .NET Release build passed with 0 warnings/errors;
@@ -66,10 +75,23 @@ optimization remains an optional future performance slice.
 - M20: localization scanning uses the shared archive adapter for proprietary
   packages and merges locale values and definition metadata by key while
   preserving high-to-low UI priority and authoritative blank values.
-- M21: WPF composition now shares one archive adapter between Mod scanning,
+- M21: Legacy WPF composition shares one archive adapter between Mod scanning,
   localization, and Tools extraction. The published client starts without the
   Python runtime and responds with the expected main window title.
-- Final evidence on September 10, 2026: .NET Release build 0 warnings/0
-  errors; migration ContractTests passed; Python regression suite 64/64;
-  Rust fmt/check/tests passed; `build-dotnet.bat` produced a self-contained
-  `win-x64` release and all required native/tool/resource assets were present.
+- Final legacy evidence on September 10, 2026: .NET Release build 0
+  warnings/0 errors; migration ContractTests passed; Python regression suite
+  64/64; the Tauri frontend build passed; Rust source checks remain subject to
+  the local toolchain cache being complete. The old `build-dotnet.bat` release
+  remains reproducible for parity work.
+
+## Tauri migration checkpoints
+
+- T1: React/Vite shell, three-language UI, Profile selection, Mod list,
+  enable/disable, drag sorting, presets, local saves, diagnostics and
+  localization snapshots are connected through Tauri commands.
+- T2: SQLite Mod and localization indexes persist add/update/remove and
+  unchanged-package cache hits across restarts.
+- T3: Tauri is the production entry point. WPF is retained only as a
+  compatibility reference until save mutation, full localization export,
+  complete crash analysis, Workshop, city search, tools and updater parity are
+  explicitly reimplemented or removed from scope.
