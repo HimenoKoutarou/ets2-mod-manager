@@ -145,7 +145,12 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<Manifest, String> {
     // into a multi-gigabyte allocation; managed extraction remains available
     // for the rare package that needs deeper inspection.
     const MAX_INLINE_ZIP_BYTES: u64 = 128 * 1024 * 1024;
-    if file.metadata().map(|m| m.len()).unwrap_or(MAX_INLINE_ZIP_BYTES + 1) > MAX_INLINE_ZIP_BYTES {
+    if file
+        .metadata()
+        .map(|m| m.len())
+        .unwrap_or(MAX_INLINE_ZIP_BYTES + 1)
+        > MAX_INLINE_ZIP_BYTES
+    {
         return Ok(Manifest::default());
     }
     let mut bytes = header.to_vec();
@@ -215,8 +220,13 @@ mod tests {
     #[test]
     fn ignores_template_package_names_so_scanner_can_use_mod_id() {
         for placeholder in [".package_name", ".manifest", ".mods_info"] {
-            let manifest = parse_manifest(&format!("mod_package : {placeholder} {{\ndisplay_name: \"Demo\""));
-            assert!(manifest.package_name.is_empty(), "placeholder leaked: {placeholder}");
+            let manifest = parse_manifest(&format!(
+                "mod_package : {placeholder} {{\ndisplay_name: \"Demo\""
+            ));
+            assert!(
+                manifest.package_name.is_empty(),
+                "placeholder leaked: {placeholder}"
+            );
             assert_eq!(manifest.display_name, "Demo");
         }
     }
