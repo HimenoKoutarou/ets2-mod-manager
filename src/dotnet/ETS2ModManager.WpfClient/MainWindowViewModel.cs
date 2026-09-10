@@ -263,7 +263,7 @@ public partial class MainWindowViewModel : ObservableObject
             Status = "Scanning mods...";
             var progress = new Progress<ProgressEvent>(eventInfo => Status = eventInfo.Message);
             var result = await _scanner.ScanAsync(progress, _scanCts.Token);
-            _index.Replace(result);
+            _index.SyncSnapshot(result);
             _categoryService.Touch(result.Mods);
             ReloadRows();
             Status = $"Scan completed: {result.ScannedCount} mods ({result.ElapsedMilliseconds} ms)";

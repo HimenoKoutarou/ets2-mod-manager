@@ -49,7 +49,7 @@ public partial class MainWindow : Window
         var workshop = new WorkshopMetadataApplicationService(new SteamWorkshopMetadataService());
         var archives = new ExternalArchiveApplicationService(archiveAdapter);
         var presets = new ModPresetApplicationService(new JsonModPresetService());
-        var scanner = new HybridModScanner(paths.ModDirectory, paths.WorkshopDirectory, archiveAdapter);
+        var scanner = new IncrementalModScanner(paths.ModDirectory, paths.WorkshopDirectory, index.Query, archiveAdapter);
         DataContext = new MainWindowViewModel(scanner, index, profiles, application, save, crash, localization, links, updates, launcher,
             categories, cities, workshop, archives, presets, paths.DocumentsDirectory, paths.ModDirectory);
         ((MainWindowViewModel)DataContext).Ui.PropertyChanged += (_, _) => UpdateLocalizedHeaders();

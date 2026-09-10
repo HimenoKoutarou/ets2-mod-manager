@@ -65,7 +65,10 @@ pub fn parse_manifest(text: &str) -> Manifest {
         if key == "mod_package" {
             if manifest.package_name.is_empty() {
                 if let Some(name) = value.split_whitespace().next() {
-                    manifest.package_name = name.trim_end_matches('{').to_string();
+                    let candidate = name.trim_end_matches('{').trim();
+                    if !is_placeholder_package_name(candidate) {
+                        manifest.package_name = candidate.to_string();
+                    }
                 }
             }
             continue;
@@ -86,6 +89,15 @@ pub fn parse_manifest(text: &str) -> Manifest {
         }
     }
     manifest
+}
+
+fn is_placeholder_package_name(value: &str) -> bool {
+    let normalized = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    normalized.is_empty()
+        || matches!(
+            normalized.as_str(),
+            "manifest" | "package_name" | "mods_info" | "nameless" | "mod_package"
+        )
 }
 
 pub fn read_manifest(path: impl AsRef<Path>) -> Result<Manifest, String> {
@@ -113,12 +125,33 @@ pub fn read_manifest(path: impl AsRef<Path>) -> Result<Manifest, String> {
         return Ok(Manifest::default());
     }
     let mut file = File::open(path).map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
+    let mut header = [0u8; 4];
+    if file.read_exact(&mut header).is_err() {
+        return Ok(Manifest::default());
+    }
+
+    // HashFS/AEM SCS packages can be several gigabytes. They are not ZIP
+    // containers, so reading the entire file just to look for manifest.sii
+    // is both wasteful and a major source of scan latency.
+    if &header == b"SCS#" || &header == b"AEM!" {
+        return Ok(Manifest::default());
+    }
+    if &header != b"PK\x03\x04" {
+        return Ok(Manifest::default());
+    }
+
+    // Stored ZIP manifests are parsed without an archive dependency. Bound
+    // the read so a malformed or enormous ZIP cannot turn metadata scanning
+    // into a multi-gigabyte allocation; managed extraction remains available
+    // for the rare package that needs deeper inspection.
+    const MAX_INLINE_ZIP_BYTES: u64 = 128 * 1024 * 1024;
+    if file.metadata().map(|m| m.len()).unwrap_or(MAX_INLINE_ZIP_BYTES + 1) > MAX_INLINE_ZIP_BYTES {
+        return Ok(Manifest::default());
+    }
+    let mut bytes = header.to_vec();
     file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    if bytes.starts_with(b"PK") {
-        if let Some(text) = read_stored_zip_manifest(&bytes) {
-            return Ok(parse_manifest(&text));
-        }
+    if let Some(text) = read_stored_zip_manifest(&bytes) {
+        return Ok(parse_manifest(&text));
     }
     Ok(Manifest::default())
 }
@@ -177,5 +210,14 @@ mod tests {
         assert_eq!(manifest.display_name, "Demo Map");
         assert_eq!(manifest.author, "Team");
         assert_eq!(manifest.version, "1.2");
+    }
+
+    #[test]
+    fn ignores_template_package_names_so_scanner_can_use_mod_id() {
+        for placeholder in [".package_name", ".manifest", ".mods_info"] {
+            let manifest = parse_manifest(&format!("mod_package : {placeholder} {{\ndisplay_name: \"Demo\""));
+            assert!(manifest.package_name.is_empty(), "placeholder leaked: {placeholder}");
+            assert_eq!(manifest.display_name, "Demo");
+        }
     }
 }

@@ -53,6 +53,18 @@ EqualWorklist(
 EqualWorklist(
     priority.GetProperty("move_index_0_to_bottom"),
     PriorityRules.MoveBottom(worklist, [0]));
+EqualSequence(["mid", "high", "low", "extra"],
+    PriorityRules.MoveUp(worklist, [1]).Select(row => row.PackageName));
+EqualSequence(["mid", "high", "low", "extra"],
+    PriorityRules.MoveDown(worklist, [0]).Select(row => row.PackageName));
+EqualSequence(["low", "high", "mid", "extra"],
+    PriorityRules.MoveTop(worklist, [2]).Select(row => row.PackageName));
+EqualSequence(["mid", "low", "high", "extra"],
+    PriorityRules.MoveBottom(worklist, [0]).Select(row => row.PackageName));
+var disabled = PriorityRules.BatchToggle(worklist, [1], "disable");
+var reenabled = PriorityRules.BatchToggle(disabled, [2], "enable");
+EqualSequence(["high", "low", "mid", "extra"], reenabled.Select(row => row.PackageName));
+EqualSequence(["mid", "low", "high"], PriorityRules.WorklistToProfileActive(reenabled));
 
 var dto = root.GetProperty("dto_case");
 var eventDto = new ProgressEvent(
@@ -163,11 +175,71 @@ static async Task RunInfrastructureSmokeAsync()
         index.Replace(scan);
 
         await RunSaveContractAsync(root, backup);
+        await RunIncrementalScanContractAsync(root);
     }
     finally
     {
         try { Directory.Delete(root, true); } catch { }
     }
+}
+
+static async Task RunIncrementalScanContractAsync(string root)
+{
+    var mods = Path.Combine(root, "incremental-mods");
+    Directory.CreateDirectory(mods);
+    var first = Path.Combine(mods, "first_mod");
+    Directory.CreateDirectory(first);
+    File.WriteAllText(Path.Combine(first, "manifest.sii"),
+        "SiiNunit\n{\nmod_package : first_mod {\n display_name: \"First Mod\"\n}\n}\n");
+    var second = Path.Combine(mods, "second_mod.scs");
+    File.WriteAllText(second, "not-a-zip");
+
+    var index = new SqliteModIndex(Path.Combine(root, "incremental-cache", "mods.db"));
+    var scanner = new IncrementalModScanner(mods, null, index.Query);
+    var progressMessages = new List<string>();
+    var progress = new ImmediateProgress<ProgressEvent>(eventInfo => progressMessages.Add(eventInfo.Message));
+
+    var initial = await scanner.ScanAsync(progress, CancellationToken.None);
+    if (initial.Mods.Count != 2 || !initial.Mods.Any(row => row.DisplayName == "First Mod"))
+        throw new InvalidOperationException("Incremental initial scan contract failed.");
+    var initialSync = index.SyncSnapshot(initial);
+    if (initialSync.Added != 2 || initialSync.Updated != 0 || initialSync.Removed != 0)
+        throw new InvalidOperationException("Incremental initial persistence contract failed.");
+
+    progressMessages.Clear();
+    var cached = await scanner.ScanAsync(progress, CancellationToken.None);
+    if (cached.Mods.Count != 2 || !progressMessages.Any(message => message.Contains("0 changed", StringComparison.Ordinal)))
+        throw new InvalidOperationException("Incremental unchanged scan did not reuse cache.");
+    var cachedSync = index.SyncSnapshot(cached);
+    if (cachedSync.Added != 0 || cachedSync.Updated != 0 || cachedSync.Removed != 0)
+        throw new InvalidOperationException("Incremental unchanged persistence rewrote cache.");
+
+    var added = Path.Combine(mods, "added_mod.scs");
+    File.WriteAllText(added, "new");
+    var withAdded = await scanner.ScanAsync(null, CancellationToken.None);
+    if (withAdded.Mods.Count != 3 || !withAdded.NewModIds.Contains("added_mod", StringComparer.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Incremental add contract failed.");
+    var addSync = index.SyncSnapshot(withAdded);
+    if (addSync.Added != 1 || addSync.Updated != 0 || addSync.Removed != 0)
+        throw new InvalidOperationException("Incremental add persistence contract failed.");
+
+    File.Delete(second);
+    var withDeleted = await scanner.ScanAsync(null, CancellationToken.None);
+    if (withDeleted.Mods.Count != 2 || withDeleted.Mods.Any(row => row.ModId == "second_mod"))
+        throw new InvalidOperationException("Incremental delete contract failed.");
+    var deleteSync = index.SyncSnapshot(withDeleted);
+    if (deleteSync.Added != 0 || deleteSync.Updated != 0 || deleteSync.Removed != 1)
+        throw new InvalidOperationException("Incremental delete persistence contract failed.");
+
+    var firstManifest = Path.Combine(first, "manifest.sii");
+    File.WriteAllText(firstManifest,
+        "SiiNunit\n{\nmod_package : first_mod {\n display_name: \"First Mod Updated\"\n}\n}\n");
+    var withModified = await scanner.ScanAsync(null, CancellationToken.None);
+    if (withModified.Mods.First(row => row.ModId == "first_mod").DisplayName != "First Mod Updated")
+        throw new InvalidOperationException("Incremental modified package contract failed.");
+    var updateSync = index.SyncSnapshot(withModified);
+    if (updateSync.Added != 0 || updateSync.Updated != 1 || updateSync.Removed != 0)
+        throw new InvalidOperationException("Incremental modified persistence contract failed.");
 }
 
 static async Task RunAdapterContractsAsync()
@@ -468,6 +540,11 @@ file sealed record SessionContract(string ProfileId, int SelectedIndex);
 file sealed class StubHttpHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(responder(request));
+}
+
+file sealed class ImmediateProgress<T>(Action<T> callback) : IProgress<T>
+{
+    public void Report(T value) => callback(value);
 }
 
 file sealed class StubArchiveService(
