@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(feature = "desktop"), allow(dead_code))]
 
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::{cipher::generic_array::GenericArray, Aes256};
@@ -18,7 +19,11 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(feature = "desktop")]
 use tauri::State;
+
+#[cfg(not(feature = "desktop"))]
+type State<'a, T> = &'a T;
 use zip::ZipArchive;
 
 #[cfg(windows)]
@@ -1624,7 +1629,7 @@ fn order_localization_packages(mods: Vec<ModDto>, active: &[String]) -> Vec<ModD
     ordered
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn localization_scan(
     request: LocalizationScanRequest,
     state: State<'_, BackendState>,
@@ -1704,7 +1709,7 @@ fn localization_scan(
     })
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn localization_cancel(state: State<'_, BackendState>) -> Result<(), String> {
     let backend = state
         .inner
@@ -1761,7 +1766,7 @@ fn crash_pair(paths: &Paths) -> CrashPairDto {
     }
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn crash_discover(state: State<'_, BackendState>) -> Result<CrashPairDto, String> {
     let backend = state
         .inner
@@ -1770,7 +1775,7 @@ fn crash_discover(state: State<'_, BackendState>) -> Result<CrashPairDto, String
     Ok(crash_pair(&backend.paths))
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_inspect_bsii(request: BsiiInspectRequest) -> Result<BsiiSummaryDto, String> {
     let path = PathBuf::from(request.path);
     if !path.is_file() {
@@ -1926,17 +1931,17 @@ fn mutate_save(path: &Path, operation: &str, value: i64) -> Result<SaveMutationD
     })
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_read_snapshot(request: BsiiInspectRequest) -> Result<SaveSnapshotDto, String> {
     save_snapshot(Path::new(&request.path))
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_mutate(request: SaveMutationRequest) -> Result<SaveMutationDto, String> {
     mutate_save(Path::new(&request.path), &request.operation, request.value)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn crash_precheck(
     request: CrashPrecheckRequest,
     state: State<'_, BackendState>,
@@ -2245,7 +2250,7 @@ fn find_profile(paths: &Paths, profile_id: &str) -> Option<ProfileDto> {
     all_profiles(paths).into_iter().find(|p| p.id == profile_id)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn profile_list(state: State<'_, BackendState>) -> Result<Vec<ProfileDto>, String> {
     let backend = state
         .inner
@@ -2254,7 +2259,7 @@ fn profile_list(state: State<'_, BackendState>) -> Result<Vec<ProfileDto>, Strin
     Ok(all_profiles(&backend.paths))
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn profile_read_active(
     profile_id: String,
     state: State<'_, BackendState>,
@@ -2267,7 +2272,7 @@ fn profile_read_active(
     active_for_profile(&profile)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn profile_write_active(
     request: WriteActiveRequest,
     state: State<'_, BackendState>,
@@ -2280,7 +2285,7 @@ fn profile_write_active(
     replace_active(&profile, &request.active_mods)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<ModDto>, String> {
     let backend = state
         .inner
@@ -2371,7 +2376,7 @@ fn dedupe_mods(mods: Vec<ModDto>) -> Vec<ModDto> {
     result
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
     let (paths, database_path, cancelled) = {
         let backend = state
@@ -2397,7 +2402,7 @@ fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
     sync_index(&mut db, &discovered)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn mod_cancel(state: State<'_, BackendState>) -> Result<(), String> {
     let backend = state
         .inner
@@ -2407,7 +2412,7 @@ fn mod_cancel(state: State<'_, BackendState>) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn mod_set_enabled(
     profile_id: String,
     package_name: String,
@@ -2429,7 +2434,7 @@ fn mod_set_enabled(
     Ok(active)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn mod_move(request: MoveRequest, state: State<'_, BackendState>) -> Result<SaveResult, String> {
     let backend = state
         .inner
@@ -2439,7 +2444,7 @@ fn mod_move(request: MoveRequest, state: State<'_, BackendState>) -> Result<Save
     replace_active(&profile, &request.active_mods)
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn preset_list(
     profile_id: String,
     state: State<'_, BackendState>,
@@ -2465,7 +2470,7 @@ fn preset_list(
         .collect()
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn preset_save(request: PresetRequest, state: State<'_, BackendState>) -> Result<(), String> {
     let active_mods = request.active_mods.ok_or("active_mods is required.")?;
     if request.name.trim().is_empty() {
@@ -2489,7 +2494,7 @@ fn preset_save(request: PresetRequest, state: State<'_, BackendState>) -> Result
     Ok(())
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn preset_load(
     request: PresetRequest,
     state: State<'_, BackendState>,
@@ -2510,7 +2515,7 @@ fn preset_load(
     .ok_or_else(|| "Preset not found.".into())
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn preset_delete(request: PresetRequest, state: State<'_, BackendState>) -> Result<bool, String> {
     let backend = state
         .inner
@@ -2594,7 +2599,7 @@ fn list_local_saves(profile: &ProfileDto) -> Vec<SaveSlotDto> {
     rows.into_iter().map(|(_, _, _, row)| row).collect()
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_list_local(
     profile_id: String,
     state: State<'_, BackendState>,
@@ -2607,7 +2612,7 @@ fn save_list_local(
     Ok(list_local_saves(&profile))
 }
 
-#[tauri::command(rename_all = "camelCase")]
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn game_launch(state: State<'_, BackendState>) -> Result<SaveResult, String> {
     let executable = {
         let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
@@ -3002,6 +3007,7 @@ fn open_db_schema(connection: &Connection) -> Result<(), String> {
         .map_err(|e| format!("initialize database failed: {e}"))
 }
 
+#[cfg(feature = "desktop")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let paths = Paths::detect();
