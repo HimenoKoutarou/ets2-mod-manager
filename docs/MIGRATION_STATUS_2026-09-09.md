@@ -95,3 +95,23 @@ optimization remains an optional future performance slice.
   compatibility reference until save mutation, full localization export,
   complete crash analysis, Workshop, city search, tools and updater parity are
   explicitly reimplemented or removed from scope.
+
+## Stage 6 acceptance continuation (September 10, 2026)
+
+- `build-tauri.bat` now defaults to `tauri build --no-bundle`, which produces
+  the release executable without requiring an online NSIS download. Set
+  `TAURI_BUNDLE=1` to request the NSIS installer explicitly.
+- Tauri Rust path discovery now covers Steam registry values,
+  `steamapps/libraryfolders.vdf`, OneDrive Documents, Workshop libraries,
+  Steam Cloud profiles, and game executable lookup; all discovered Workshop
+  content roots are scanned.
+- The SQLite Mod index now stores a content fingerprint for directory packages,
+  so nested add/delete/rename changes invalidate cached manifest metadata even
+  when total size and latest mtime are unchanged.
+- Tauri UI priority movement is constrained to enabled Mods. Disabled Mods stay
+  after the active block, and profile writes continue to convert UI high-to-low
+  order to the game's low-to-high `active_mods` order.
+- Current acceptance evidence: Python 65/65, frontend build passed, Rust
+  `cargo check --locked` passed, and the default Tauri build generated the
+  release exe. NSIS bundling remains an explicit packaging step because the
+  host may not have the installer cache or network access.

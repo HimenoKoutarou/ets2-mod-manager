@@ -153,16 +153,33 @@ function snapshotFromPreset(preset: PresetRecord, mods: ModRecord[]): PresetSnap
     .map((id) => ({ id, enabled: true }));
 }
 
-function reorderWithActive(mods: ModRecord[], activeIds: string[]): ModRecord[] {
-  const rank = new Map(activeIds.map((id, index) => [id, index]));
-  return [...mods].sort((left, right) => {
-    const leftRank = rank.get(left.id);
-    const rightRank = rank.get(right.id);
-    if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
-    if (leftRank !== undefined) return -1;
-    if (rightRank !== undefined) return 1;
-    return left.displayName.localeCompare(right.displayName);
-  });
+function normalizeModOrder(mods: ModRecord[], activeOrder?: string[]): ModRecord[] {
+  const explicit = activeOrder ?? mods.filter((mod) => mod.enabled).map((mod) => mod.id);
+  const rank = new Map(explicit.map((id, index) => [id, index]));
+  const active = mods
+    .filter((mod) => mod.enabled)
+    .sort((left, right) => {
+      const leftRank = rank.get(left.id);
+      const rightRank = rank.get(right.id);
+      if (leftRank !== undefined && rightRank !== undefined) return leftRank - rightRank;
+      if (leftRank !== undefined) return -1;
+      if (rightRank !== undefined) return 1;
+      return 0;
+    });
+  const disabled = mods.filter((mod) => !mod.enabled);
+  return [...active, ...disabled];
+}
+
+function reorderEnabled(mods: ModRecord[], id: string, targetEnabledIndex: number): ModRecord[] {
+  const active = mods.filter((mod) => mod.enabled);
+  const disabled = mods.filter((mod) => !mod.enabled);
+  const from = active.findIndex((mod) => mod.id === id);
+  if (from < 0 || targetEnabledIndex < 0 || targetEnabledIndex >= active.length || from === targetEnabledIndex) {
+    return mods;
+  }
+  const [moved] = active.splice(from, 1);
+  active.splice(targetEnabledIndex, 0, moved);
+  return [...active, ...disabled];
 }
 
 interface ModState {
@@ -306,20 +323,35 @@ export const useModStore = create<ModState>((set, get) => ({
   setCategory: (selectedCategory) => set({ selectedCategory }),
   setQuery: (query) => set({ query }),
   toggleMod: (id) =>
+    set((state) => {
+      const target = state.mods.find((mod) => mod.id === id);
+      if (!target) return state;
+      const nextEnabled = !target.enabled;
+      const activeOrder = state.mods.filter((mod) => mod.enabled && mod.id !== id).map((mod) => mod.id);
+      if (nextEnabled) activeOrder.push(id);
+      const mods = normalizeModOrder(
+        state.mods.map((mod) => (mod.id === id ? { ...mod, enabled: nextEnabled } : mod)),
+        activeOrder,
+      );
+      return { mods, selectedModId: id, dirty: true };
+    }),
+  setAll: (enabled) =>
     set((state) => ({
-      mods: state.mods.map((mod) => (mod.id === id ? { ...mod, enabled: !mod.enabled } : mod)),
+      mods: normalizeModOrder(state.mods.map((mod) => ({ ...mod, enabled }))),
       dirty: true,
     })),
-  setAll: (enabled) => set((state) => ({ mods: state.mods.map((mod) => ({ ...mod, enabled })), dirty: true })),
-  invertAll: () => set((state) => ({ mods: state.mods.map((mod) => ({ ...mod, enabled: !mod.enabled })), dirty: true })),
+  invertAll: () =>
+    set((state) => ({
+      mods: normalizeModOrder(state.mods.map((mod) => ({ ...mod, enabled: !mod.enabled }))),
+      dirty: true,
+    })),
   selectMod: (selectedModId) => set({ selectedModId }),
   moveMod: (id, targetIndex) =>
     set((state) => {
-      const from = state.mods.findIndex((mod) => mod.id === id);
-      if (from < 0 || targetIndex < 0 || targetIndex >= state.mods.length || from === targetIndex) return state;
-      const mods = [...state.mods];
-      const [moved] = mods.splice(from, 1);
-      mods.splice(targetIndex, 0, moved);
+      const target = state.mods.find((mod) => mod.id === id);
+      if (!target?.enabled) return state;
+      const mods = reorderEnabled(state.mods, id, targetIndex);
+      if (mods === state.mods) return state;
       return { mods, selectedModId: id, dirty: true };
     }),
   scan: async () => {
@@ -328,7 +360,7 @@ export const useModStore = create<ModState>((set, get) => ({
     try {
       await backend.scan();
       const profileId = get().selectedProfileId;
-      if (profileId) {
+      if (profileId && !get().dirty) {
         const mods = await backend.listMods(profileId);
         set({ mods, selectedModId: mods[0]?.id ?? null, dirty: false });
       }
@@ -392,7 +424,10 @@ export const useModStore = create<ModState>((set, get) => ({
       const orderedIds = activePackages
         .map((packageName) => mods.find((mod) => mod.packageName.toLocaleLowerCase() === packageName.toLocaleLowerCase())?.id)
         .filter((id): id is string => Boolean(id));
-      const nextMods = reorderWithActive(mods.map((mod) => ({ ...mod, enabled: activeIds.has(mod.id) })), orderedIds);
+      const nextMods = normalizeModOrder(
+        mods.map((mod) => ({ ...mod, enabled: activeIds.has(mod.id) })),
+        orderedIds,
+      );
       set({ mods: nextMods, dirty: true, selectedModId: nextMods[0]?.id ?? null });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });

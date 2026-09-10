@@ -4,8 +4,8 @@ use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::{cipher::generic_array::GenericArray, Aes256};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use getrandom::fill as fill_random;
-use rusqlite::{params, Connection, OptionalExtension};
 use regex::Regex;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -21,10 +21,12 @@ use std::{
 use tauri::State;
 use zip::ZipArchive;
 
+#[cfg(windows)]
+use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+
 const SCSC_KEY: [u8; 32] = [
-    0x2A, 0x5F, 0xCB, 0x17, 0x91, 0xD2, 0x2F, 0xB6, 0x02, 0x45, 0xB3, 0xD8, 0x36, 0x9E,
-    0xD0, 0xB2, 0xC2, 0x73, 0x71, 0x56, 0x3F, 0xBF, 0x1F, 0x3C, 0x9E, 0xDF, 0x6B, 0x11,
-    0x82, 0x5A, 0x5D, 0x0A,
+    0x2A, 0x5F, 0xCB, 0x17, 0x91, 0xD2, 0x2F, 0xB6, 0x02, 0x45, 0xB3, 0xD8, 0x36, 0x9E, 0xD0, 0xB2,
+    0xC2, 0x73, 0x71, 0x56, 0x3F, 0xBF, 0x1F, 0x3C, 0x9E, 0xDF, 0x6B, 0x11, 0x82, 0x5A, 0x5D, 0x0A,
 ];
 
 #[derive(Clone)]
@@ -46,7 +48,7 @@ struct Paths {
     profiles_root: PathBuf,
     steam_profiles_root: Option<PathBuf>,
     cloud_profiles_root: Option<PathBuf>,
-    workshop_root: Option<PathBuf>,
+    workshop_roots: Vec<PathBuf>,
     game_executable: Option<PathBuf>,
 }
 
@@ -76,6 +78,8 @@ struct ModDto {
     modified_ms: i64,
     enabled: bool,
     category: String,
+    #[serde(skip)]
+    fingerprint: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,26 +224,16 @@ struct BsiiInspectRequest {
 
 impl Paths {
     fn detect() -> Self {
-        let documents = std::env::var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .map(|p| p.join("Documents"))
-            .unwrap_or_else(|| PathBuf::from("."));
-        let game_root = documents.join("Euro Truck Simulator 2");
+        let game_root = detect_game_root();
         let profiles_root = game_root.join("profiles");
         let steam_profiles = game_root.join("steam_profiles");
         let steam_profiles_root = steam_profiles.is_dir().then_some(steam_profiles);
-        let steam_roots = [
-            PathBuf::from(r"C:\Program Files (x86)\Steam"),
-            PathBuf::from(r"C:\Program Files\Steam"),
-            PathBuf::from(r"E:\SteamLibrary"),
-            PathBuf::from(r"D:\SteamLibrary"),
-            PathBuf::from(r"F:\SteamLibrary"),
-            PathBuf::from(r"G:\SteamLibrary"),
-        ];
-        let workshop_root = steam_roots
+        let steam_roots = discover_steam_roots();
+        let workshop_roots = steam_roots
             .iter()
             .map(|root| root.join("steamapps/workshop/content/227300"))
-            .find(|candidate| candidate.is_dir());
+            .filter(|candidate| candidate.is_dir())
+            .collect();
         let cloud_profiles_root = find_cloud_profiles(&steam_roots);
         let game_executable = find_game_executable(&steam_roots);
         Self {
@@ -248,10 +242,102 @@ impl Paths {
             profiles_root,
             steam_profiles_root,
             cloud_profiles_root,
-            workshop_root,
+            workshop_roots,
             game_executable,
         }
     }
+}
+
+fn detect_game_root() -> PathBuf {
+    let mut documents_roots = Vec::new();
+    if let Some(user_profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        documents_roots.push(user_profile.join("Documents"));
+        documents_roots.push(user_profile.join("OneDrive").join("Documents"));
+        documents_roots.push(user_profile.join("我的文档"));
+    }
+    for variable in ["OneDrive", "OneDriveConsumer"] {
+        if let Some(root) = std::env::var_os(variable).map(PathBuf::from) {
+            documents_roots.push(root.join("Documents"));
+            documents_roots.push(root);
+        }
+    }
+    documents_roots.dedup();
+    documents_roots
+        .iter()
+        .map(|root| root.join("Euro Truck Simulator 2"))
+        .find(|candidate| candidate.is_dir())
+        .or_else(|| {
+            documents_roots
+                .first()
+                .map(|root| root.join("Euro Truck Simulator 2"))
+        })
+        .unwrap_or_else(|| PathBuf::from("Euro Truck Simulator 2"))
+}
+
+fn discover_steam_roots() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    #[cfg(windows)]
+    {
+        for key_path in [r"Software\Valve\Steam", r"Software\Wow6432Node\Valve\Steam"] {
+            if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(key_path) {
+                for value_name in ["SteamPath", "InstallPath"] {
+                    if let Ok(value) = key.get_value::<String, _>(value_name) {
+                        candidates.push(PathBuf::from(value));
+                    }
+                }
+            }
+        }
+    }
+    for drive in ["C:\\", "D:\\", "E:\\", "F:\\", "G:\\"] {
+        let root = PathBuf::from(drive);
+        candidates.extend([
+            root.join("Program Files (x86)").join("Steam"),
+            root.join("Program Files").join("Steam"),
+            root.join("Steam"),
+            root.join("SteamLibrary"),
+        ]);
+    }
+    let initial = candidates.clone();
+    for parent in initial {
+        let vdf = parent.join("steamapps").join("libraryfolders.vdf");
+        let Ok(text) = fs::read_to_string(vdf) else {
+            continue;
+        };
+        candidates.extend(parse_steam_library_paths(&text));
+    }
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        let candidate = fs::canonicalize(&candidate).unwrap_or(candidate);
+        if candidate.is_dir() && seen.insert(normalize_path(&candidate).to_ascii_lowercase()) {
+            result.push(candidate);
+        }
+    }
+    result
+}
+
+fn parse_steam_library_paths(text: &str) -> Vec<PathBuf> {
+    let Ok(pattern) = Regex::new(r#"(?i)"path"\s*"((?:\\.|[^"])*)""#) else {
+        return Vec::new();
+    };
+    pattern
+        .captures_iter(text)
+        .filter_map(|capture| {
+            let raw = capture.get(1)?.as_str();
+            let mut value = String::with_capacity(raw.len());
+            let mut chars = raw.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '\\' {
+                    if let Some(next) = chars.next() {
+                        value.push(next);
+                    }
+                } else {
+                    value.push(ch);
+                }
+            }
+            (!value.trim().is_empty()).then(|| PathBuf::from(value))
+        })
+        .collect()
 }
 
 fn find_game_executable(steam_roots: &[PathBuf]) -> Option<PathBuf> {
@@ -262,7 +348,11 @@ fn find_game_executable(steam_roots: &[PathBuf]) -> Option<PathBuf> {
             ("American Truck Simulator", "amtrucks.exe"),
         ] {
             for architecture in ["win_x64", "win_x86"] {
-                let candidate = common.join(directory).join("bin").join(architecture).join(executable);
+                let candidate = common
+                    .join(directory)
+                    .join("bin")
+                    .join(architecture)
+                    .join(executable);
                 if candidate.is_file() {
                     return Some(candidate);
                 }
@@ -320,7 +410,13 @@ fn decode_scsc_or_plain(bytes: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|_| "invalid ScsC IV".to_string())?;
     let decrypted = cbc_decrypt(&bytes[56..], &iv)?;
     let pad = *decrypted.last().ok_or("ScsC payload is empty")? as usize;
-    if pad == 0 || pad > 16 || pad > decrypted.len() || decrypted[decrypted.len() - pad..].iter().any(|x| *x as usize != pad) {
+    if pad == 0
+        || pad > 16
+        || pad > decrypted.len()
+        || decrypted[decrypted.len() - pad..]
+            .iter()
+            .any(|x| *x as usize != pad)
+    {
         return Err("ScsC padding is invalid".into());
     }
     let decrypted = &decrypted[..decrypted.len() - pad];
@@ -489,8 +585,14 @@ fn list_profiles_from(root: Option<&Path>, location: &str) -> Vec<ProfileDto> {
 fn all_profiles(paths: &Paths) -> Vec<ProfileDto> {
     let mut result = Vec::new();
     result.extend(list_profiles_from(Some(&paths.profiles_root), "local"));
-    result.extend(list_profiles_from(paths.steam_profiles_root.as_deref(), "steam"));
-    result.extend(list_profiles_from(paths.cloud_profiles_root.as_deref(), "cloud"));
+    result.extend(list_profiles_from(
+        paths.steam_profiles_root.as_deref(),
+        "steam",
+    ));
+    result.extend(list_profiles_from(
+        paths.cloud_profiles_root.as_deref(),
+        "cloud",
+    ));
     result
 }
 
@@ -512,6 +614,7 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                version TEXT NOT NULL DEFAULT '',
                size INTEGER NOT NULL,
                modified_ms INTEGER NOT NULL,
+               fingerprint INTEGER NOT NULL DEFAULT 0,
                scanned_at_ms INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS ix_mod_display_v2 ON mod_package_v2(display_name COLLATE NOCASE);
@@ -550,7 +653,27 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                ON localization_entry_v2(target_locale, key);",
         )
         .map_err(|e| format!("initialize database failed: {e}"))?;
+    ensure_mod_fingerprint_column(&connection)?;
     Ok(connection)
+}
+
+fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> {
+    let has_column = connection
+        .prepare("PRAGMA table_info(mod_package_v2)")
+        .map_err(|e| format!("inspect mod index schema failed: {e}"))?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("inspect mod index schema failed: {e}"))?
+        .filter_map(Result::ok)
+        .any(|name| name == "fingerprint");
+    if !has_column {
+        connection
+            .execute(
+                "ALTER TABLE mod_package_v2 ADD COLUMN fingerprint INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| format!("upgrade mod index schema failed: {e}"))?;
+    }
+    Ok(())
 }
 
 fn manifest_for(path: &Path) -> (String, String, String, String) {
@@ -563,10 +686,12 @@ fn manifest_for(path: &Path) -> (String, String, String, String) {
     )
 }
 
-fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64) {
+fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
     let mut stack = vec![path.to_path_buf()];
     let mut total_size = 0u64;
     let mut latest_modified = 0i64;
+    let mut fingerprint = 1469598103934665603u64;
+    let mut files = Vec::new();
     while let Some(current) = stack.pop() {
         if cancelled.load(Ordering::Relaxed) {
             break;
@@ -584,6 +709,18 @@ fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64) {
         }
         if metadata.is_file() {
             total_size = total_size.saturating_add(metadata.len());
+            let relative = current
+                .strip_prefix(path)
+                .unwrap_or(&current)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis() as u64)
+                .unwrap_or_default();
+            files.push((relative, metadata.len(), modified));
             continue;
         }
         let Ok(entries) = fs::read_dir(&current) else {
@@ -593,7 +730,18 @@ fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64) {
             stack.push(entry.path());
         }
     }
-    (total_size, latest_modified)
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    for (relative, size, modified) in files {
+        for byte in relative.bytes() {
+            fingerprint ^= byte as u64;
+            fingerprint = fingerprint.wrapping_mul(1099511628211);
+        }
+        fingerprint ^= size;
+        fingerprint = fingerprint.wrapping_mul(1099511628211);
+        fingerprint ^= modified;
+        fingerprint = fingerprint.wrapping_mul(1099511628211);
+    }
+    (total_size, latest_modified, fingerprint)
 }
 
 fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool) -> Vec<ModDto> {
@@ -630,16 +778,22 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
                 .to_string()
         };
         let metadata = fs::metadata(&path).ok();
-        let (size, modified_ms) = if is_dir {
+        let (size, modified_ms, fingerprint) = if is_dir {
             directory_signature(&path, cancelled)
         } else {
-            let size = metadata.as_ref().map(|value| value.len()).unwrap_or_default();
+            let size = metadata
+                .as_ref()
+                .map(|value| value.len())
+                .unwrap_or_default();
             let modified_ms = metadata
                 .and_then(|value| value.modified().ok())
                 .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
                 .map(|value| value.as_millis() as i64)
                 .unwrap_or_default();
-            (size, modified_ms)
+            let fingerprint = size
+                .wrapping_mul(1099511628211)
+                .wrapping_add(modified_ms as u64);
+            (size, modified_ms, fingerprint)
         };
         result.push(ModDto {
             id: id.clone(),
@@ -659,7 +813,19 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
             modified_ms,
             enabled: false,
             category: "unknown".into(),
+            fingerprint,
         });
+    }
+    result
+}
+
+fn discover_workshop_packages(roots: &[PathBuf], cancelled: &AtomicBool) -> Vec<ModDto> {
+    let mut result = Vec::new();
+    for root in roots {
+        result.extend(discover_packages(Some(root), true, cancelled));
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
     }
     result
 }
@@ -667,7 +833,7 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
 fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT mod_id, package_name, path, package_type, display_name, author, version, size, modified_ms
+            "SELECT mod_id, package_name, path, package_type, display_name, author, version, size, modified_ms, fingerprint
              FROM mod_package_v2 ORDER BY display_name COLLATE NOCASE, path COLLATE NOCASE",
         )
         .map_err(|e| format!("query mod index failed: {e}"))?;
@@ -685,6 +851,7 @@ fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
                 modified_ms: row.get(8)?,
                 enabled: false,
                 category: "unknown".into(),
+                fingerprint: row.get::<_, i64>(9)? as u64,
             })
         })
         .map_err(|e| format!("read mod index failed: {e}"))?;
@@ -695,9 +862,9 @@ fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
 fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSummary, String> {
     let started = std::time::Instant::now();
     let cached = load_cached(connection)?;
-    let old: HashMap<String, (i64, u64)> = cached
+    let old: HashMap<String, (i64, u64, u64)> = cached
         .iter()
-        .map(|m| (m.path.clone(), (m.modified_ms, m.size)))
+        .map(|m| (m.path.clone(), (m.modified_ms, m.size, m.fingerprint)))
         .collect();
     let next: HashSet<String> = incoming.iter().map(|m| m.path.clone()).collect();
     let removed = old.keys().filter(|path| !next.contains(*path)).count();
@@ -713,7 +880,11 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
     for mod_row in incoming {
         let changed = old
             .get(&mod_row.path)
-            .map(|(modified, size)| *modified != mod_row.modified_ms || *size != mod_row.size)
+            .map(|(modified, size, fingerprint)| {
+                *modified != mod_row.modified_ms
+                    || *size != mod_row.size
+                    || *fingerprint != mod_row.fingerprint
+            })
             .unwrap_or(true);
         if !changed {
             continue;
@@ -747,12 +918,13 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
             version
         };
         tx.execute(
-            "INSERT INTO mod_package_v2(path, mod_id, package_name, package_type, display_name, author, version, size, modified_ms, scanned_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "INSERT INTO mod_package_v2(path, mod_id, package_name, package_type, display_name, author, version, size, modified_ms, fingerprint, scanned_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE SET mod_id=excluded.mod_id,
                package_name=excluded.package_name, package_type=excluded.package_type,
                display_name=excluded.display_name, author=excluded.author, version=excluded.version,
-               size=excluded.size, modified_ms=excluded.modified_ms, scanned_at_ms=excluded.scanned_at_ms",
+               size=excluded.size, modified_ms=excluded.modified_ms, fingerprint=excluded.fingerprint,
+               scanned_at_ms=excluded.scanned_at_ms",
             params![
                 enriched.path,
                 enriched.id,
@@ -763,6 +935,7 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
                 enriched.version,
                 enriched.size as i64,
                 enriched.modified_ms,
+                enriched.fingerprint as i64,
                 now_ms()
             ],
         )
@@ -827,7 +1000,10 @@ fn package_fingerprint(path: &Path) -> (String, i64, i64) {
         return ("directory".into(), 0, hash as i64);
     }
     let metadata = fs::metadata(path).ok();
-    let size = metadata.as_ref().map(|value| value.len()).unwrap_or_default() as i64;
+    let size = metadata
+        .as_ref()
+        .map(|value| value.len())
+        .unwrap_or_default() as i64;
     let modified = metadata
         .and_then(|value| value.modified().ok())
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
@@ -972,10 +1148,9 @@ fn parse_definition_text(
     package_name: &str,
     category: &str,
 ) -> Vec<LocalizationEntryDto> {
-    let block = Regex::new(
-        r"(?is)(city_data|country_data|ferry_data)\s*:\s*([A-Za-z0-9_.-]+)\s*\{(.*?)\}",
-    )
-    .expect("definition regex");
+    let block =
+        Regex::new(r"(?is)(city_data|country_data|ferry_data)\s*:\s*([A-Za-z0-9_.-]+)\s*\{(.*?)\}")
+            .expect("definition regex");
     let field = Regex::new(
         r#"(?m)(city_name|city_name_localized|name|name_localized|ferry_name|ferry_name_localized)\s*:\s*"((?:\\.|[^"\\])*)""#,
     )
@@ -987,8 +1162,14 @@ fn parse_definition_text(
         let body = unit.get(3).map(|value| value.as_str()).unwrap_or_default();
         let mut fields = HashMap::new();
         for capture in field.captures_iter(body) {
-            let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
-            let value = capture.get(2).map(|value| unescape_sii(value.as_str())).unwrap_or_default();
+            let name = capture
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or_default();
+            let value = capture
+                .get(2)
+                .map(|value| unescape_sii(value.as_str()))
+                .unwrap_or_default();
             fields.insert(name.to_ascii_lowercase(), value);
         }
         let source_field = match type_name.to_ascii_lowercase().as_str() {
@@ -1007,7 +1188,8 @@ fn parse_definition_text(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| unit_name.to_string());
         let localized = fields.get(localized_field).cloned().unwrap_or_default();
-        let wrapped = localized.starts_with("@@") && localized.ends_with("@@") && localized.len() > 4;
+        let wrapped =
+            localized.starts_with("@@") && localized.ends_with("@@") && localized.len() > 4;
         let key = if wrapped {
             localized[2..localized.len() - 2].to_string()
         } else {
@@ -1054,7 +1236,8 @@ fn scan_localization_directory(
         }
         if path.is_dir() {
             if let Ok(entries) = fs::read_dir(&path) {
-                let mut children: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+                let mut children: Vec<PathBuf> =
+                    entries.flatten().map(|entry| entry.path()).collect();
                 children.sort_by(|left, right| right.cmp(left));
                 stack.extend(children);
             }
@@ -1118,9 +1301,9 @@ fn scan_localization_archive(
             continue;
         }
         let normalized = entry.name().replace('\\', "/");
-        let locale_match = normalized.to_ascii_lowercase().contains(
-            &format!("locale/{}/", locale.to_ascii_lowercase()),
-        );
+        let locale_match = normalized
+            .to_ascii_lowercase()
+            .contains(&format!("locale/{}/", locale.to_ascii_lowercase()));
         if (!locale_match && !is_definition_path(&normalized))
             || (!is_localization_path(&normalized) && !is_definition_path(&normalized))
         {
@@ -1246,7 +1429,14 @@ fn save_localization_snapshots(
                  ON CONFLICT(package_path, target_locale) DO UPDATE SET
                    package_type=excluded.package_type, file_size=excluded.file_size,
                    modified_ms=excluded.modified_ms, scanned_at_ms=excluded.scanned_at_ms",
-                params![path, locale, fingerprint.0, fingerprint.1, fingerprint.2, now_ms()],
+                params![
+                    path,
+                    locale,
+                    fingerprint.0,
+                    fingerprint.1,
+                    fingerprint.2,
+                    now_ms()
+                ],
             )
             .map_err(|error| format!("write localization package snapshot failed: {error}"))?;
         for (index, entry) in entries.iter().enumerate() {
@@ -1289,7 +1479,8 @@ fn save_localization_snapshots(
             .query_map(params![locale], |row| row.get::<_, String>(0))
             .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
         for row in rows {
-            let path = row.map_err(|error| format!("read stale localization snapshot failed: {error}"))?;
+            let path =
+                row.map_err(|error| format!("read stale localization snapshot failed: {error}"))?;
             if !current_paths.contains(path.as_str()) {
                 stale.push(path);
             }
@@ -1345,7 +1536,7 @@ fn local_packages_for_profile(
     let mut mods = dedupe_mods(load_cached(connection)?);
     if mods.is_empty() {
         let mut discovered = discover_packages(Some(&paths.mod_root), false, cancelled);
-        discovered.extend(discover_packages(paths.workshop_root.as_deref(), true, cancelled));
+        discovered.extend(discover_workshop_packages(&paths.workshop_roots, cancelled));
         if !discovered.is_empty() {
             sync_index(connection, &discovered)?;
             mods = dedupe_mods(load_cached(connection)?);
@@ -1394,13 +1585,20 @@ fn localization_scan(
     let locale_bytes = locale.as_bytes();
     if locale_bytes.len() != 5
         || locale_bytes[2] != b'_'
-        || !locale_bytes[..2].iter().all(|value| value.is_ascii_lowercase())
-        || !locale_bytes[3..].iter().all(|value| value.is_ascii_lowercase())
+        || !locale_bytes[..2]
+            .iter()
+            .all(|value| value.is_ascii_lowercase())
+        || !locale_bytes[3..]
+            .iter()
+            .all(|value| value.is_ascii_lowercase())
     {
         return Err("Target locale must use the xx_yy format.".into());
     }
     let (paths, database_path, cancelled) = {
-        let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+        let backend = state
+            .inner
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
         (
             backend.paths.clone(),
             backend.database_path.clone(),
@@ -1438,7 +1636,10 @@ fn localization_scan(
     if cancelled.load(Ordering::Relaxed) {
         return Err("Localization scan cancelled.".into());
     }
-    let current_paths = packages.iter().map(|package| package.path.clone()).collect::<Vec<_>>();
+    let current_paths = packages
+        .iter()
+        .map(|package| package.path.clone())
+        .collect::<Vec<_>>();
     save_localization_snapshots(&mut connection, &locale, &current_paths, &snapshots)?;
     let entries = merge_localization_entries(all_entries);
     Ok(LocalizationScanDto {
@@ -1452,8 +1653,13 @@ fn localization_scan(
 
 #[tauri::command(rename_all = "camelCase")]
 fn localization_cancel(state: State<'_, BackendState>) -> Result<(), String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
-    backend.localization_cancelled.store(true, Ordering::Relaxed);
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    backend
+        .localization_cancelled
+        .store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -1477,7 +1683,10 @@ fn crash_pair(paths: &Paths) -> CrashPairDto {
             .and_then(|value| value.modified())
             .ok()
             .unwrap_or(UNIX_EPOCH);
-        if latest.as_ref().is_none_or(|(_, current, _)| modified > *current) {
+        if latest
+            .as_ref()
+            .is_none_or(|(_, current, _)| modified > *current)
+        {
             latest = Some((source, modified, crash));
         }
     }
@@ -1501,7 +1710,10 @@ fn crash_pair(paths: &Paths) -> CrashPairDto {
 
 #[tauri::command(rename_all = "camelCase")]
 fn crash_discover(state: State<'_, BackendState>) -> Result<CrashPairDto, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     Ok(crash_pair(&backend.paths))
 }
 
@@ -1512,7 +1724,8 @@ fn save_inspect_bsii(request: BsiiInspectRequest) -> Result<BsiiSummaryDto, Stri
         return Err(format!("Save file was not found: {}", path.display()));
     }
     let bytes = fs::read(&path).map_err(|error| format!("read BSII file failed: {error}"))?;
-    let summary = bsii_core::parse_summary(&bytes).map_err(|error| format!("parse BSII failed: {error}"))?;
+    let summary =
+        bsii_core::parse_summary(&bytes).map_err(|error| format!("parse BSII failed: {error}"))?;
     Ok(BsiiSummaryDto {
         version: summary.version,
         definitions: summary.definitions,
@@ -1525,7 +1738,10 @@ fn crash_precheck(
     request: CrashPrecheckRequest,
     state: State<'_, BackendState>,
 ) -> Result<CrashPrecheckDto, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &request.profile_id).ok_or("Profile not found.")?;
     let active = active_for_profile(&profile)?;
     let db = open_db(&backend.database_path)?;
@@ -1548,7 +1764,9 @@ fn crash_precheck(
         if !canonical.is_empty() && !seen.insert(canonical) {
             issues.push(CrashIssueDto {
                 mod_id: package.clone(),
-                display_name: matched.map(|row| row.display_name.clone()).unwrap_or_else(|| package.clone()),
+                display_name: matched
+                    .map(|row| row.display_name.clone())
+                    .unwrap_or_else(|| package.clone()),
                 severity: "yellow".into(),
                 code: "DUPLICATE_ACTIVE_MOD".into(),
                 evidence: "The profile lists this mod more than once.".into(),
@@ -1560,7 +1778,8 @@ fn crash_precheck(
                 display_name: package.clone(),
                 severity: "red".into(),
                 code: "MISSING_PACKAGE".into(),
-                evidence: "The active profile entry was not found in the scanned package catalog.".into(),
+                evidence: "The active profile entry was not found in the scanned package catalog."
+                    .into(),
                 priority_index: Some(index),
             });
         }
@@ -1568,8 +1787,14 @@ fn crash_precheck(
     Ok(CrashPrecheckDto {
         profile_id: profile.id,
         scanned_mods: active.len(),
-        red_count: issues.iter().filter(|issue| issue.severity == "red").count(),
-        yellow_count: issues.iter().filter(|issue| issue.severity == "yellow").count(),
+        red_count: issues
+            .iter()
+            .filter(|issue| issue.severity == "red")
+            .count(),
+        yellow_count: issues
+            .iter()
+            .filter(|issue| issue.severity == "yellow")
+            .count(),
         issues,
     })
 }
@@ -1641,7 +1866,9 @@ fn rows_match(left: &str, right: &str) -> bool {
 
 fn apply_enabled(mods: &mut [ModDto], active: &[String]) {
     for row in mods {
-        row.enabled = active.iter().any(|entry| rows_match(&row.package_name, entry));
+        row.enabled = active
+            .iter()
+            .any(|entry| rows_match(&row.package_name, entry));
     }
 }
 
@@ -1719,7 +1946,11 @@ fn replace_active(profile: &ProfileDto, active_mods: &[String]) -> Result<SaveRe
     let indent = original_lines
         .iter()
         .find(|line| line.trim_start().starts_with("active_mods["))
-        .map(|line| line.chars().take_while(|c| c.is_whitespace()).collect::<String>())
+        .map(|line| {
+            line.chars()
+                .take_while(|c| c.is_whitespace())
+                .collect::<String>()
+        })
         .unwrap_or_else(|| "    ".into());
     let mut lines: Vec<String> = original_lines
         .into_iter()
@@ -1732,7 +1963,10 @@ fn replace_active(profile: &ProfileDto, active_mods: &[String]) -> Result<SaveRe
     {
         lines[index] = format!("{indent}active_mods: {}", active_mods.len());
     } else {
-        let at = lines.iter().position(|x| x.trim() == "}").unwrap_or(lines.len());
+        let at = lines
+            .iter()
+            .position(|x| x.trim() == "}")
+            .unwrap_or(lines.len());
         lines.insert(at, format!("{indent}active_mods: {}", active_mods.len()));
     }
     let insert_at = lines
@@ -1740,9 +1974,10 @@ fn replace_active(profile: &ProfileDto, active_mods: &[String]) -> Result<SaveRe
         .position(|line| line.trim_start().starts_with("active_mods:"))
         .map(|index| index + 1)
         .unwrap_or(lines.len());
-    let new_lines = active_mods.iter().enumerate().map(|(index, value)| {
-        format!("{indent}active_mods[{index}]: \"{}\"", escape_sii(value))
-    });
+    let new_lines = active_mods
+        .iter()
+        .enumerate()
+        .map(|(index, value)| format!("{indent}active_mods[{index}]: \"{}\"", escape_sii(value)));
     lines.splice(insert_at..insert_at, new_lines);
     let plain = lines.join("\n").into_bytes();
     let encoded = if original.starts_with(b"ScsC") {
@@ -1776,8 +2011,11 @@ fn replace_active(profile: &ProfileDto, active_mods: &[String]) -> Result<SaveRe
     if parse_active_mods(&verify) != active_mods {
         let restore_error = fs::copy(&backup, &path).err();
         return Err(match restore_error {
-            Some(error) => format!("active_mods write verification failed; restoring backup failed: {error}"),
-            None => "active_mods write verification failed; original profile restored from backup.".into(),
+            Some(error) => {
+                format!("active_mods write verification failed; restoring backup failed: {error}")
+            }
+            None => "active_mods write verification failed; original profile restored from backup."
+                .into(),
         });
     }
     Ok(SaveResult {
@@ -1806,7 +2044,10 @@ fn find_profile(paths: &Paths, profile_id: &str) -> Option<ProfileDto> {
 
 #[tauri::command(rename_all = "camelCase")]
 fn profile_list(state: State<'_, BackendState>) -> Result<Vec<ProfileDto>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     Ok(all_profiles(&backend.paths))
 }
 
@@ -1815,7 +2056,10 @@ fn profile_read_active(
     profile_id: String,
     state: State<'_, BackendState>,
 ) -> Result<Vec<String>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &profile_id).ok_or("Profile not found.")?;
     active_for_profile(&profile)
 }
@@ -1825,29 +2069,36 @@ fn profile_write_active(
     request: WriteActiveRequest,
     state: State<'_, BackendState>,
 ) -> Result<SaveResult, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &request.profile_id).ok_or("Profile not found.")?;
     replace_active(&profile, &request.active_mods)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<ModDto>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let db = open_db(&backend.database_path)?;
     let mut mods = dedupe_mods(load_cached(&db)?);
     if let Some(profile) = find_profile(&backend.paths, &profile_id) {
         let active = active_for_profile(&profile)?;
         apply_enabled(&mut mods, &active);
-        let mut by_key: HashMap<String, ModDto> = mods.into_iter().fold(HashMap::new(), |mut rows, row| {
-            let key = canonical_package(&row.package_name);
-            match rows.get(&key) {
-                Some(existing) if !is_workshop(existing) && is_workshop(&row) => {}
-                _ => {
-                    rows.insert(key, row);
+        let mut by_key: HashMap<String, ModDto> =
+            mods.into_iter().fold(HashMap::new(), |mut rows, row| {
+                let key = canonical_package(&row.package_name);
+                match rows.get(&key) {
+                    Some(existing) if !is_workshop(existing) && is_workshop(&row) => {}
+                    _ => {
+                        rows.insert(key, row);
+                    }
                 }
-            }
-            rows
-        });
+                rows
+            });
         let mut ordered = Vec::with_capacity(by_key.len());
         for package in profile_order_to_ui(&active) {
             let key = by_key
@@ -1870,6 +2121,7 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
                     modified_ms: 0,
                     enabled: true,
                     category: "unknown".into(),
+                    fingerprint: 0,
                 });
             }
         }
@@ -1919,7 +2171,10 @@ fn dedupe_mods(mods: Vec<ModDto>) -> Vec<ModDto> {
 #[tauri::command(rename_all = "camelCase")]
 fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
     let (paths, database_path, cancelled) = {
-        let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+        let backend = state
+            .inner
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
         (
             backend.paths.clone(),
             backend.database_path.clone(),
@@ -1928,7 +2183,10 @@ fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
     };
     cancelled.store(false, Ordering::Relaxed);
     let mut discovered = discover_packages(Some(&paths.mod_root), false, &cancelled);
-    discovered.extend(discover_packages(paths.workshop_root.as_deref(), true, &cancelled));
+    discovered.extend(discover_workshop_packages(
+        &paths.workshop_roots,
+        &cancelled,
+    ));
     if cancelled.load(Ordering::Relaxed) {
         return Err("Scan cancelled.".into());
     }
@@ -1938,7 +2196,10 @@ fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
 
 #[tauri::command(rename_all = "camelCase")]
 fn mod_cancel(state: State<'_, BackendState>) -> Result<(), String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     backend.scan_cancelled.store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -1950,7 +2211,10 @@ fn mod_set_enabled(
     enabled: bool,
     state: State<'_, BackendState>,
 ) -> Result<Vec<String>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &profile_id).ok_or("Profile not found.")?;
     let mut active = active_for_profile(&profile)?;
     let key = canonical_package(&package_name);
@@ -1964,7 +2228,10 @@ fn mod_set_enabled(
 
 #[tauri::command(rename_all = "camelCase")]
 fn mod_move(request: MoveRequest, state: State<'_, BackendState>) -> Result<SaveResult, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &request.profile_id).ok_or("Profile not found.")?;
     replace_active(&profile, &request.active_mods)
 }
@@ -1974,7 +2241,10 @@ fn preset_list(
     profile_id: String,
     state: State<'_, BackendState>,
 ) -> Result<Vec<PresetDto>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let db = open_db(&backend.database_path)?;
     let mut statement = db
         .prepare("SELECT name, active_mods_json FROM preset WHERE profile_id = ?1 ORDER BY name COLLATE NOCASE")
@@ -1998,7 +2268,10 @@ fn preset_save(request: PresetRequest, state: State<'_, BackendState>) -> Result
     if request.name.trim().is_empty() {
         return Err("Preset name is required.".into());
     }
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let db = open_db(&backend.database_path)?;
     db.execute(
         "INSERT INTO preset(profile_id, name, active_mods_json) VALUES (?1, ?2, ?3)
@@ -2018,7 +2291,10 @@ fn preset_load(
     request: PresetRequest,
     state: State<'_, BackendState>,
 ) -> Result<Vec<String>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let db = open_db(&backend.database_path)?;
     db.query_row(
         "SELECT active_mods_json FROM preset WHERE profile_id = ?1 AND name = ?2",
@@ -2032,11 +2308,11 @@ fn preset_load(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn preset_delete(
-    request: PresetRequest,
-    state: State<'_, BackendState>,
-) -> Result<bool, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+fn preset_delete(request: PresetRequest, state: State<'_, BackendState>) -> Result<bool, String> {
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let db = open_db(&backend.database_path)?;
     let changed = db
         .execute(
@@ -2052,7 +2328,10 @@ fn save_list_local(
     profile_id: String,
     state: State<'_, BackendState>,
 ) -> Result<Vec<SaveSlotDto>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let profile = find_profile(&backend.paths, &profile_id).ok_or("Profile not found.")?;
     if !profile.writable {
         return Ok(Vec::new());
@@ -2127,7 +2406,10 @@ fn game_launch(state: State<'_, BackendState>) -> Result<SaveResult, String> {
     })?;
 
     if !executable.is_file() {
-        return Err(format!("Game executable does not exist: {}", executable.display()));
+        return Err(format!(
+            "Game executable does not exist: {}",
+            executable.display()
+        ));
     }
     if is_game_running() {
         return Ok(SaveResult {
@@ -2174,14 +2456,55 @@ mod tests {
     fn active_mod_parser_keeps_game_order() {
         let text = "profile : .profile {\n active_mods[0]: \"high\"\n active_mods[1]: \"low\"\n}";
         assert_eq!(parse_active_mods(text), ["high", "low"]);
-        assert_eq!(profile_order_to_ui(&parse_active_mods(text)), ["low", "high"]);
+        assert_eq!(
+            profile_order_to_ui(&parse_active_mods(text)),
+            ["low", "high"]
+        );
     }
 
     #[test]
     fn canonical_package_handles_storage_aliases() {
-        assert_eq!(canonical_package("mod_workshop_package.0000002A|workshop"), "mod_workshop_package.0000002a");
+        assert_eq!(
+            canonical_package("mod_workshop_package.0000002A|workshop"),
+            "mod_workshop_package.0000002a"
+        );
         assert_eq!(canonical_package("demo_local"), "demo");
         assert_eq!(canonical_package("demo_copy12"), "demo");
+    }
+
+    #[test]
+    fn steam_library_parser_unescapes_vdf_paths() {
+        let paths = parse_steam_library_paths(
+            r#"
+            "libraryfolders"
+            {
+                "0" { "path" "C:\\Program Files (x86)\\Steam" }
+                "1" { "path" "E:\\SteamLibrary" }
+            }
+            "#,
+        );
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\Program Files (x86)\Steam"),
+                PathBuf::from(r"E:\SteamLibrary")
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_fingerprint_detects_same_size_rename() {
+        let root = std::env::temp_dir().join(format!("ets2modmanager-fingerprint-{}", now_ms()));
+        fs::create_dir_all(&root).expect("create temp directory");
+        let first = root.join("first.scs");
+        let second = root.join("second.scs");
+        fs::write(&first, b"same-size").expect("write first package");
+        let before = directory_signature(&root, &AtomicBool::new(false));
+        fs::rename(&first, &second).expect("rename package");
+        let after = directory_signature(&root, &AtomicBool::new(false));
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(before.0, after.0);
+        assert_ne!(before.2, after.2);
     }
 
     #[test]
@@ -2200,6 +2523,7 @@ mod tests {
             modified_ms: 20,
             enabled: false,
             category: "unknown".into(),
+            fingerprint: 30,
         };
         let second = ModDto {
             id: "two".into(),
@@ -2213,11 +2537,27 @@ mod tests {
             modified_ms: 21,
             enabled: false,
             category: "unknown".into(),
+            fingerprint: 31,
         };
-        let first_summary = sync_index(&mut connection, &[first.clone(), second.clone()]).expect("first sync");
-        assert_eq!((first_summary.added, first_summary.updated, first_summary.removed), (2, 0, 0));
+        let first_summary =
+            sync_index(&mut connection, &[first.clone(), second.clone()]).expect("first sync");
+        assert_eq!(
+            (
+                first_summary.added,
+                first_summary.updated,
+                first_summary.removed
+            ),
+            (2, 0, 0)
+        );
         let second_summary = sync_index(&mut connection, &[first.clone()]).expect("second sync");
-        assert_eq!((second_summary.added, second_summary.updated, second_summary.removed), (0, 0, 1));
+        assert_eq!(
+            (
+                second_summary.added,
+                second_summary.updated,
+                second_summary.removed
+            ),
+            (0, 0, 1)
+        );
         let cached = load_cached(&connection).expect("cached");
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path, first.path);
@@ -2284,6 +2624,7 @@ mod tests {
                 modified_ms: 1,
                 enabled: true,
                 category: "map".into(),
+                fingerprint: 1,
             },
             ModDto {
                 id: "high".into(),
@@ -2297,6 +2638,7 @@ mod tests {
                 modified_ms: 1,
                 enabled: true,
                 category: "map".into(),
+                fingerprint: 1,
             },
         ];
         // Profile order is low -> high; UI and localization merge use its reverse.
@@ -2340,6 +2682,7 @@ fn open_db_schema(connection: &Connection) -> Result<(), String> {
                version TEXT NOT NULL DEFAULT '',
                size INTEGER NOT NULL,
                modified_ms INTEGER NOT NULL,
+               fingerprint INTEGER NOT NULL DEFAULT 0,
                scanned_at_ms INTEGER NOT NULL
              );
              CREATE TABLE IF NOT EXISTS preset (
@@ -2384,7 +2727,7 @@ pub fn run() {
     let paths = Paths::detect();
     let database_path = paths.game_root.join("ets2modmanager.db");
     tauri::Builder::default()
-            .manage(BackendState {
+        .manage(BackendState {
             inner: Arc::new(Mutex::new(Backend {
                 paths,
                 database_path,

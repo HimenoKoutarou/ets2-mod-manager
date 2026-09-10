@@ -30,7 +30,10 @@ if not exist "node_modules" (
   )
 )
 
-call npm run desktop:build
+set "TAURI_BUILD_ARGS=--no-bundle"
+if /I "%TAURI_BUNDLE%"=="1" set "TAURI_BUILD_ARGS="
+echo Tauri build mode: %TAURI_BUILD_ARGS%
+call npm run desktop:build -- %TAURI_BUILD_ARGS%
 set "BUILD_EXIT=%ERRORLEVEL%"
 popd
 
@@ -46,5 +49,14 @@ if not exist "src\frontend\src-tauri\target\release\ets2-mod-manager.exe" (
 
 echo Tauri release ready:
 echo   src\frontend\src-tauri\target\release\ets2-mod-manager.exe
+if /I "%TAURI_BUNDLE%"=="1" (
+  if not exist "src\frontend\src-tauri\target\release\bundle" (
+    echo Tauri bundle was requested but no bundle directory was generated.
+    exit /b 1
+  )
+  echo   src\frontend\src-tauri\target\release\bundle\
+) else (
+  echo Installer bundling is skipped by default. Set TAURI_BUNDLE=1 to build NSIS.
+)
 endlocal
 exit /b 0

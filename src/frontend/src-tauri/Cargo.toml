@@ -25,6 +25,9 @@ getrandom = "0.3"
 zip = "2"
 regex = "1"
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

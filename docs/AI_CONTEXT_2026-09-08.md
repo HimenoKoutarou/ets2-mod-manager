@@ -141,3 +141,29 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - Localization package order now follows the current Profile UI priority before
   merging cached entries, preventing alphabetical cache order from overriding
   active_mods priority.
+
+## 2026-09-10 stage 6 acceptance continuation
+
+- Tauri release compilation is now the default `build-tauri.bat` behavior. It
+  uses `tauri build --no-bundle` so an unavailable NSIS download cannot make a
+  successful desktop compile look like a code failure. Set `TAURI_BUNDLE=1`
+  when an NSIS installer is explicitly required.
+- Rust path discovery now checks Steam registry values, parses
+  `steamapps/libraryfolders.vdf`, finds OneDrive Documents fallbacks, and
+  deduplicates discovered libraries before locating Workshop, Cloud, and game
+  executable paths. Every discovered Workshop content root is scanned, not
+  only the first library.
+- The persistent Mod index now stores a directory content fingerprint
+  (relative file names, sizes, and timestamps). Directory add/delete/rename
+  changes are detected even when aggregate size and latest directory timestamp
+  do not change.
+- Mod ordering in the Tauri UI now follows the core contract: only enabled
+  Mods participate in priority movement, disabled Mods remain after the active
+  block, and UI priority is reversed only at profile write time.
+- Acceptance verification after these changes: Python unittest discovery
+  65/65, frontend production build passed, Rust `cargo check --locked`
+  passed, and `build-tauri.bat` generated
+  `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`. The existing
+  GNU linker `.drectve` warning remains non-fatal. Rust test binaries cannot
+  execute on this host because the GNU runtime reports
+  `STATUS_ENTRYPOINT_NOT_FOUND`; shared Rust workspace tests still pass.

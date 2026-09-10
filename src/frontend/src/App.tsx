@@ -97,18 +97,21 @@ function App() {
       : "—";
 
   function moveSelected(target: "top" | "up" | "down" | "bottom") {
-    if (!selectedMod) return;
-    const index = mods.findIndex((mod) => mod.id === selectedMod.id);
+    if (!selectedMod || !selectedMod.enabled) return;
+    const activeMods = mods.filter((mod) => mod.enabled);
+    const index = activeMods.findIndex((mod) => mod.id === selectedMod.id);
     const targetIndex =
-      target === "top" ? 0 : target === "bottom" ? mods.length - 1 : target === "up" ? index - 1 : index + 1;
+      target === "top" ? 0 : target === "bottom" ? activeMods.length - 1 : target === "up" ? index - 1 : index + 1;
     moveMod(selectedMod.id, targetIndex);
   }
 
   function onDrop(id: string, event: React.DragEvent<HTMLTableRowElement>) {
     event.preventDefault();
-    const target = mods.findIndex((mod) => mod.id === id);
+    const targetMod = mods.find((mod) => mod.id === id);
     const sourceId = event.dataTransfer.getData("text/mod-id");
-    if (sourceId) moveMod(sourceId, target);
+    if (!sourceId || !targetMod?.enabled) return;
+    const target = mods.filter((mod) => mod.enabled).findIndex((mod) => mod.id === id);
+    if (target >= 0) moveMod(sourceId, target);
   }
 
   return (
@@ -229,7 +232,7 @@ function App() {
                 {filteredMods.map((mod, index) => (
                   <tr
                     key={mod.id}
-                    draggable={selectedProfile.writable !== false}
+                    draggable={selectedProfile.writable !== false && mod.enabled}
                     onDragStart={(event) => event.dataTransfer.setData("text/mod-id", mod.id)}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => onDrop(mod.id, event)}
