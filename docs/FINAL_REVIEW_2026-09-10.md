@@ -27,6 +27,9 @@ auxiliary feature surface is either migrated or explicitly removed.
 - Python regression suite: passed, 64 tests.
 - Frontend production build: `npm run build` passed.
 - `start.bat`: starts only `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
+- Tauri local save workflow: local-only listing by `info.sii` display name,
+  named saves before `autosave*`, numeric snapshot reads, and verified
+  money/experience/derived-level edits with timestamped backups.
 
 ## Boundary Fixes in Final Review
 
@@ -38,6 +41,17 @@ auxiliary feature surface is either migrated or explicitly removed.
 - Contract tests cover both boundary classes so the fixes remain regression
   protected.
 
+## Save Editor Acceptance
+
+- `bank.money_account` and `economy.experience_points` are resolved through
+  the BSII schema rather than byte-pattern guesses.
+- Writes require a unique structure/name/type/size match, reject invalid
+  level or experience values, preserve plain versus ScsC storage, and verify
+  the resulting value after atomic replacement.
+- A failed post-write read or value check restores the pre-edit backup.
+- Rust numeric-field fixture coverage verifies payload offsets and typed
+  values; ScsC tests cover declared-size mismatch rejection.
+
 ## Known Non-Blocking Limitations
 
 - A local MSVC `link.exe` is not installed in the default shell. The supported
@@ -47,3 +61,6 @@ auxiliary feature surface is either migrated or explicitly removed.
   for acceptance.
 - The Rust archive slice remains dependency-light. Proprietary archive formats
   continue through the managed external-tool adapter where required.
+- The cached GNU Rust toolchain has no `rustfmt` component and emits a
+  non-fatal `.drectve` linker warning; the touched Rust files pass `rustfmt`
+  checks through the cached MSVC toolchain.

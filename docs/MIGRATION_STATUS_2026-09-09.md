@@ -115,3 +115,25 @@ optimization remains an optional future performance slice.
   `cargo check --locked` passed, and the default Tauri build generated the
   release exe. NSIS bundling remains an explicit packaging step because the
   host may not have the installer cache or network access.
+
+## Stage 6 final acceptance continuation (September 10, 2026)
+
+- Save editing is now connected end-to-end in the Tauri client. Local save
+  selection loads a compact numeric snapshot and supports money, experience,
+  and derived level writes.
+- The Rust BSII boundary matches fields by structure name, field name, type,
+  and payload size. `bank.money_account` and
+  `economy.experience_points` must each resolve uniquely before a write.
+- ScsC reads validate the declared decompressed size. Save writes keep the
+  source container form, create a timestamped backup, use atomic replacement,
+  and verify the value after writing before reporting success.
+- The frontend fixture backend mirrors the save editor workflow, uses
+  independent drafts for money/experience/level, and protects against stale
+  asynchronous save selections.
+- Verification on September 10, 2026: frontend `npm run build` passed;
+  Rust workspace tests passed (10 tests); Tauri `cargo check --locked`
+  passed; Python unittest discovery passed 65/65; and
+  `cmd /c build-tauri.bat` produced the optimized release executable.
+- Rust `cargo fmt --check` is available only from the cached MSVC toolchain
+  on this host; the GNU toolchain used for release builds lacks the
+  `rustfmt` component. The GNU linker emits a non-fatal `.drectve` warning.

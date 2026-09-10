@@ -167,3 +167,28 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   GNU linker `.drectve` warning remains non-fatal. Rust test binaries cannot
   execute on this host because the GNU runtime reports
   `STATUS_ENTRYPOINT_NOT_FOUND`; shared Rust workspace tests still pass.
+
+## 2026-09-10 save editor acceptance continuation
+
+- The Tauri save editor is now complete for the current scoped fields:
+  `bank.money_account`, `economy.experience_points`, and derived level.
+- `bsii_core::find_numeric_fields` walks the schema and returns exact payload
+  offsets for UInt32/Int64 fields. A constructed BSII fixture verifies values,
+  structure names, type IDs, sizes, and offsets.
+- Tauri save mutation rejects ambiguous or mismatched fields, validates level
+  1-200 and UInt32 experience bounds, preserves plain vs ScsC storage, backs
+  up before writing, atomically replaces the file, and reads the result back
+  for verification.
+- ScsC decoding now checks the header's expected decompressed size. The
+  frontend uses independent drafts for the three numeric inputs, clears drafts
+  when the selected save changes, highlights the selected save, and ignores
+  stale async reads after a rapid selection change.
+- The fixture backend has real fixture URIs and mutable in-memory values so
+  browser previews exercise the same interaction path as the Tauri backend.
+- Final verification: `npm run build` passed; Rust workspace tests passed
+  (10 tests); Tauri `cargo check --locked` passed; Python tests passed 65/65;
+  and `cmd /c build-tauri.bat` produced
+  `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
+- `cargo fmt --check` passes for the touched Rust files when run with the
+  cached MSVC rustfmt. The cached GNU toolchain lacks rustfmt; its linker
+  `.drectve` warning is non-fatal.
