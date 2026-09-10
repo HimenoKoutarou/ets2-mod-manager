@@ -42,6 +42,11 @@ export interface UiCopy {
   appTitle: string;
   modWorkspace: string;
   scan: string;
+  cancelScan: string;
+  scanning: string;
+  scanCancelled: string;
+  scanSummary: (added: number, updated: number, removed: number, inspected: number) => string;
+  unsavedConfirm: string;
   save: string;
   launch: string;
   profiles: string;

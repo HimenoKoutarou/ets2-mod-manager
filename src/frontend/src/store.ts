@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type PresetRecord } from "./backend";
+import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type PresetRecord, type ScanSummary } from "./backend";
 import type { Language, ModRecord, ModView, Profile, SaveSlot } from "./types";
 
 export const fixtureProfiles: Profile[] = [
@@ -131,6 +131,7 @@ export const fixtureBackend: ModBackend = {
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
   },
+  cancelScan: async () => undefined,
   saveProfile: async () => undefined,
   launchGame: async () => undefined,
   listPresets: async () => [],
@@ -199,6 +200,8 @@ interface ModState {
   scanning: boolean;
   loading: boolean;
   error: string;
+  scanSummary: ScanSummary | null;
+  scanWasCancelled: boolean;
   presets: Record<string, PresetSnapshot[]>;
   selectedPresetName: string;
   setSecondaryPanel: (panel: "none" | "localization" | "diagnostics" | "saves") => void;
@@ -216,6 +219,7 @@ interface ModState {
   selectMod: (id: string) => void;
   moveMod: (id: string, targetIndex: number) => void;
   scan: () => Promise<void>;
+  cancelScan: () => Promise<void>;
   save: () => Promise<void>;
   launch: () => Promise<void>;
   savePreset: (name: string) => Promise<void>;
@@ -240,6 +244,8 @@ export const useModStore = create<ModState>((set, get) => ({
   scanning: false,
   loading: false,
   error: "",
+  scanSummary: null,
+  scanWasCancelled: false,
   presets: {},
   selectedPresetName: "",
   setSecondaryPanel: (secondaryPanel) => set({ secondaryPanel }),
@@ -297,6 +303,14 @@ export const useModStore = create<ModState>((set, get) => ({
   },
   setLanguage: (language) => set({ language }),
   selectProfile: async (selectedProfileId) => {
+    if (selectedProfileId === get().selectedProfileId) return;
+    if (get().dirty && typeof window !== "undefined" && !window.confirm(get().language === "zh_CN"
+      ? "当前 Profile 有未保存的 Mod 改动，切换后将丢失。确定继续吗？"
+      : get().language === "ru_RU"
+        ? "В профиле есть несохранённые изменения модов. Продолжить и отменить их?"
+        : "This Profile has unsaved Mod changes. Continue and discard them?")) {
+      return;
+    }
     set({ selectedProfileId, loading: true, error: "" });
     try {
       const mods = await backend.listMods(selectedProfileId);
@@ -356,18 +370,30 @@ export const useModStore = create<ModState>((set, get) => ({
     }),
   scan: async () => {
     if (get().scanning) return;
-    set({ scanning: true, error: "" });
+    set({ scanning: true, error: "", scanWasCancelled: false });
     try {
-      await backend.scan();
+      const summary = await backend.scan();
       const profileId = get().selectedProfileId;
       if (profileId && !get().dirty) {
         const mods = await backend.listMods(profileId);
-        set({ mods, selectedModId: mods[0]?.id ?? null, dirty: false });
+        set({ mods, selectedModId: mods[0]?.id ?? null, dirty: false, scanSummary: summary });
+      } else {
+        set({ scanSummary: summary });
       }
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      const cancelled = message.toLocaleLowerCase().includes("cancel");
+      set({ error: cancelled ? "" : message, scanWasCancelled: cancelled });
     } finally {
       set({ scanning: false });
+    }
+  },
+  cancelScan: async () => {
+    if (!get().scanning) return;
+    try {
+      await backend.cancelScan();
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
     }
   },
   save: async () => {

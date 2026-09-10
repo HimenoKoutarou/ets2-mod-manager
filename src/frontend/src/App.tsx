@@ -36,6 +36,8 @@ function App() {
     selectedModId,
     dirty,
     scanning,
+    scanSummary,
+    scanWasCancelled,
     loading,
     presets,
     selectedPresetName,
@@ -50,6 +52,7 @@ function App() {
     selectMod,
     moveMod,
     scan,
+    cancelScan,
     save,
     launch,
     savePreset,
@@ -125,8 +128,8 @@ function App() {
           </div>
         </div>
         <div className="header-actions">
-          <button className="button button-primary" onClick={() => { void scan(); }} disabled={scanning}>
-            <RefreshCw size={16} className={scanning ? "spin" : ""} />{scanning ? "…" : text.scan}
+          <button className={`button ${scanning ? "button-warning" : "button-primary"}`} onClick={() => { void (scanning ? cancelScan() : scan()); }}>
+            <RefreshCw size={16} className={scanning ? "spin" : ""} />{scanning ? text.cancelScan : text.scan}
           </button>
           <button className="button button-primary" onClick={() => { void save(); }} disabled={!dirty || selectedProfile.writable === false}><Save size={16} />{text.save}</button>
           <button className="button button-quiet" onClick={() => { void launch(); }}><Play size={16} />{text.launch}</button>
@@ -251,7 +254,12 @@ function App() {
             {filteredMods.length === 0 && <div className="empty-state">{text.noMods}</div>}
           </div>
 
-          <div className="panel-status"><span className={`status-dot ${dirty ? "dirty" : ""}`} />{dirty ? text.statusDirty : text.statusReady}<span className="status-spacer" />{text.statusCount(activeCount, mods.length)}</div>
+          <div className="panel-status">
+            <span className={`status-dot ${dirty ? "dirty" : ""}`} />
+            {scanWasCancelled ? text.scanCancelled : dirty ? text.statusDirty : text.statusReady}
+            {scanSummary && !scanWasCancelled && <span className="scan-summary">{text.scanSummary(scanSummary.added, scanSummary.updated, scanSummary.removed, scanSummary.inspected)}</span>}
+            <span className="status-spacer" />{text.statusCount(activeCount, mods.length)}
+          </div>
         </section>
 
         <aside className="details-panel">
@@ -296,7 +304,7 @@ function App() {
                 </div>
                 <Sparkles size={18} />
               </div>
-              <button className="button button-small panel-action" onClick={() => { void scanLocalization(); }} disabled={loading}>{text.scan}</button>
+              <button className="button button-small panel-action" onClick={() => { void scanLocalization(); }} disabled={loading || scanning}>{text.scan}</button>
               {localization?.entries.length ? (
                 <div className="support-list">
                   {localization.entries.slice(0, 80).map((entry) => (
@@ -316,7 +324,7 @@ function App() {
                 </div>
                 <LayoutGrid size={18} />
               </div>
-              <button className="button button-small panel-action" onClick={() => { void runDiagnostics(); }} disabled={loading}>{text.scan}</button>
+              <button className="button button-small panel-action" onClick={() => { void runDiagnostics(); }} disabled={loading || scanning}>{text.scan}</button>
               {diagnostics?.issues.length ? (
                 <div className="support-list">
                   {diagnostics.issues.map((issue) => (

@@ -139,6 +139,7 @@ export interface ModBackend {
   precheckCrash(profileId: string): Promise<CrashPrecheck>;
   inspectBsii(path: string): Promise<BsiiSummary>;
   scan(): Promise<ScanSummary>;
+  cancelScan(): Promise<void>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
   launchGame(): Promise<void>;
   listPresets(profileId: string): Promise<PresetRecord[]>;
@@ -183,6 +184,9 @@ const tauriBackend: ModBackend = {
   },
   scan() {
     return invoke<ScanSummary>("mod_scan");
+  },
+  cancelScan() {
+    return invoke<void>("mod_cancel");
   },
   async saveProfile(profileId, mods) {
     const activeMods = mods.filter((mod) => mod.enabled).map((mod) => mod.packageName).reverse();

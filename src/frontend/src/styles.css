@@ -25,6 +25,8 @@ button { color: inherit; }
 .button:disabled { cursor: default; opacity: .45; }
 .button-primary { background: #21897e; border-color: #1b6f67; color: #fff; font-weight: 600; }
 .button-primary:hover:not(:disabled) { background: #2aa198; border-color: #2aa198; }
+.button-warning { background: #8f5f20; border-color: #b47a2c; color: #fff; font-weight: 600; }
+.button-warning:hover:not(:disabled) { background: #b47a2c; border-color: #d59a42; }
 .button-quiet { background: transparent; border-color: transparent; }
 .button-small { min-height: 29px; padding: 0 9px; font-size: 12px; }
 .language-picker { height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #34404b; border-radius: 5px; color: #a7b4bf; }
@@ -104,6 +106,7 @@ button { color: inherit; }
 .empty-state { padding: 42px; color: #71808d; text-align: center; }
 .panel-status { min-height: 40px; gap: 7px; color: #71808d; font-size: 11px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #8bd5a5; }.status-dot.dirty { background: #f0c674; }
+.scan-summary { margin-left: 12px; color: #a7b4bf; }
 .status-spacer { flex: 1; }
 .details-panel { padding: 24px 20px; border-left: 1px solid #2a343d; }
 .detail-art { height: 150px; display: grid; place-items: center; position: relative; border: 1px solid #34404b; border-radius: 5px; color: #4fd1c5; background: #202830; }
