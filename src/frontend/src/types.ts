@@ -4,6 +4,8 @@ export type ModView = "all" | "active";
 export interface ModRecord {
   id: string;
   packageName: string;
+  path?: string;
+  packageType?: string;
   displayName: string;
   author: string;
   version: string;
@@ -12,6 +14,8 @@ export interface ModRecord {
   enabled: boolean;
   description: string;
   compatible: string;
+  size?: number;
+  modifiedMs?: number;
 }
 
 export interface Profile {
@@ -20,6 +24,8 @@ export interface Profile {
   company: string;
   location: "local" | "steam" | "cloud";
   modCount: number;
+  folder?: string;
+  writable?: boolean;
 }
 
 export interface UiCopy {
@@ -47,11 +53,19 @@ export interface UiCopy {
   selectHint: string;
   sourceLocal: string;
   sourceWorkshop: string;
+  source: string;
+  name: string;
+  package: string;
+  priority: string;
   enabled: string;
   category: string;
   author: string;
   version: string;
   compatible: string;
+  readOnly: string;
+  localProfile: string;
+  launchUnavailable: string;
+  noMods: string;
   statusReady: string;
   statusDirty: string;
   statusCount: (active: number, total: number) => string;

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowDown,
   ArrowDownToLine,
@@ -18,14 +18,16 @@ import {
   Wrench,
 } from "lucide-react";
 import { getCopy } from "./i18n";
-import { profiles, useModStore } from "./store";
+import { useModStore } from "./store";
 
 function App() {
   const {
     language,
+    profiles,
     selectedProfileId,
     mods,
     view,
+    selectedCategory,
     query,
     selectedModId,
     dirty,
@@ -35,6 +37,7 @@ function App() {
     setLanguage,
     selectProfile,
     setView,
+    setCategory,
     setQuery,
     toggleMod,
     setAll,
@@ -43,24 +46,38 @@ function App() {
     moveMod,
     scan,
     save,
+    launch,
     savePreset,
     selectPreset,
     loadPreset,
+    initialize,
+    error,
   } = useModStore();
+  useEffect(() => {
+    void initialize();
+  }, []);
   const [presetName, setPresetName] = useState("");
   const text = getCopy(language);
-  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0];
+  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
+    id: "",
+    name: text.profiles,
+    company: "",
+    location: "local" as const,
+    modCount: 0,
+  };
   const filteredMods = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return mods.filter((mod) => {
       const matchesView = view === "all" || mod.enabled;
+      const matchesCategory = selectedCategory === "all" || mod.category === selectedCategory;
       if (!matchesView) return false;
+      if (!matchesCategory) return false;
       if (!needle) return true;
       return [mod.displayName, mod.author, mod.packageName, mod.category].some((value) =>
         value.toLocaleLowerCase().includes(needle),
       );
     });
-  }, [mods, query, view]);
+  }, [mods, query, selectedCategory, view]);
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
   const activeCount = mods.filter((mod) => mod.enabled).length;
 
@@ -90,11 +107,11 @@ function App() {
           </div>
         </div>
         <div className="header-actions">
-          <button className="button button-primary" onClick={scan} disabled={scanning}>
+          <button className="button button-primary" onClick={() => { void scan(); }} disabled={scanning}>
             <RefreshCw size={16} className={scanning ? "spin" : ""} />{scanning ? "…" : text.scan}
           </button>
-          <button className="button button-primary" onClick={save} disabled={!dirty}><Save size={16} />{text.save}</button>
-          <button className="button button-quiet" onClick={() => window.alert(text.launch)}><Play size={16} />{text.launch}</button>
+          <button className="button button-primary" onClick={() => { void save(); }} disabled={!dirty || selectedProfile.writable === false}><Save size={16} />{text.save}</button>
+          <button className="button button-quiet" onClick={() => { void launch(); }}><Play size={16} />{text.launch}</button>
           <label className="language-picker" title="Language">
             <Languages size={16} />
             <select value={language} onChange={(event) => setLanguage(event.target.value as typeof language)}>
@@ -116,7 +133,7 @@ function App() {
                 <button
                   key={profile.id}
                   className={`profile-item ${profile.id === selectedProfileId ? "is-selected" : ""}`}
-                  onClick={() => selectProfile(profile.id)}
+                  onClick={() => { void selectProfile(profile.id); }}
                 >
                   <span className="profile-icon"><FolderOpen size={15} /></span>
                   <span className="profile-copy">
@@ -130,32 +147,33 @@ function App() {
           </section>
           <section className="sidebar-section">
             <div className="section-heading"><span>{text.categories}</span><SlidersHorizontal size={14} /></div>
-            <button className="category-item is-selected"><span className="category-dot dot-all" />{text.allMods}<span>{mods.length}</span></button>
-            {["地图", "图形", "天气", "AI 交通", "声音"].map((category) => (
-              <button className="category-item" key={category}>
+            <button className={`category-item ${selectedCategory === "all" ? "is-selected" : ""}`} onClick={() => setCategory("all")}><span className="category-dot dot-all" />{text.allMods}<span>{mods.length}</span></button>
+            {Array.from(new Set(mods.map((mod) => mod.category).filter((category) => category && category !== "unknown"))).sort((a, b) => a.localeCompare(b)).map((category) => (
+              <button className={`category-item ${selectedCategory === category ? "is-selected" : ""}`} key={category} onClick={() => setCategory(category)}>
                 <span className="category-dot" />{category}<span>{mods.filter((mod) => mod.category === category).length}</span>
               </button>
             ))}
           </section>
           <section className="sidebar-secondary">
             <div className="section-heading"><span>{text.secondary}</span></div>
-            <button className="secondary-item"><Sparkles size={15} />{text.localization}</button>
-            <button className="secondary-item"><LayoutGrid size={15} />{text.diagnostics}</button>
-            <button className="secondary-item"><FolderOpen size={15} />{text.saves}</button>
-            <button className="secondary-item"><Wrench size={15} />{text.tools}</button>
+            <button className="secondary-item" disabled><Sparkles size={15} />{text.localization}</button>
+            <button className="secondary-item" disabled><LayoutGrid size={15} />{text.diagnostics}</button>
+            <button className="secondary-item" disabled><FolderOpen size={15} />{text.saves}</button>
+            <button className="secondary-item" disabled><Wrench size={15} />{text.tools}</button>
           </section>
         </aside>
 
         <section className="mod-panel">
+          {error && <div className="error-banner" role="alert">{error}</div>}
           <div className="panel-toolbar">
             <div>
               <div className="panel-title">{text.modWorkspace}</div>
-              <div className="panel-subtitle">{selectedProfile.name} · {text.statusCount(activeCount, mods.length)}</div>
+              <div className="panel-subtitle">{selectedProfile.name} · {text.statusCount(activeCount, mods.length)}{selectedProfile.writable === false ? ` · ${text.readOnly}` : ""}</div>
             </div>
             <div className="batch-actions">
-              <button className="button button-small" onClick={() => setAll(true)}>{text.enableAll}</button>
-              <button className="button button-small" onClick={() => setAll(false)}>{text.disableAll}</button>
-              <button className="button button-small" onClick={invertAll}>{text.invert}</button>
+              <button className="button button-small" onClick={() => setAll(true)} disabled={!selectedProfile.writable}>{text.enableAll}</button>
+              <button className="button button-small" onClick={() => setAll(false)} disabled={!selectedProfile.writable}>{text.disableAll}</button>
+              <button className="button button-small" onClick={invertAll} disabled={!selectedProfile.writable}>{text.invert}</button>
             </div>
           </div>
 
@@ -168,36 +186,36 @@ function App() {
           </div>
 
           <div className="priority-row">
-            <span className="priority-label">{language === "zh_CN" ? "优先级" : language === "ru_RU" ? "Приоритет" : "Priority"}</span>
-            <button className="icon-button" onClick={() => moveSelected("top")} title={text.moveTop}><ArrowUpToLine size={16} /></button>
-            <button className="icon-button" onClick={() => moveSelected("up")} title={text.moveUp}><ArrowUp size={16} /></button>
-            <button className="icon-button" onClick={() => moveSelected("down")} title={text.moveDown}><ArrowDown size={16} /></button>
-            <button className="icon-button" onClick={() => moveSelected("bottom")} title={text.moveBottom}><ArrowDownToLine size={16} /></button>
+            <span className="priority-label">{text.priority}</span>
+            <button className="icon-button" onClick={() => moveSelected("top")} title={text.moveTop} disabled={!selectedProfile.writable}><ArrowUpToLine size={16} /></button>
+            <button className="icon-button" onClick={() => moveSelected("up")} title={text.moveUp} disabled={!selectedProfile.writable}><ArrowUp size={16} /></button>
+            <button className="icon-button" onClick={() => moveSelected("down")} title={text.moveDown} disabled={!selectedProfile.writable}><ArrowDown size={16} /></button>
+            <button className="icon-button" onClick={() => moveSelected("bottom")} title={text.moveBottom} disabled={!selectedProfile.writable}><ArrowDownToLine size={16} /></button>
             <span className="toolbar-divider" />
             <input className="preset-input" value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder={text.presetPlaceholder} />
-            <button className="button button-small" disabled={!presetName.trim()} onClick={() => { savePreset(presetName); setPresetName(""); }}>{text.savePreset}</button>
-            <select className="preset-select" value={selectedPresetName} onChange={(event) => selectPreset(event.target.value)} aria-label={text.loadPreset}>
+            <button className="button button-small" disabled={!presetName.trim() || selectedProfile.writable === false} onClick={() => { void savePreset(presetName); setPresetName(""); }}>{text.savePreset}</button>
+            <select className="preset-select" value={selectedPresetName} onChange={(event) => selectPreset(event.target.value)} aria-label={text.loadPreset} disabled={!selectedProfile.writable}>
               <option value="">{text.loadPreset}</option>
               {Object.keys(presets).map((name) => <option value={name} key={name}>{name}</option>)}
             </select>
-            <button className="button button-small" disabled={!selectedPresetName} onClick={loadPreset}>{text.loadPreset}</button>
+            <button className="button button-small" disabled={!selectedPresetName || !selectedProfile.writable} onClick={() => { void loadPreset(); }}>{text.loadPreset}</button>
           </div>
 
           <div className="table-wrap">
             <table className="mod-table">
-              <thead><tr><th className="check-column">{text.enabled}</th><th>NAME</th><th>{text.category}</th><th>{language === "zh_CN" ? "来源" : language === "ru_RU" ? "Источник" : "SOURCE"}</th><th>PACKAGE</th></tr></thead>
+              <thead><tr><th className="check-column">{text.enabled}</th><th>{text.name}</th><th>{text.category}</th><th>{text.source}</th><th>{text.package}</th></tr></thead>
               <tbody>
                 {filteredMods.map((mod, index) => (
                   <tr
                     key={mod.id}
-                    draggable
+                    draggable={selectedProfile.writable !== false}
                     onDragStart={(event) => event.dataTransfer.setData("text/mod-id", mod.id)}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => onDrop(mod.id, event)}
                     className={mod.id === selectedModId ? "is-selected" : ""}
                     onClick={() => selectMod(mod.id)}
                   >
-                    <td className="check-column"><button className={`toggle ${mod.enabled ? "is-on" : ""}`} onClick={(event) => { event.stopPropagation(); toggleMod(mod.id); }} aria-label={text.enabled}>{mod.enabled && <Check size={14} />}</button></td>
+                    <td className="check-column"><button className={`toggle ${mod.enabled ? "is-on" : ""}`} disabled={!selectedProfile.writable} onClick={(event) => { event.stopPropagation(); toggleMod(mod.id); }} aria-label={text.enabled}>{mod.enabled && <Check size={14} />}</button></td>
                     <td><div className="mod-name-cell"><span className={`mod-badge badge-${index % 4}`}><Sparkles size={14} /></span><span><strong>{mod.displayName}</strong><small>{mod.author}</small></span></div></td>
                     <td><span className="tag">{mod.category}</span></td>
                     <td><span className={`source source-${mod.source}`}>{mod.source === "local" ? text.sourceLocal : text.sourceWorkshop}</span></td>
@@ -206,7 +224,7 @@ function App() {
                 ))}
               </tbody>
             </table>
-            {filteredMods.length === 0 && <div className="empty-state">{text.selectHint}</div>}
+            {filteredMods.length === 0 && <div className="empty-state">{text.noMods}</div>}
           </div>
 
           <div className="panel-status"><span className={`status-dot ${dirty ? "dirty" : ""}`} />{dirty ? text.statusDirty : text.statusReady}<span className="status-spacer" />{text.statusCount(activeCount, mods.length)}</div>
