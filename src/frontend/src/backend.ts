@@ -59,6 +59,28 @@ export interface BsiiSummary {
   objects: number;
 }
 
+export interface SaveField {
+  structureName: string;
+  fieldName: string;
+  typeId: number;
+  value: number;
+  offset: number;
+  size: number;
+}
+
+export interface SaveSnapshot {
+  version: number;
+  fields: SaveField[];
+}
+
+export interface SaveMutation {
+  success: boolean;
+  operation: string;
+  message: string;
+  backupPath?: string;
+  value?: number;
+}
+
 interface SaveSlotWire {
   profileId: string;
   slotId: string;
@@ -138,6 +160,8 @@ export interface ModBackend {
   scanLocalization(profileId: string, targetLocale: string): Promise<LocalizationScan>;
   precheckCrash(profileId: string): Promise<CrashPrecheck>;
   inspectBsii(path: string): Promise<BsiiSummary>;
+  readSaveSnapshot(path: string): Promise<SaveSnapshot>;
+  mutateSave(path: string, operation: "set_money" | "set_experience" | "set_level", value: number): Promise<SaveMutation>;
   scan(): Promise<ScanSummary>;
   cancelScan(): Promise<void>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
@@ -181,6 +205,12 @@ const tauriBackend: ModBackend = {
   },
   inspectBsii(path) {
     return invoke<BsiiSummary>("save_inspect_bsii", { request: { path } });
+  },
+  readSaveSnapshot(path) {
+    return invoke<SaveSnapshot>("save_read_snapshot", { request: { path } });
+  },
+  mutateSave(path, operation, value) {
+    return invoke<SaveMutation>("save_mutate", { request: { path, operation, value } });
   },
   scan() {
     return invoke<ScanSummary>("mod_scan");

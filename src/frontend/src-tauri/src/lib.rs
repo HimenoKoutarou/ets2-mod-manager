@@ -216,6 +216,42 @@ struct BsiiSummaryDto {
     objects: u32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveFieldDto {
+    structure_name: String,
+    field_name: String,
+    type_id: u32,
+    value: i64,
+    offset: usize,
+    size: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSnapshotDto {
+    version: u32,
+    fields: Vec<SaveFieldDto>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveMutationRequest {
+    path: String,
+    operation: String,
+    value: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveMutationDto {
+    success: bool,
+    operation: String,
+    message: String,
+    backup_path: Option<String>,
+    value: Option<i64>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BsiiInspectRequest {
@@ -408,6 +444,11 @@ fn decode_scsc_or_plain(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let iv: [u8; 16] = bytes[36..52]
         .try_into()
         .map_err(|_| "invalid ScsC IV".to_string())?;
+    let expected_size = u32::from_le_bytes(
+        bytes[52..56]
+            .try_into()
+            .map_err(|_| "invalid ScsC size".to_string())?,
+    ) as usize;
     let decrypted = cbc_decrypt(&bytes[56..], &iv)?;
     let pad = *decrypted.last().ok_or("ScsC payload is empty")? as usize;
     if pad == 0
@@ -425,6 +466,13 @@ fn decode_scsc_or_plain(bytes: &[u8]) -> Result<Vec<u8>, String> {
     decoder
         .read_to_end(&mut output)
         .map_err(|e| format!("ScsC decompress failed: {e}"))?;
+    if expected_size != 0 && output.len() != expected_size {
+        return Err(format!(
+            "ScsC decompressed size mismatch: {} != {}",
+            output.len(),
+            expected_size
+        ));
+    }
     Ok(output)
 }
 
@@ -450,7 +498,9 @@ fn encode_scsc(plain: &[u8]) -> Result<Vec<u8>, String> {
     output.extend_from_slice(b"ScsC");
     output.extend_from_slice(&[0u8; 32]);
     output.extend_from_slice(&iv);
-    output.extend_from_slice(&(plain.len() as i32).to_le_bytes());
+    let plain_len =
+        u32::try_from(plain.len()).map_err(|_| "ScsC plaintext is too large".to_string())?;
+    output.extend_from_slice(&plain_len.to_le_bytes());
     output.extend_from_slice(&encrypted);
     Ok(output)
 }
@@ -1727,6 +1777,7 @@ fn save_inspect_bsii(request: BsiiInspectRequest) -> Result<BsiiSummaryDto, Stri
         return Err(format!("Save file was not found: {}", path.display()));
     }
     let bytes = fs::read(&path).map_err(|error| format!("read BSII file failed: {error}"))?;
+    let bytes = decode_scsc_or_plain(&bytes)?;
     let summary =
         bsii_core::parse_summary(&bytes).map_err(|error| format!("parse BSII failed: {error}"))?;
     Ok(BsiiSummaryDto {
@@ -1734,6 +1785,155 @@ fn save_inspect_bsii(request: BsiiInspectRequest) -> Result<BsiiSummaryDto, Stri
         definitions: summary.definitions,
         objects: summary.objects,
     })
+}
+
+fn save_snapshot(path: &Path) -> Result<SaveSnapshotDto, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read save failed: {error}"))?;
+    let bytes = decode_scsc_or_plain(&bytes)?;
+    let header = bsii_core::inspect_header(&bytes).map_err(str::to_string)?;
+    let fields = bsii_core::find_numeric_fields(&bytes, &["money_account", "experience_points"])
+        .map_err(|error| format!("parse save failed: {error}"))?
+        .into_iter()
+        .map(|field| SaveFieldDto {
+            structure_name: field.structure_name,
+            field_name: field.field_name,
+            type_id: field.type_id,
+            value: field.value,
+            offset: field.offset,
+            size: field.size,
+        })
+        .collect();
+    Ok(SaveSnapshotDto {
+        version: header.version,
+        fields,
+    })
+}
+
+fn level_xp(level: i64) -> Result<i64, String> {
+    if !(1..=200).contains(&level) {
+        return Err("Level must be between 1 and 200.".into());
+    }
+    level
+        .checked_mul(level - 1)
+        .and_then(|value| value.checked_mul(500))
+        .ok_or_else(|| "Level value is out of range.".into())
+}
+
+fn mutate_save(path: &Path, operation: &str, value: i64) -> Result<SaveMutationDto, String> {
+    if is_game_running() {
+        return Err("Exit ETS2 or ATS before editing a save.".into());
+    }
+    let original = fs::read(path).map_err(|error| format!("read save failed: {error}"))?;
+    let plain = decode_scsc_or_plain(&original)?;
+    let target_field = match operation {
+        "set_money" => ("bank", "money_account", 0x31u32, 8usize),
+        "set_experience" => ("economy", "experience_points", 0x27u32, 4usize),
+        "set_level" => ("economy", "experience_points", 0x27u32, 4usize),
+        _ => return Err("Unsupported save operation.".into()),
+    };
+    let write_value = if operation == "set_level" {
+        level_xp(value)?
+    } else {
+        value
+    };
+    if operation == "set_experience" && !(0..=(u32::MAX as i64)).contains(&write_value) {
+        return Err("Experience must be between 0 and 4294967295.".into());
+    }
+    if operation == "set_money" && !(i64::MIN..=i64::MAX).contains(&write_value) {
+        return Err("Money value is out of range.".into());
+    }
+    let fields = bsii_core::find_numeric_fields(&plain, &[target_field.1])
+        .map_err(|error| format!("parse save failed: {error}"))?;
+    let matches: Vec<_> = fields
+        .into_iter()
+        .filter(|field| {
+            field.structure_name == target_field.0
+                && field.field_name == target_field.1
+                && field.type_id == target_field.2
+                && field.size == target_field.3
+        })
+        .collect();
+    if matches.len() != 1 {
+        return Err(format!(
+            "Field {} was not found uniquely in the BSII save.",
+            target_field.1
+        ));
+    }
+    let field = &matches[0];
+    if field.value == write_value {
+        return Ok(SaveMutationDto {
+            success: false,
+            operation: operation.into(),
+            message: "The requested value is already stored.".into(),
+            backup_path: None,
+            value: Some(field.value),
+        });
+    }
+    let mut output_plain = plain.clone();
+    match field.type_id {
+        0x27 => output_plain[field.offset..field.offset + 4]
+            .copy_from_slice(&(write_value as u32).to_le_bytes()),
+        0x31 => {
+            output_plain[field.offset..field.offset + 8].copy_from_slice(&write_value.to_le_bytes())
+        }
+        _ => unreachable!(),
+    }
+    let output = if original.starts_with(b"ScsC") {
+        encode_scsc(&output_plain)?
+    } else {
+        output_plain
+    };
+    let backup = path.with_extension(format!("bak-{}", now_ms()));
+    fs::copy(path, &backup).map_err(|error| format!("backup save failed: {error}"))?;
+    if let Err(error) = atomic_write(path, &output) {
+        let _ = fs::copy(&backup, path);
+        return Err(error);
+    }
+    let verify = match save_snapshot(path) {
+        Ok(snapshot) => snapshot,
+        Err(verify_error) => {
+            let restore_error = fs::copy(&backup, path).err();
+            return Err(match restore_error {
+                Some(error) => format!(
+                    "Save write verification read failed: {verify_error}; restoring backup failed: {error}"
+                ),
+                None => format!(
+                    "Save write verification read failed: {verify_error}; original save restored from backup."
+                ),
+            });
+        }
+    };
+    let verified = verify
+        .fields
+        .iter()
+        .find(|entry| {
+            entry.structure_name == target_field.0
+                && entry.field_name == target_field.1
+                && entry.type_id == target_field.2
+                && entry.size == target_field.3
+        })
+        .map(|entry| entry.value);
+    if verified != Some(write_value) {
+        let _ = fs::copy(&backup, path);
+        return Err("Save write verification failed; original save restored.".into());
+    }
+    Ok(SaveMutationDto {
+        success: true,
+        operation: operation.into(),
+        message: format!("Updated {}.", target_field.1),
+        backup_path: Some(normalize_path(&backup)),
+        value: Some(write_value),
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_read_snapshot(request: BsiiInspectRequest) -> Result<SaveSnapshotDto, String> {
+    save_snapshot(Path::new(&request.path))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_mutate(request: SaveMutationRequest) -> Result<SaveMutationDto, String> {
+    mutate_save(Path::new(&request.path), &request.operation, request.value)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2466,6 +2666,15 @@ mod tests {
     }
 
     #[test]
+    fn scsc_roundtrip_rejects_wrong_declared_size() {
+        let plain = b"BSII\x03\0\0\0payload";
+        let mut encoded = encode_scsc(plain).expect("encode");
+        encoded[52..56].copy_from_slice(&(plain.len() as u32 + 1).to_le_bytes());
+        let error = decode_scsc_or_plain(&encoded).expect_err("size mismatch");
+        assert!(error.contains("size mismatch"));
+    }
+
+    #[test]
     fn active_mod_parser_keeps_game_order() {
         let text = "profile : .profile {\n active_mods[0]: \"high\"\n active_mods[1]: \"low\"\n}";
         assert_eq!(parse_active_mods(text), ["high", "low"]);
@@ -2698,8 +2907,11 @@ mod tests {
                 "SiiNunit\n{{\n save_container : .save {{\n  name : \"{}\"\n }}\n}}\n",
                 escape_sii(display_name)
             );
-            fs::write(slot.join("info.sii"), encode_scsc(info.as_bytes()).expect("encode info"))
-                .expect("write info");
+            fs::write(
+                slot.join("info.sii"),
+                encode_scsc(info.as_bytes()).expect("encode info"),
+            )
+            .expect("write info");
         }
         let profile = ProfileDto {
             id: "local:demo".into(),
@@ -2712,11 +2924,17 @@ mod tests {
         };
         let slots = list_local_saves(&profile);
         assert_eq!(
-            slots.iter().map(|slot| slot.display_name.as_str()).collect::<Vec<_>>(),
+            slots
+                .iter()
+                .map(|slot| slot.display_name.as_str())
+                .collect::<Vec<_>>(),
             ["Alpha Save", "Zulu Save", "Autosave", "Autosave Drive"]
         );
         assert_eq!(
-            slots.iter().map(|slot| slot.slot_id.as_str()).collect::<Vec<_>>(),
+            slots
+                .iter()
+                .map(|slot| slot.slot_id.as_str())
+                .collect::<Vec<_>>(),
             ["2", "1", "autosave", "autosave_drive"]
         );
 
@@ -2816,7 +3034,9 @@ pub fn run() {
             localization_cancel,
             crash_discover,
             crash_precheck,
-            save_inspect_bsii
+            save_inspect_bsii,
+            save_read_snapshot,
+            save_mutate
         ])
         .run(tauri::generate_context!())
         .expect("error while running ETS2 Mod Manager");

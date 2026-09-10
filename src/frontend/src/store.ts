@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type PresetRecord, type ScanSummary } from "./backend";
+import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
+import { getCopy } from "./i18n";
 import type { Language, ModRecord, ModView, Profile, SaveSlot } from "./types";
 
 export const fixtureProfiles: Profile[] = [
@@ -8,6 +9,8 @@ export const fixtureProfiles: Profile[] = [
   { id: "profile-cloud", name: "Steam Cloud", company: "Remote", location: "cloud", modCount: 3, writable: false },
 ];
 export const profiles = fixtureProfiles;
+let fixtureSaveMoney = 1_253_729;
+let fixtureSaveExperience = 279_375;
 
 export const initialMods: ModRecord[] = [
   {
@@ -77,13 +80,13 @@ export const fixtureBackend: ModBackend = {
   listProfiles: async () => fixtureProfiles.map((profile) => ({ ...profile })),
   listMods: async () => initialMods.map((mod) => ({ ...mod })),
   listSaves: async (profileId) =>
-    profileId.startsWith("profile-")
+    fixtureProfiles.find((profile) => profile.id === profileId)?.location === "local"
       ? [
           {
             profileId,
             slotId: "career-1",
-            folder: "",
-            gameSii: "",
+            folder: `fixture://${profileId}/save/career-1`,
+            gameSii: `fixture://${profileId}/save/career-1/game.sii`,
             displayName: "示例存档",
             lastModifiedMs: Date.now() - 86_400_000,
             profileLocation: "local",
@@ -91,8 +94,8 @@ export const fixtureBackend: ModBackend = {
           {
             profileId,
             slotId: "autosave",
-            folder: "",
-            gameSii: "",
+            folder: `fixture://${profileId}/save/autosave`,
+            gameSii: `fixture://${profileId}/save/autosave/game.sii`,
             displayName: "自动保存",
             lastModifiedMs: Date.now(),
             profileLocation: "local",
@@ -127,6 +130,38 @@ export const fixtureBackend: ModBackend = {
     issues: [],
   }),
   inspectBsii: async () => ({ version: 0, definitions: 0, objects: 0 }),
+  readSaveSnapshot: async () => ({
+    version: 3,
+    fields: [
+      {
+        structureName: "bank",
+        fieldName: "money_account",
+        typeId: 0x31,
+        value: fixtureSaveMoney,
+        offset: 0,
+        size: 8,
+      },
+      {
+        structureName: "economy",
+        fieldName: "experience_points",
+        typeId: 0x27,
+        value: fixtureSaveExperience,
+        offset: 0,
+        size: 4,
+      },
+    ],
+  }),
+  mutateSave: async (_path, operation, value) => {
+    if (operation === "set_money") fixtureSaveMoney = value;
+    if (operation === "set_experience") fixtureSaveExperience = value;
+    if (operation === "set_level") fixtureSaveExperience = value * (value - 1) * 500;
+    return {
+      success: true,
+      operation,
+      message: "Updated.",
+      value,
+    };
+  },
   scan: async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
@@ -140,6 +175,7 @@ export const fixtureBackend: ModBackend = {
 };
 
 const backend = createBackend(fixtureBackend);
+let saveSelectionRequest = 0;
 
 interface PresetSnapshot {
   id: string;
@@ -189,6 +225,8 @@ interface ModState {
   selectedProfileId: string;
   mods: ModRecord[];
   saves: SaveSlot[];
+  selectedSave: SaveSlot | null;
+  saveSnapshot: SaveSnapshot | null;
   localization: LocalizationScan | null;
   diagnostics: CrashPrecheck | null;
   secondaryPanel: "none" | "localization" | "diagnostics" | "saves";
@@ -207,6 +245,8 @@ interface ModState {
   setSecondaryPanel: (panel: "none" | "localization" | "diagnostics" | "saves") => void;
   scanLocalization: () => Promise<void>;
   runDiagnostics: () => Promise<void>;
+  selectSave: (slot: SaveSlot | null) => Promise<void>;
+  mutateSave: (operation: "set_money" | "set_experience" | "set_level", value: number) => Promise<void>;
   initialize: () => Promise<void>;
   setLanguage: (language: Language) => void;
   selectProfile: (id: string) => Promise<void>;
@@ -233,6 +273,8 @@ export const useModStore = create<ModState>((set, get) => ({
   selectedProfileId: fixtureProfiles[0]?.id ?? "",
   mods: initialMods.map((mod) => ({ ...mod })),
   saves: [],
+  selectedSave: null,
+  saveSnapshot: null,
   localization: null,
   diagnostics: null,
   secondaryPanel: "none",
@@ -275,7 +317,54 @@ export const useModStore = create<ModState>((set, get) => ({
       set({ loading: false });
     }
   },
+  selectSave: async (selectedSave) => {
+    const requestId = ++saveSelectionRequest;
+    set({
+      selectedSave,
+      saveSnapshot: null,
+      error: "",
+    });
+    if (!selectedSave?.gameSii) return;
+    try {
+      const saveSnapshot = await backend.readSaveSnapshot(selectedSave.gameSii);
+      if (
+        requestId !== saveSelectionRequest
+        || get().selectedSave?.gameSii !== selectedSave.gameSii
+      ) {
+        return;
+      }
+      set({ saveSnapshot, secondaryPanel: "saves" });
+    } catch (error) {
+      if (
+        requestId !== saveSelectionRequest
+        || get().selectedSave?.gameSii !== selectedSave.gameSii
+      ) {
+        return;
+      }
+      set({ error: error instanceof Error ? error.message : String(error), secondaryPanel: "saves" });
+    }
+  },
+  mutateSave: async (operation, value) => {
+    const selectedSave = get().selectedSave;
+    if (!selectedSave?.gameSii) return;
+    set({ loading: true, error: "" });
+    try {
+      const result = await backend.mutateSave(selectedSave.gameSii, operation, value);
+      if (!result.success) {
+        set({ error: result.message });
+        return;
+      }
+      const saveSnapshot = await backend.readSaveSnapshot(selectedSave.gameSii);
+      if (get().selectedSave?.gameSii !== selectedSave.gameSii) return;
+      set({ saveSnapshot });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ loading: false });
+    }
+  },
   initialize: async () => {
+    saveSelectionRequest += 1;
     set({ loading: true, error: "" });
     try {
       const profiles = await backend.listProfiles();
@@ -290,6 +379,8 @@ export const useModStore = create<ModState>((set, get) => ({
         selectedProfileId,
         mods,
         saves,
+        selectedSave: null,
+        saveSnapshot: null,
         selectedModId: mods[0]?.id ?? null,
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",
@@ -304,13 +395,10 @@ export const useModStore = create<ModState>((set, get) => ({
   setLanguage: (language) => set({ language }),
   selectProfile: async (selectedProfileId) => {
     if (selectedProfileId === get().selectedProfileId) return;
-    if (get().dirty && typeof window !== "undefined" && !window.confirm(get().language === "zh_CN"
-      ? "当前 Profile 有未保存的 Mod 改动，切换后将丢失。确定继续吗？"
-      : get().language === "ru_RU"
-        ? "В профиле есть несохранённые изменения модов. Продолжить и отменить их?"
-        : "This Profile has unsaved Mod changes. Continue and discard them?")) {
+    if (get().dirty && typeof window !== "undefined" && !window.confirm(getCopy(get().language).unsavedConfirm)) {
       return;
     }
+    saveSelectionRequest += 1;
     set({ selectedProfileId, loading: true, error: "" });
     try {
       const mods = await backend.listMods(selectedProfileId);
@@ -319,6 +407,8 @@ export const useModStore = create<ModState>((set, get) => ({
       set({
         mods,
         saves,
+        selectedSave: null,
+        saveSnapshot: null,
         secondaryPanel: "none",
         localization: null,
         diagnostics: null,
@@ -326,6 +416,7 @@ export const useModStore = create<ModState>((set, get) => ({
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",
         dirty: false,
+        scanWasCancelled: false,
       });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });

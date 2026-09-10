@@ -13,6 +13,16 @@ pub struct BsiiSummary {
     pub objects: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumericField {
+    pub structure_name: String,
+    pub field_name: String,
+    pub type_id: u32,
+    pub value: i64,
+    pub offset: usize,
+    pub size: usize,
+}
+
 pub fn inspect_header(bytes: &[u8]) -> Result<BsiiHeader, &'static str> {
     if bytes.len() < 8 || &bytes[..4] != b"BSII" {
         return Err("invalid_bsii_header");
@@ -290,9 +300,139 @@ pub fn parse_summary(bytes: &[u8]) -> Result<BsiiSummary, String> {
     })
 }
 
+/// Read the uniquely-addressable integer fields used by the save editor.
+///
+/// The parser still walks every field using the schema, but only materializes
+/// UInt32/Int64 values whose names were requested. This keeps the C ABI and
+/// Tauri boundary compact while retaining exact payload offsets for mutation.
+pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericField>, String> {
+    let header = inspect_header(bytes).map_err(str::to_string)?;
+    let wanted: std::collections::HashSet<&str> = wanted.iter().copied().collect();
+    let mut reader = Reader::new(bytes, header.version);
+    let mut definitions: Vec<Option<(String, Vec<(String, u32, u32)>)>> = Vec::new();
+    let mut result = Vec::new();
+    while reader.pos < reader.data.len() {
+        let block = reader.u32()?;
+        if block == 0 {
+            let valid = reader.u8()? != 0;
+            let id = reader.u32()?;
+            let name = reader.string()?;
+            let mut fields = Vec::new();
+            loop {
+                let ty = reader.u32()?;
+                if ty == 0 {
+                    break;
+                }
+                let field_name = reader.string()?;
+                let mut ordinal_count = 0;
+                if ty == 0x37 {
+                    ordinal_count = reader.u32()?;
+                    for _ in 0..ordinal_count {
+                        reader.u32()?;
+                        reader.string()?;
+                    }
+                }
+                fields.push((field_name, ty, ordinal_count));
+            }
+            if id as usize >= definitions.len() {
+                definitions.resize(id as usize + 1, None);
+            }
+            definitions[id as usize] = if valid { Some((name, fields)) } else { None };
+            continue;
+        }
+
+        let Some((structure_name, fields)) =
+            definitions.get(block as usize).and_then(Option::as_ref)
+        else {
+            return Err("unknown_bsii_structure".into());
+        };
+        encoded_id(&mut reader)?;
+        for (field_name, ty, ordinal_count) in fields {
+            let offset = reader.pos;
+            match *ty {
+                0x27 | 0x2F => {
+                    let value = reader.u32()? as i64;
+                    if wanted.contains(field_name.as_str()) {
+                        result.push(NumericField {
+                            structure_name: structure_name.clone(),
+                            field_name: field_name.clone(),
+                            type_id: *ty,
+                            value,
+                            offset,
+                            size: 4,
+                        });
+                    }
+                }
+                0x31 => {
+                    let value = reader.i64()?;
+                    if wanted.contains(field_name.as_str()) {
+                        result.push(NumericField {
+                            structure_name: structure_name.clone(),
+                            field_name: field_name.clone(),
+                            type_id: *ty,
+                            value,
+                            offset,
+                            size: 8,
+                        });
+                    }
+                }
+                _ => skip_value(&mut reader, *ty, *ordinal_count)?,
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn push_string(target: &mut Vec<u8>, value: &str) {
+        target.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        target.extend_from_slice(value.as_bytes());
+    }
+
+    fn push_encoded_id(target: &mut Vec<u8>, parts: &[u64]) {
+        target.push(parts.len() as u8);
+        for part in parts {
+            target.extend_from_slice(&part.to_le_bytes());
+        }
+    }
+
+    fn numeric_fixture(experience: u32, money: i64) -> Vec<u8> {
+        let mut data = b"BSII".to_vec();
+        data.extend_from_slice(&3u32.to_le_bytes());
+
+        // economy { bank: reference, experience_points: uint32 }
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(&1u32.to_le_bytes());
+        push_string(&mut data, "economy");
+        data.extend_from_slice(&0x39u32.to_le_bytes());
+        push_string(&mut data, "bank");
+        data.extend_from_slice(&0x27u32.to_le_bytes());
+        push_string(&mut data, "experience_points");
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        // bank { money_account: int64 }
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.push(1);
+        data.extend_from_slice(&2u32.to_le_bytes());
+        push_string(&mut data, "bank");
+        data.extend_from_slice(&0x31u32.to_le_bytes());
+        push_string(&mut data, "money_account");
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        data.extend_from_slice(&1u32.to_le_bytes());
+        push_encoded_id(&mut data, &[1]);
+        push_encoded_id(&mut data, &[2]);
+        data.extend_from_slice(&experience.to_le_bytes());
+
+        data.extend_from_slice(&2u32.to_le_bytes());
+        push_encoded_id(&mut data, &[2]);
+        data.extend_from_slice(&money.to_le_bytes());
+        data
+    }
     #[test]
     fn reads_little_endian_version() {
         assert_eq!(inspect_header(b"BSII\x03\0\0\0").unwrap().version, 3);
@@ -302,6 +442,45 @@ mod tests {
         assert_eq!(
             inspect_header(b"BSII\x63\0\0\0"),
             Err("unsupported_bsii_version")
+        );
+    }
+
+    #[test]
+    fn numeric_field_query_rejects_non_bsii_input() {
+        assert!(find_numeric_fields(b"not-bsii", &["money_account"]).is_err());
+    }
+
+    #[test]
+    fn numeric_field_query_reads_typed_payloads_and_offsets() {
+        let bytes = numeric_fixture(279_375, 1_253_729);
+        let fields = find_numeric_fields(&bytes, &["money_account", "experience_points"])
+            .expect("numeric fields");
+
+        assert_eq!(fields.len(), 2);
+        let experience = fields
+            .iter()
+            .find(|field| field.field_name == "experience_points")
+            .expect("experience field");
+        assert_eq!(experience.structure_name, "economy");
+        assert_eq!(experience.type_id, 0x27);
+        assert_eq!(experience.size, 4);
+        assert_eq!(experience.value, 279_375);
+        assert_eq!(
+            &bytes[experience.offset..experience.offset + experience.size],
+            &279_375u32.to_le_bytes()
+        );
+
+        let money = fields
+            .iter()
+            .find(|field| field.field_name == "money_account")
+            .expect("money field");
+        assert_eq!(money.structure_name, "bank");
+        assert_eq!(money.type_id, 0x31);
+        assert_eq!(money.size, 8);
+        assert_eq!(money.value, 1_253_729);
+        assert_eq!(
+            &bytes[money.offset..money.offset + money.size],
+            &1_253_729i64.to_le_bytes()
         );
     }
 }

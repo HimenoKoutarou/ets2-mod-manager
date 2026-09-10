@@ -91,6 +91,13 @@ export interface UiCopy {
   tools: string;
   saveCount: (count: number) => string;
   noSaves: string;
+  saveSelectHint: string;
+  saveSnapshot: string;
+  money: string;
+  experience: string;
+  level: string;
+  apply: string;
+  saveReadOnly: string;
   saveUpdated: string;
   autosave: string;
   entriesSummary: (entries: number, cached: number, scanned: number) => string;

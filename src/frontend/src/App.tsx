@@ -20,6 +20,23 @@ import {
 import { getCopy } from "./i18n";
 import { useModStore } from "./store";
 
+type SaveDraftKey = "money_account" | "experience_points" | "level";
+
+function isValidSaveDraft(value: string, minimum: number, maximum: number): boolean {
+  if (!value.trim()) return false;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum;
+}
+
+function levelFromExperience(value: number): number {
+  const experience = Math.max(0, Math.floor(value));
+  let level = 1;
+  while (level < 200 && experience >= level * (level + 1) * 500) {
+    level += 1;
+  }
+  return level;
+}
+
 function App() {
   const {
     language,
@@ -27,6 +44,8 @@ function App() {
     selectedProfileId,
     mods,
     saves,
+    selectedSave,
+    saveSnapshot,
     localization,
     diagnostics,
     secondaryPanel,
@@ -59,15 +78,29 @@ function App() {
     selectPreset,
     loadPreset,
     setSecondaryPanel,
+    selectSave,
+    mutateSave,
     scanLocalization,
     runDiagnostics,
     initialize,
     error,
   } = useModStore();
+  const [presetName, setPresetName] = useState("");
+  const [saveValues, setSaveValues] = useState<Record<SaveDraftKey, string>>({
+    money_account: "",
+    experience_points: "",
+    level: "",
+  });
   useEffect(() => {
     void initialize();
   }, []);
-  const [presetName, setPresetName] = useState("");
+  useEffect(() => {
+    setSaveValues({
+      money_account: "",
+      experience_points: "",
+      level: "",
+    });
+  }, [selectedSave?.gameSii]);
   const text = getCopy(language);
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
     id: "",
@@ -115,6 +148,22 @@ function App() {
     if (!sourceId || !targetMod?.enabled) return;
     const target = mods.filter((mod) => mod.enabled).findIndex((mod) => mod.id === id);
     if (target >= 0) moveMod(sourceId, target);
+  }
+
+  function updateSaveDraft(key: SaveDraftKey, value: string) {
+    setSaveValues((current) => ({ ...current, [key]: value }));
+  }
+
+  function submitSaveDraft(
+    key: SaveDraftKey,
+    operation: "set_money" | "set_experience" | "set_level",
+    minimum: number,
+    maximum: number,
+  ) {
+    const raw = saveValues[key];
+    if (!isValidSaveDraft(raw, minimum, maximum)) return;
+    void mutateSave(operation, Number(raw));
+    updateSaveDraft(key, "");
   }
 
   return (
@@ -278,8 +327,13 @@ function App() {
                 <div className="save-list">
                   {saves.map((save) => (
                     <div
-                      className={`save-item ${save.slotId.toLowerCase().startsWith("autosave") ? "is-autosave" : ""}`}
+                      className={`save-item ${selectedSave?.slotId === save.slotId ? "is-selected" : ""} ${save.slotId.toLowerCase().startsWith("autosave") ? "is-autosave" : ""}`}
                       key={save.slotId}
+                      role="button"
+                      tabIndex={0}
+                      aria-pressed={selectedSave?.slotId === save.slotId}
+                      onClick={() => { void selectSave(save); }}
+                      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void selectSave(save); } }}
                     >
                       <div className="save-item-icon"><FolderOpen size={15} /></div>
                       <div className="save-item-copy">
@@ -292,6 +346,52 @@ function App() {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+              <div className="save-hint">{text.saveSelectHint}</div>
+              {selectedSave && (
+                <div className="save-editor">
+                  <div className="save-editor-heading">
+                    <strong>{selectedSave.displayName}</strong>
+                    <span>{saveSnapshot ? text.saveSnapshot : text.scanning}</span>
+                  </div>
+                  {saveSnapshot?.fields.length ? (
+                    <>
+                      {(["money_account", "experience_points"] as const).map((fieldName) => {
+                        const field = saveSnapshot.fields.find((entry) => entry.fieldName === fieldName);
+                        if (!field) return null;
+                        const minimum = fieldName === "money_account" ? Number.MIN_SAFE_INTEGER : 0;
+                        const maximum = fieldName === "money_account" ? Number.MAX_SAFE_INTEGER : 0xFFFF_FFFF;
+                        const draft = saveValues[fieldName];
+                        return (
+                          <div className="save-field" key={fieldName}>
+                            <div><span>{fieldName === "money_account" ? text.money : text.experience}</span><small>{field.value.toLocaleString()}</small></div>
+                            <input
+                              type="number"
+                              value={draft}
+                              onChange={(event) => updateSaveDraft(fieldName, event.target.value)}
+                              placeholder={String(field.value)}
+                              disabled={selectedSave.profileLocation !== "local" || loading}
+                            />
+                            <button
+                              className="button button-small"
+                              disabled={selectedSave.profileLocation !== "local" || loading || !isValidSaveDraft(draft, minimum, maximum)}
+                              onClick={() => submitSaveDraft(fieldName, fieldName === "money_account" ? "set_money" : "set_experience", minimum, maximum)}
+                            >
+                              {text.apply}
+                            </button>
+                          </div>
+                        );
+                      })}
+                      <div className="save-field">
+                        <div><span>{text.level}</span><small>{levelFromExperience(saveSnapshot.fields.find((entry) => entry.fieldName === "experience_points")?.value ?? 0).toLocaleString()}</small></div>
+                        <input type="number" min="1" max="200" value={saveValues.level} onChange={(event) => updateSaveDraft("level", event.target.value)} placeholder="1-200" disabled={selectedSave.profileLocation !== "local" || loading} />
+                        <button className="button button-small" disabled={selectedSave.profileLocation !== "local" || loading || !isValidSaveDraft(saveValues.level, 1, 200)} onClick={() => submitSaveDraft("level", "set_level", 1, 200)}>{text.apply}</button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="save-hint">{selectedSave.profileLocation === "local" ? text.noneFound : text.saveReadOnly}</div>
+                  )}
                 </div>
               )}
             </div>
