@@ -91,10 +91,11 @@ optimization remains an optional future performance slice.
   localization snapshots are connected through Tauri commands.
 - T2: SQLite Mod and localization indexes persist add/update/remove and
   unchanged-package cache hits across restarts.
-- T3: Tauri is the production entry point. WPF is retained only as a
-  compatibility reference until save mutation, full localization export,
-  complete crash analysis, Workshop, city search, tools and updater parity are
-  explicitly reimplemented or removed from scope.
+- T3: Tauri is the production entry point for the completed core scope.
+  WPF is retained only as a compatibility reference. Full localization export,
+  deeper crash analysis, Workshop metadata, city search, Tools, and updater
+  parity remain optional auxiliary follow-up work and do not block Mod
+  management or local save editing.
 
 ## Stage 6 acceptance continuation (September 10, 2026)
 

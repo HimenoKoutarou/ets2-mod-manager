@@ -21,10 +21,10 @@ auxiliary feature surface is either migrated or explicitly removed.
 - .NET migration ContractTests: passed, including ScsC profile roundtrip,
   ZIP tree extraction, archive path traversal rejection, localization priority,
   update validation, and BSII save editing.
-- Rust `cargo fmt --check`: passed.
-- Rust GNU-target workspace tests: passed, 7 tests; the existing `.drectve`
+- Rust `cargo fmt --check`: passed for the touched Rust files.
+- Rust GNU-target workspace tests: passed, 10 tests; the existing `.drectve`
   linker warning remains non-fatal.
-- Python regression suite: passed, 64 tests.
+- Python regression suite: passed, 65 tests.
 - Frontend production build: `npm run build` passed.
 - `start.bat`: starts only `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`.
 - Tauri local save workflow: local-only listing by `info.sii` display name,

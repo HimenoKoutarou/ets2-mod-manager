@@ -2,10 +2,11 @@
 
 ## 当前阶段
 
-当前生产路线已切换为 **阶段 5/6：Tauri 生产入口切换**。阶段 5
-完成后进入阶段 6/6：完整回归与发布验收。Tauri 2 + React/TypeScript
-是生产客户端；旧 C#/.NET 10 + WPF 与 Python/PySide6 仅作为兼容和
-parity 参考，不再由 `start.bat` 启动。
+当前已完成 **阶段 6/6：完整回归与发布验收**。Tauri 2 +
+React/TypeScript 是生产客户端；旧 C#/.NET 10 + WPF 与 Python/PySide6
+仅作为兼容和 parity 参考，不再由 `start.bat` 启动。核心 Mod 管理、
+本地存档列表、存档数值编辑和发布构建均已验收；后续只剩未纳入当前
+核心范围的辅助功能 parity 或性能增强。
 
 核心 Mod 管理重构 M10 已完成：M5 的 Mod 管理、M6 的扫描/分类/Crash DTO 边界、M7 的 Profile 生命周期 facade、M8 的跨实现 golden fixtures、M9 的 Rust/C# 迁移骨架和 M10 的功能回归/整体 Review 均已完成。Python/PySide6 与旧 WPF 客户端保留为迁移期兼容实现。
 
