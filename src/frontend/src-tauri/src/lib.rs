@@ -3236,7 +3236,18 @@ mod tests {
             ),
             (2, 0, 0)
         );
-        let second_summary = sync_index(&mut connection, &[first.clone()]).expect("second sync");
+        let unchanged_summary =
+            sync_index(&mut connection, &[first.clone(), second.clone()]).expect("unchanged sync");
+        assert_eq!(
+            (
+                unchanged_summary.added,
+                unchanged_summary.updated,
+                unchanged_summary.removed,
+                unchanged_summary.inspected
+            ),
+            (0, 0, 0, 0)
+        );
+        let second_summary = sync_index(&mut connection, &[first.clone()]).expect("remove sync");
         assert_eq!(
             (
                 second_summary.added,
@@ -3248,6 +3259,25 @@ mod tests {
         let cached = load_cached(&connection).expect("cached");
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path, first.path);
+    }
+
+    #[test]
+    fn numeric_workshop_names_are_refreshed_from_persisted_metadata() {
+        let row = ModDto {
+            id: "1061306287".into(),
+            package_name: "mod_workshop_package.1061306287".into(),
+            path: "C:\\workshop\\1061306287".into(),
+            package_type: "workshop".into(),
+            display_name: "1061306287".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 0,
+            modified_ms: 0,
+            enabled: false,
+            category: "unknown".into(),
+            fingerprint: 0,
+        };
+        assert!(metadata_needs_refresh(&row));
     }
 
     #[test]
