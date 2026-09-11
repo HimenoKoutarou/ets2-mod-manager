@@ -16,6 +16,12 @@ if exist "%RUSTUP_EXE%" if exist "%CARGO_EXE%" if exist "%RUSTC_EXE%" (
   set "RUSTUP_HOME=%TOOLCHAIN_ROOT%\rustup"
   set "CARGO_HOME=%TOOLCHAIN_ROOT%\cargo"
   set "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu"
+  if not exist "%CARGO_HOME%\registry\src\index.crates.io-1949cf8c6b5b557f\libsqlite3-sys-0.30.1\bindgen-bindings\bindgen_3.14.0.rs" (
+    if exist "%USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\libsqlite3-sys-0.30.1\bindgen-bindings\bindgen_3.14.0.rs" (
+      echo Cached Cargo registry is incomplete; using the user Cargo registry.
+      set "CARGO_HOME=%USERPROFILE%\.cargo"
+    )
+  )
   set "PATH=%TOOLCHAIN_ROOT%\rustup\toolchains\stable-x86_64-pc-windows-gnu\bin;%TOOLCHAIN_ROOT%\cargo\bin;%MINGW_ROOT%\bin;%PATH%"
   echo Rust toolchain: stable-x86_64-pc-windows-gnu
 ) else (
