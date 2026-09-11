@@ -16,6 +16,8 @@ export interface ModRecord {
   compatible: string;
   size?: number;
   modifiedMs?: number;
+  iconUrl?: string;
+  previewUrl?: string;
 }
 
 export interface Profile {

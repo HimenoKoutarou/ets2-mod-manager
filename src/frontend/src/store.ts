@@ -77,8 +77,10 @@ export const initialMods: ModRecord[] = [
 
 export const fixtureBackend: ModBackend = {
   real: false,
+  initializeMods: async () => ({ total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 0 }),
   listProfiles: async () => fixtureProfiles.map((profile) => ({ ...profile })),
   listMods: async () => initialMods.map((mod) => ({ ...mod })),
+  loadModMedia: async () => [],
   listSaves: async (profileId) =>
     fixtureProfiles.find((profile) => profile.id === profileId)?.location === "local"
       ? [
@@ -178,6 +180,33 @@ export const fixtureBackend: ModBackend = {
 const backend = createBackend(fixtureBackend);
 let saveSelectionRequest = 0;
 let localizationRequest = 0;
+let mediaRequest = 0;
+
+async function hydrateModMedia(profileId: string, mods: ModRecord[]): Promise<void> {
+  if (!mods.length) return;
+  const requestId = ++mediaRequest;
+  const chunks: ModRecord[][] = [];
+  for (let index = 0; index < mods.length; index += 24) {
+    chunks.push(mods.slice(index, index + 24));
+  }
+  try {
+    for (const chunk of chunks) {
+      const media = await backend.loadModMedia(chunk);
+      if (requestId !== mediaRequest || useModStore.getState().selectedProfileId !== profileId) return;
+      const byId = new Map(media.map((entry) => [entry.modId, entry]));
+      useModStore.setState((state) => ({
+        mods: state.mods.map((mod) => {
+          const entry = byId.get(mod.id);
+          return entry ? { ...mod, iconUrl: entry.iconUrl, previewUrl: entry.previewUrl } : mod;
+        }),
+      }));
+    }
+  } catch (error) {
+    if (requestId === mediaRequest) {
+      useModStore.setState({ error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+}
 
 interface PresetSnapshot {
   id: string;
@@ -396,6 +425,7 @@ export const useModStore = create<ModState>((set, get) => ({
     }
     set({ loading: true, localizationScanning: false, error: "" });
     try {
+      const startupSummary = await backend.initializeMods();
       const profiles = await backend.listProfiles();
       const selectedProfileId = profiles.some((profile) => profile.id === get().selectedProfileId)
         ? get().selectedProfileId
@@ -414,7 +444,9 @@ export const useModStore = create<ModState>((set, get) => ({
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",
         dirty: false,
+        scanSummary: startupSummary,
       });
+      void hydrateModMedia(selectedProfileId, mods);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -451,6 +483,7 @@ export const useModStore = create<ModState>((set, get) => ({
         dirty: false,
         scanWasCancelled: false,
       });
+      void hydrateModMedia(selectedProfileId, mods);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -501,6 +534,7 @@ export const useModStore = create<ModState>((set, get) => ({
       if (profileId && !get().dirty) {
         const mods = await backend.listMods(profileId);
         set({ mods, selectedModId: mods[0]?.id ?? null, dirty: false, scanSummary: summary });
+        void hydrateModMedia(profileId, mods);
       } else {
         set({ scanSummary: summary });
       }

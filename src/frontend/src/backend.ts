@@ -10,6 +10,12 @@ export interface ScanSummary {
   elapsedMs: number;
 }
 
+export interface ModMedia {
+  modId: string;
+  iconUrl?: string;
+  previewUrl?: string;
+}
+
 export interface PresetRecord {
   name: string;
   activeMods: string[];
@@ -154,8 +160,10 @@ function mapMod(value: {
 
 export interface ModBackend {
   readonly real: boolean;
+  initializeMods(): Promise<ScanSummary>;
   listProfiles(): Promise<Profile[]>;
   listMods(profileId: string): Promise<ModRecord[]>;
+  loadModMedia(mods: ModRecord[]): Promise<ModMedia[]>;
   listSaves(profileId: string): Promise<SaveSlot[]>;
   scanLocalization(profileId: string, targetLocale: string): Promise<LocalizationScan>;
   cancelLocalization(): Promise<void>;
@@ -174,6 +182,9 @@ export interface ModBackend {
 
 const tauriBackend: ModBackend = {
   real: true,
+  initializeMods() {
+    return invoke<ScanSummary>("mod_initialize");
+  },
   async listProfiles() {
     const rows = await invoke<Array<Parameters<typeof mapProfile>[0]>>("profile_list");
     return rows.map(mapProfile);
@@ -181,6 +192,16 @@ const tauriBackend: ModBackend = {
   async listMods(profileId) {
     const rows = await invoke<Array<Parameters<typeof mapMod>[0]>>("mod_list", { profileId });
     return rows.map(mapMod);
+  },
+  async loadModMedia(mods) {
+    if (!mods.length) return [];
+    return invoke<ModMedia[]>("mod_media_batch", {
+      requests: mods.map((mod) => ({
+        modId: mod.id,
+        path: mod.path ?? "",
+        packageType: mod.packageType ?? "",
+      })),
+    });
   },
   async listSaves(profileId) {
     const rows = await invoke<SaveSlotWire[]>("save_list_local", { profileId });

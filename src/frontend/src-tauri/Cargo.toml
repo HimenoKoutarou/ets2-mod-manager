@@ -14,6 +14,8 @@ tauri-build = { version = "2.4.1", features = [] }
 
 [dependencies]
 tauri = { version = "2.11.4", default-features = false, features = [], optional = true }
+base64 = "0.22"
+sha1 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 aes = "0.8"

@@ -41,6 +41,7 @@ pub struct Manifest {
     pub display_name: String,
     pub author: String,
     pub version: String,
+    pub icon_filename: String,
 }
 
 impl Default for Manifest {
@@ -50,6 +51,7 @@ impl Default for Manifest {
             display_name: String::new(),
             author: String::new(),
             version: String::new(),
+            icon_filename: String::new(),
         }
     }
 }
@@ -82,6 +84,7 @@ pub fn parse_manifest(text: &str) -> Manifest {
             "display_name" | "name" => &mut manifest.display_name,
             "author" => &mut manifest.author,
             "version" | "package_version" => &mut manifest.version,
+            "icon" | "icon_filename" => &mut manifest.icon_filename,
             _ => continue,
         };
         if target.is_empty() {

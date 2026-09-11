@@ -3,11 +3,13 @@
 
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use aes::{cipher::generic_array::GenericArray, Aes256};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use getrandom::fill as fill_random;
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha1::{Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -15,7 +17,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -86,6 +88,32 @@ struct ModDto {
     #[serde(skip)]
     fingerprint: u64,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModMediaRequest {
+    mod_id: String,
+    path: String,
+    package_type: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModMediaDto {
+    mod_id: String,
+    icon_url: Option<String>,
+    preview_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct WorkshopCacheEntry {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    preview_url: String,
+}
+
+static WORKSHOP_CACHE: OnceLock<HashMap<String, WorkshopCacheEntry>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,6 +463,74 @@ fn normalize_path(path: &Path) -> String {
         .to_string()
 }
 
+fn cache_directory() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(root) = std::env::var_os("ETS2MM_ROOT").map(PathBuf::from) {
+        candidates.push(root);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.extend(exe.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        candidates.extend(current.ancestors().map(Path::to_path_buf));
+    }
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .map(|root| root.join("assets").join("cache"))
+        .find(|candidate| {
+            seen.insert(normalize_path(candidate).to_ascii_lowercase()) && candidate.is_dir()
+        })
+}
+
+fn workshop_cache_entries() -> &'static HashMap<String, WorkshopCacheEntry> {
+    WORKSHOP_CACHE.get_or_init(|| {
+        let Some(path) = cache_directory().map(|dir| dir.join("workshop_titles.json")) else {
+            return HashMap::new();
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return HashMap::new();
+        };
+        serde_json::from_str::<HashMap<String, WorkshopCacheEntry>>(&text).unwrap_or_default()
+    })
+}
+
+fn workshop_cached_title(workshop_id: &str) -> Option<String> {
+    if workshop_id.is_empty() || !workshop_id.chars().all(|value| value.is_ascii_digit()) {
+        return None;
+    }
+    workshop_cache_entries()
+        .get(workshop_id)
+        .map(|entry| entry.title.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn workshop_cached_preview_url(workshop_id: &str) -> Option<String> {
+    workshop_cache_entries()
+        .get(workshop_id)
+        .map(|entry| entry.preview_url.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn legacy_icon_cache_path(mod_id: &str, package_path: &Path) -> Option<(PathBuf, String)> {
+    let cache = cache_directory()?.join("mod_icons");
+    let modified = fs::metadata(package_path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs_f64())?;
+    let mut hasher = Sha1::new();
+    hasher.update(format!("{mod_id}\0{modified:.6}").as_bytes());
+    let stem = format!("{:x}", hasher.finalize());
+    for extension in ["jpg", "jpeg", "png", "webp", "bmp", "gif"] {
+        let candidate = cache.join(format!("{stem}.{extension}"));
+        if candidate.is_file() {
+            return Some((candidate, extension.to_string()));
+        }
+    }
+    None
+}
+
 fn profile_sii(folder: &Path) -> PathBuf {
     folder.join("profile.sii")
 }
@@ -734,14 +830,249 @@ fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> 
     Ok(())
 }
 
-fn manifest_for(path: &Path) -> (String, String, String, String) {
-    let manifest = archive_core::read_manifest(path).unwrap_or_default();
+fn manifest_for(path: &Path) -> (String, String, String, String, String) {
+    let mut manifest = archive_core::read_manifest(path).unwrap_or_default();
+    if manifest.package_name.is_empty()
+        && manifest.display_name.is_empty()
+        && manifest.author.is_empty()
+        && manifest.version.is_empty()
+        && path.is_file()
+    {
+        if let Some(text) = read_zip_entry_text(path, "manifest.sii") {
+            manifest = archive_core::parse_manifest(&text);
+        }
+    }
     (
         manifest.package_name,
         manifest.display_name,
         manifest.author,
         manifest.version,
+        manifest.icon_filename,
     )
+}
+
+const MAX_MEDIA_BYTES: u64 = 8 * 1024 * 1024;
+
+fn media_extension(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") {
+        Some("image/jpeg")
+    } else if extension.eq_ignore_ascii_case("png") {
+        Some("image/png")
+    } else if extension.eq_ignore_ascii_case("webp") {
+        Some("image/webp")
+    } else if extension.eq_ignore_ascii_case("gif") {
+        Some("image/gif")
+    } else if extension.eq_ignore_ascii_case("bmp") {
+        Some("image/bmp")
+    } else {
+        None
+    }
+}
+
+fn data_url(bytes: Vec<u8>, name: &str) -> Option<String> {
+    if bytes.is_empty() || bytes.len() as u64 > MAX_MEDIA_BYTES {
+        return None;
+    }
+    let mime = media_extension(name)?;
+    Some(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
+}
+
+fn read_zip_entry_bytes(path: &Path, wanted: &str) -> Option<Vec<u8>> {
+    let file = fs::File::open(path).ok()?;
+    let mut archive = ZipArchive::new(file).ok()?;
+    let wanted = wanted
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string();
+    let wanted_lower = wanted.to_ascii_lowercase();
+    let mut selected = None;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).ok()?;
+        let name = entry.name().replace('\\', "/");
+        let lower = name.to_ascii_lowercase();
+        if lower == wanted_lower
+            || lower
+                .rsplit('/')
+                .next()
+                .is_some_and(|value| value == wanted_lower)
+        {
+            selected = Some(index);
+            break;
+        }
+    }
+    let index = selected?;
+    let mut entry = archive.by_index(index).ok()?;
+    if entry.size() > MAX_MEDIA_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+fn read_zip_entry_text(path: &Path, wanted: &str) -> Option<String> {
+    let bytes = read_zip_entry_bytes(path, wanted)?;
+    String::from_utf8(bytes).ok()
+}
+
+fn directory_image_path(root: &Path, icon_filename: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if !icon_filename.trim().is_empty() {
+        candidates.push(root.join(icon_filename.replace('\\', "/")));
+        candidates.push(root.join(Path::new(icon_filename).file_name()?));
+    }
+    for name in [
+        "mod_icon.jpg",
+        "icon.jpg",
+        "preview.jpg",
+        "thumbnail.jpg",
+        "mod_icon.png",
+        "icon.png",
+        "preview.png",
+        "thumbnail.png",
+        "cover.jpg",
+        "cover.png",
+        "logo.jpg",
+        "logo.png",
+        "banner.jpg",
+        "banner.png",
+    ] {
+        candidates.push(root.join(name));
+    }
+    for candidate in candidates {
+        if candidate.is_file()
+            && media_extension(candidate.to_string_lossy().as_ref()).is_some()
+            && fs::metadata(&candidate)
+                .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
+                .unwrap_or(false)
+        {
+            return Some(candidate);
+        }
+    }
+    let mut stack = vec![root.to_path_buf()];
+    let mut inspected = 0usize;
+    while let Some(current) = stack.pop() {
+        if inspected >= 2000 {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            inspected += 1;
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if media_extension(path.to_string_lossy().as_ref()).is_some()
+                && fs::metadata(&path)
+                    .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
+                    .unwrap_or(false)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn package_media_url(path: &Path, mod_id: &str, icon_filename: &str) -> Option<String> {
+    if path.is_dir() {
+        if let Some(image) = directory_image_path(path, icon_filename) {
+            if let Ok(bytes) = fs::read(&image) {
+                if let Some(url) = data_url(bytes, image.to_string_lossy().as_ref()) {
+                    return Some(url);
+                }
+            }
+        }
+    } else if path.is_file() {
+        let mut candidates = Vec::new();
+        if !icon_filename.trim().is_empty() {
+            candidates.push(icon_filename.to_string());
+        }
+        candidates.extend(
+            [
+                "mod_icon.jpg",
+                "icon.jpg",
+                "preview.jpg",
+                "thumbnail.jpg",
+                "mod_icon.png",
+                "icon.png",
+                "preview.png",
+                "thumbnail.png",
+                "cover.jpg",
+                "cover.png",
+                "logo.jpg",
+                "logo.png",
+                "banner.jpg",
+                "banner.png",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+        for candidate in candidates {
+            if let Some(bytes) = read_zip_entry_bytes(path, &candidate) {
+                if let Some(url) = data_url(bytes, &candidate) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    if let Some((cache_path, _)) = legacy_icon_cache_path(mod_id, path) {
+        if let Ok(bytes) = fs::read(&cache_path) {
+            return data_url(bytes, cache_path.to_string_lossy().as_ref());
+        }
+    }
+    None
+}
+
+fn cached_workshop_preview_url(mod_id: &str) -> Option<String> {
+    let cache = cache_directory()?.join("workshop_previews");
+    for extension in ["jpg", "jpeg", "png", "webp", "gif", "bmp"] {
+        let candidate = cache.join(format!("{mod_id}.{extension}"));
+        if candidate.is_file()
+            && fs::metadata(&candidate)
+                .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
+                .unwrap_or(false)
+        {
+            if let Ok(bytes) = fs::read(&candidate) {
+                if let Some(url) = data_url(bytes, candidate.to_string_lossy().as_ref()) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
+    let workshop_id = row.id.trim().trim_end_matches("_workshop").to_string();
+    let cached_preview = if is_workshop(row) {
+        cached_workshop_preview_url(&workshop_id)
+            .or_else(|| workshop_cached_preview_url(&workshop_id))
+    } else {
+        None
+    };
+    let cached_icon =
+        legacy_icon_cache_path(&row.id, Path::new(&row.path)).and_then(|(path, _)| {
+            fs::read(&path)
+                .ok()
+                .and_then(|bytes| data_url(bytes, path.to_string_lossy().as_ref()))
+        });
+    let package_url = cached_icon.or_else(|| {
+        let icon_filename = manifest_for(Path::new(&row.path)).4;
+        package_media_url(Path::new(&row.path), &row.id, &icon_filename)
+    });
+    ModMediaDto {
+        mod_id: row.id.clone(),
+        icon_url: package_url.clone().or_else(|| cached_preview.clone()),
+        preview_url: cached_preview.or(package_url),
+    }
 }
 
 fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
@@ -853,6 +1184,11 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
                 .wrapping_add(modified_ms as u64);
             (size, modified_ms, fingerprint)
         };
+        let display_name = if workshop {
+            workshop_cached_title(&id).unwrap_or_else(|| id.replace('_', " "))
+        } else {
+            id.replace('_', " ")
+        };
         result.push(ModDto {
             id: id.clone(),
             package_name: id.clone(),
@@ -864,7 +1200,7 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
             } else {
                 extension
             },
-            display_name: id.replace('_', " "),
+            display_name,
             author: String::new(),
             version: String::new(),
             size,
@@ -917,6 +1253,16 @@ fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
         .collect()
 }
 
+fn metadata_needs_refresh(row: &ModDto) -> bool {
+    let display = row.display_name.trim();
+    let package = row.package_name.trim();
+    display.is_empty()
+        || display == row.id.trim()
+        || display.chars().all(|value| value.is_ascii_digit())
+        || package.is_empty()
+        || package.starts_with('.')
+}
+
 fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSummary, String> {
     let started = std::time::Instant::now();
     let cached = load_cached(connection)?;
@@ -944,17 +1290,18 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
                     || *fingerprint != mod_row.fingerprint
             })
             .unwrap_or(true);
-        if !changed {
+        let previous = cached.iter().find(|row| row.path == mod_row.path);
+        if !changed && !previous.is_some_and(metadata_needs_refresh) {
             continue;
         }
-        if old.contains_key(&mod_row.path) {
+        if changed && old.contains_key(&mod_row.path) {
             updated += 1;
-        } else {
+        } else if !old.contains_key(&mod_row.path) {
             added += 1;
         }
         let mut enriched = mod_row.clone();
-        let previous = cached.iter().find(|row| row.path == mod_row.path);
-        let (package_name, display_name, author, version) = manifest_for(Path::new(&mod_row.path));
+        let (package_name, display_name, author, version, _icon_filename) =
+            manifest_for(Path::new(&mod_row.path));
         if !package_name.is_empty() {
             enriched.package_name = package_name;
         } else if let Some(previous) = previous {
@@ -962,8 +1309,27 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
         }
         if !display_name.is_empty() {
             enriched.display_name = display_name;
+        } else if is_workshop(&enriched) {
+            if let Some(title) = workshop_cached_title(&enriched.id) {
+                enriched.display_name = title;
+            } else if let Some(previous) = previous {
+                enriched.display_name = previous.display_name.clone();
+            }
         } else if let Some(previous) = previous {
             enriched.display_name = previous.display_name.clone();
+        }
+        if is_workshop(&enriched)
+            && (enriched.display_name.trim().is_empty()
+                || enriched.display_name.trim() == enriched.id.trim()
+                || enriched
+                    .display_name
+                    .trim()
+                    .chars()
+                    .all(|value| value.is_ascii_digit()))
+        {
+            if let Some(title) = workshop_cached_title(&enriched.id) {
+                enriched.display_name = title;
+            }
         }
         enriched.author = if author.is_empty() {
             previous.map(|row| row.author.clone()).unwrap_or_default()
@@ -2370,6 +2736,49 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
     Ok(mods)
 }
 
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn mod_media(request: ModMediaRequest) -> Result<ModMediaDto, String> {
+    let row = ModDto {
+        id: request.mod_id,
+        package_name: String::new(),
+        path: request.path,
+        package_type: request.package_type,
+        display_name: String::new(),
+        author: String::new(),
+        version: String::new(),
+        size: 0,
+        modified_ms: 0,
+        enabled: false,
+        category: String::new(),
+        fingerprint: 0,
+    };
+    Ok(resolve_mod_media(&row))
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn mod_media_batch(requests: Vec<ModMediaRequest>) -> Result<Vec<ModMediaDto>, String> {
+    Ok(requests
+        .into_iter()
+        .map(|request| {
+            let row = ModDto {
+                id: request.mod_id,
+                package_name: String::new(),
+                path: request.path,
+                package_type: request.package_type,
+                display_name: String::new(),
+                author: String::new(),
+                version: String::new(),
+                size: 0,
+                modified_ms: 0,
+                enabled: false,
+                category: String::new(),
+                fingerprint: 0,
+            };
+            resolve_mod_media(&row)
+        })
+        .collect())
+}
+
 fn is_workshop(row: &ModDto) -> bool {
     row.package_type.eq_ignore_ascii_case("workshop")
         || row.path.to_ascii_lowercase().contains("workshop")
@@ -2413,6 +2822,14 @@ fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
             Arc::clone(&backend.scan_cancelled),
         )
     };
+    scan_mod_inputs(paths, database_path, cancelled)
+}
+
+fn scan_mod_inputs(
+    paths: Paths,
+    database_path: PathBuf,
+    cancelled: Arc<AtomicBool>,
+) -> Result<ScanSummary, String> {
     cancelled.store(false, Ordering::Relaxed);
     let mut discovered = discover_packages(Some(&paths.mod_root), false, &cancelled);
     discovered.extend(discover_workshop_packages(
@@ -2424,6 +2841,25 @@ fn mod_scan(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
     }
     let mut db = open_db(&database_path)?;
     sync_index(&mut db, &discovered)
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn mod_initialize(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
+    let (paths, database_path, cancelled) = {
+        let backend = state
+            .inner
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
+        (
+            backend.paths.clone(),
+            backend.database_path.clone(),
+            Arc::clone(&backend.scan_cancelled),
+        )
+    };
+    // Startup uses the same persisted index and incremental scanner as the
+    // explicit Scan button. It therefore detects additions/removals while
+    // keeping unchanged package metadata untouched.
+    scan_mod_inputs(paths, database_path, cancelled)
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
@@ -3050,7 +3486,10 @@ pub fn run() {
             profile_read_active,
             profile_write_active,
             mod_list,
+            mod_media,
+            mod_media_batch,
             mod_scan,
+            mod_initialize,
             mod_cancel,
             mod_set_enabled,
             mod_move,
