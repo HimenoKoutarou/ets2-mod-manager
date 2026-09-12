@@ -656,24 +656,51 @@ fn escape_sii(value: &str) -> String {
 }
 
 fn unescape_sii(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
+    let mut bytes = Vec::with_capacity(value.len());
     let mut chars = value.chars();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
             match chars.next() {
-                Some('"') => out.push('"'),
-                Some('\\') => out.push('\\'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
+                Some('"') => bytes.push(b'"'),
+                Some('\\') => bytes.push(b'\\'),
+                Some('x') => {
+                    let first = chars.next();
+                    let second = chars.next();
+                    match (first, second) {
+                        (Some(first), Some(second))
+                            if first.is_ascii_hexdigit() && second.is_ascii_hexdigit() =>
+                        {
+                            bytes.push(
+                                u8::from_str_radix(&format!("{first}{second}"), 16)
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        _ => {
+                            bytes.extend_from_slice(b"\\x");
+                            if let Some(first) = first {
+                                let mut buffer = [0; 4];
+                                bytes.extend_from_slice(first.encode_utf8(&mut buffer).as_bytes());
+                            }
+                            if let Some(second) = second {
+                                let mut buffer = [0; 4];
+                                bytes.extend_from_slice(second.encode_utf8(&mut buffer).as_bytes());
+                            }
+                        }
+                    }
                 }
-                None => out.push('\\'),
+                Some(other) => {
+                    bytes.push(b'\\');
+                    let mut buffer = [0; 4];
+                    bytes.extend_from_slice(other.encode_utf8(&mut buffer).as_bytes());
+                }
+                None => bytes.push(b'\\'),
             }
         } else {
-            out.push(ch);
+            let mut buffer = [0; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
         }
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn parse_field(text: &str, field: &str) -> Option<String> {
@@ -702,6 +729,22 @@ fn parse_active_mods(text: &str) -> Vec<String> {
         .collect()
 }
 
+fn decode_profile_folder_name(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() % 2 != 0 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let bytes = (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let decoded = String::from_utf8(bytes).ok()?;
+    if decoded.chars().all(|c| !c.is_control()) {
+        Some(decoded)
+    } else {
+        None
+    }
+}
+
 fn list_profiles_from(root: Option<&Path>, location: &str) -> Vec<ProfileDto> {
     let Some(root) = root.filter(|p| p.is_dir()) else {
         return Vec::new();
@@ -722,9 +765,11 @@ fn list_profiles_from(root: Option<&Path>, location: &str) -> Vec<ProfileDto> {
             .to_string();
         let text = read_sii(&profile_sii(&folder)).unwrap_or_default();
         let active = parse_active_mods(&text);
+        let fallback_name =
+            decode_profile_folder_name(&folder_id).unwrap_or_else(|| folder_id.replace('_', " "));
         result.push(ProfileDto {
             id: format!("{location}:{folder_id}"),
-            name: parse_field(&text, "profile_name").unwrap_or_else(|| "Unnamed profile".into()),
+            name: parse_field(&text, "profile_name").unwrap_or(fallback_name),
             company: parse_field(&text, "company_name").unwrap_or_default(),
             location: location.to_string(),
             folder: normalize_path(&folder),
@@ -737,17 +782,10 @@ fn list_profiles_from(root: Option<&Path>, location: &str) -> Vec<ProfileDto> {
 }
 
 fn all_profiles(paths: &Paths) -> Vec<ProfileDto> {
-    let mut result = Vec::new();
-    result.extend(list_profiles_from(Some(&paths.profiles_root), "local"));
-    result.extend(list_profiles_from(
-        paths.steam_profiles_root.as_deref(),
-        "steam",
-    ));
-    result.extend(list_profiles_from(
-        paths.cloud_profiles_root.as_deref(),
-        "cloud",
-    ));
-    result
+    // The Mod Manager's primary profile selector is intentionally limited to
+    // editable local profiles. Steam/Cloud profiles remain read-only data
+    // sources for compatibility and are not shown as selectable profiles.
+    list_profiles_from(Some(&paths.profiles_root), "local")
 }
 
 fn open_db(path: &Path) -> Result<Connection, String> {
@@ -3147,6 +3185,54 @@ mod tests {
             profile_order_to_ui(&parse_active_mods(text)),
             ["low", "high"]
         );
+    }
+
+    #[test]
+    fn sii_unescape_decodes_utf8_hex_sequences() {
+        assert_eq!(
+            unescape_sii(r"\xe5\xa7\xac\xe9\x87\x8e\xe6\x98\x9f\xe5\xa5\x8f"),
+            "姬野星奏"
+        );
+        assert_eq!(unescape_sii(r#"hello \"world\""#), "hello \"world\"");
+    }
+
+    #[test]
+    fn profile_folder_name_decodes_hex_fallback() {
+        assert_eq!(
+            decode_profile_folder_name("E5A7ACE9878EE6989FE5A58F"),
+            Some("姬野星奏".into())
+        );
+        assert_eq!(decode_profile_folder_name("not-a-profile"), None);
+    }
+
+    #[test]
+    fn profile_catalog_only_exposes_local_profiles() {
+        let root = std::env::temp_dir().join(format!("ets2modmanager-profiles-{}", now_ms()));
+        let local = root.join("profiles").join("E5A7ACE9878EE6989FE5A58F");
+        let steam = root.join("steam_profiles").join("steam-only");
+        let cloud = root.join("cloud_profiles").join("cloud-only");
+        for folder in [&local, &steam, &cloud] {
+            fs::create_dir_all(folder).expect("create profile folder");
+            fs::write(
+                folder.join("profile.sii"),
+                "SiiNunit\n{\n profile : .profile {\n  profile_name: \"Local\"\n }\n}\n",
+            )
+            .expect("write profile");
+        }
+        let paths = Paths {
+            mod_root: root.join("mod"),
+            game_root: root.clone(),
+            profiles_root: root.join("profiles"),
+            steam_profiles_root: Some(root.join("steam_profiles")),
+            cloud_profiles_root: Some(root.join("cloud_profiles")),
+            workshop_roots: Vec::new(),
+            game_executable: None,
+        };
+        let profiles = all_profiles(&paths);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].location, "local");
+        assert_eq!(profiles[0].name, "Local");
     }
 
     #[test]

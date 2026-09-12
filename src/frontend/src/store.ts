@@ -178,6 +178,8 @@ export const fixtureBackend: ModBackend = {
 };
 
 const backend = createBackend(fixtureBackend);
+const initialUiProfiles = backend.real ? [] : fixtureProfiles;
+const initialUiMods = backend.real ? [] : initialMods;
 let saveSelectionRequest = 0;
 let localizationRequest = 0;
 let mediaRequest = 0;
@@ -302,9 +304,9 @@ interface ModState {
 
 export const useModStore = create<ModState>((set, get) => ({
   language: "zh_CN",
-  profiles: fixtureProfiles,
-  selectedProfileId: fixtureProfiles[0]?.id ?? "",
-  mods: initialMods.map((mod) => ({ ...mod })),
+  profiles: initialUiProfiles,
+  selectedProfileId: initialUiProfiles[0]?.id ?? "",
+  mods: initialUiMods.map((mod) => ({ ...mod })),
   saves: [],
   selectedSave: null,
   saveSnapshot: null,
@@ -314,7 +316,7 @@ export const useModStore = create<ModState>((set, get) => ({
   view: "all",
   selectedCategory: "all",
   query: "",
-  selectedModId: initialMods[0]?.id ?? null,
+  selectedModId: initialUiMods[0]?.id ?? null,
   dirty: false,
   scanning: false,
   localizationScanning: false,
