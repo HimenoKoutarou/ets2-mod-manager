@@ -880,6 +880,7 @@ fn open_db(path: &Path) -> Result<Connection, String> {
         .map_err(|e| format!("initialize database failed: {e}"))?;
     ensure_mod_fingerprint_column(&connection)?;
     ensure_header_state_table(&connection)?;
+    ensure_mod_index_state_table(&connection)?;
     ensure_media_cache_table(&connection)?;
     Ok(connection)
 }
@@ -1039,6 +1040,18 @@ fn ensure_header_state_table(connection: &Connection) -> Result<(), String> {
             );",
         )
         .map_err(|e| format!("initialize mod header state failed: {e}"))
+}
+
+fn ensure_mod_index_state_table(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS mod_index_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                completed_at_ms INTEGER NOT NULL,
+                package_count INTEGER NOT NULL
+            );",
+        )
+        .map_err(|e| format!("initialize mod index state failed: {e}"))
 }
 
 fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> {
@@ -1822,6 +1835,7 @@ where
 {
     let started = std::time::Instant::now();
     ensure_header_state_table(connection)?;
+    ensure_mod_index_state_table(connection)?;
     let cached = load_cached(connection)?;
     let old: HashMap<String, (i64, u64, u64)> = cached
         .iter()
@@ -1984,6 +1998,14 @@ where
     progress("persist", incoming.len(), incoming.len(), "", Path::new(""));
     tx.commit()
         .map_err(|e| format!("commit mod index failed: {e}"))?;
+    connection
+        .execute(
+            "INSERT INTO mod_index_state(id,completed_at_ms,package_count)
+             VALUES (1,?1,?2)
+             ON CONFLICT(id) DO UPDATE SET completed_at_ms=excluded.completed_at_ms, package_count=excluded.package_count",
+            params![now_ms(), incoming.len() as i64],
+        )
+        .map_err(|e| format!("persist mod index state failed: {e}"))?;
     progress(
         "complete",
         incoming.len(),
@@ -3659,7 +3681,15 @@ where
     cancelled.store(false, Ordering::Relaxed);
     let mut db = open_db(&database_path)?;
     let cached = load_cached(&db)?;
-    if cached.is_empty() {
+    let initialized = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mod_index_state WHERE id = 1)",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value != 0)
+        .unwrap_or(false);
+    if !initialized {
         return scan_mod_inputs_with_progress(paths, database_path, cancelled, progress);
     }
     progress("cache", cached.len(), cached.len(), "", &database_path);
@@ -4219,6 +4249,14 @@ mod tests {
             ),
             (0, 0, 0, 0)
         );
+        let initialized: i64 = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM mod_index_state WHERE id = 1)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("index state");
+        assert_eq!(initialized, 1);
         let second_summary = sync_index(&mut connection, &[first.clone()]).expect("remove sync");
         assert_eq!(
             (
