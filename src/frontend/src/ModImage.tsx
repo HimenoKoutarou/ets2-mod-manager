@@ -19,11 +19,12 @@ export const ModThumbnail = memo(function ModThumbnail({ mod }: { mod: ModRecord
   const load = useModStore((state) => state.loadModMedia);
   useEffect(() => {
     if (mod.mediaLoaded || !element.current) return;
+    const scrollRoot = element.current.closest(".table-wrap");
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
       observer.disconnect();
       void load(mod.id);
-    }, { rootMargin: "120px" });
+    }, { root: scrollRoot, rootMargin: "240px" });
     observer.observe(element.current);
     return () => observer.disconnect();
   }, [mod.id, mod.path, mod.size, mod.modifiedMs, mod.mediaLoaded, load]);
