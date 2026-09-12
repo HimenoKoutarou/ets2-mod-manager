@@ -212,19 +212,18 @@ async function hydrateMedia(mods: ModRecord[]): Promise<ModRecord[]> {
   const results = new Map<string, ModMedia>();
   const chunks: ModRecord[][] = [];
   for (let index = 0; index < mods.length; index += 8) chunks.push(mods.slice(index, index + 8));
-  let cursor = 0;
-  async function worker() {
-    while (cursor < chunks.length) {
-      const chunk = chunks[cursor++];
-      try {
-        const rows = await backend.loadModMedia(chunk);
-        rows.forEach((row) => results.set(row.modId, row));
-      } catch {
-        // Individual media failures must not block the Mod workspace.
-      }
+  // Media resolution persists its result in SQLite. Keep startup hydration
+  // sequential so batches cannot contend on the same write transaction and
+  // leave later rows without artwork. Each request is still batched to keep
+  // IPC overhead bounded.
+  for (const chunk of chunks) {
+    try {
+      const rows = await backend.loadModMedia(chunk);
+      rows.forEach((row) => results.set(row.modId, row));
+    } catch {
+      // Individual media failures must not block the Mod workspace.
     }
   }
-  await Promise.all([worker(), worker(), worker(), worker()]);
   return mods.map((mod) => {
     const media = results.get(mod.id);
     return media

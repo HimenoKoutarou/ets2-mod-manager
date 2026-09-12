@@ -934,7 +934,7 @@ fn shallow_package_candidates(
             // Directory candidates use the same bounded info-file signature
             // that is persisted in the header table. Reading only manifest /
             // description files keeps startup incremental without treating
-            // the directory entry timestamp as a change signal.
+            // unrelated game assets as a change signal.
             let (size, modified_ms) = if is_directory {
                 let (info_size, info_modified, _) = directory_info_signature(&path, cancelled);
                 (info_size, info_modified)
@@ -1537,6 +1537,16 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
     } else {
         None
     };
+    // Workshop metadata already contains a stable preview URL (or a local
+    // downloaded preview). Do not open the Workshop package or invoke the
+    // extractor again when that cache is available.
+    if let Some(preview) = cached_preview.clone() {
+        return ModMediaDto {
+            mod_id: row.id.clone(),
+            icon_url: Some(preview.clone()),
+            preview_url: Some(preview),
+        };
+    }
     let cached_icon =
         legacy_icon_cache_path(&row.id, Path::new(&row.path)).and_then(|(path, _)| {
             fs::read(&path)
@@ -2049,8 +2059,7 @@ where
         .map_err(|e| format!("write mod index failed: {e}"))?;
         // Persist exactly the same shallow signature used by startup
         // comparison. Directory rows use the info-file aggregate returned by
-        // `directory_info_signature`, not the directory entry timestamp,
-        // which Windows may update for unrelated nested asset changes.
+        // `directory_info_signature`, so game assets do not invalidate them.
         let header_size = enriched.size;
         let header_modified_ms = enriched.modified_ms;
         let header_is_directory = enriched.package_type == "directory";
