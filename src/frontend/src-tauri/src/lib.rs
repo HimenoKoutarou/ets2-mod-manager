@@ -118,6 +118,7 @@ struct WorkshopCacheEntry {
 }
 
 static WORKSHOP_CACHE: OnceLock<HashMap<String, WorkshopCacheEntry>> = OnceLock::new();
+static DB_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 const EMBEDDED_WORKSHOP_TITLES: &str =
     include_str!("../../../../assets/cache/workshop_titles.json");
 
@@ -816,6 +817,9 @@ fn open_db(path: &Path) -> Result<Connection, String> {
     }
     let connection = Connection::open(path).map_err(|e| format!("open database failed: {e}"))?;
     connection
+        .execute_batch("PRAGMA busy_timeout=15000;")
+        .map_err(|e| format!("configure database timeout failed: {e}"))?;
+    connection
         .execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS mod_package_v2 (
@@ -883,6 +887,13 @@ fn open_db(path: &Path) -> Result<Connection, String> {
     ensure_mod_index_state_table(&connection)?;
     ensure_media_cache_table(&connection)?;
     Ok(connection)
+}
+
+fn acquire_db_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    DB_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Clone, Debug)]
@@ -1523,6 +1534,7 @@ where
     }
     let media = resolve(row);
     // Cache misses too, so packages without artwork are not repeatedly opened.
+    let _write_lock = acquire_db_write_lock();
     connection.execute(
         "INSERT INTO mod_media_cache(path,size,modified_ms,fingerprint,icon_url,preview_url,cached_at_ms)
          VALUES(?1,?2,?3,?4,?5,?6,?7)
@@ -1834,6 +1846,7 @@ where
     F: FnMut(&str, usize, usize, &str, &Path),
 {
     let started = std::time::Instant::now();
+    let _write_lock = acquire_db_write_lock();
     ensure_header_state_table(connection)?;
     ensure_mod_index_state_table(connection)?;
     let cached = load_cached(connection)?;

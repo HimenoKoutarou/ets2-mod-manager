@@ -388,7 +388,7 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   `metadata`, `persist` and `complete` phases, including the concrete package
   name/path for deep reads.
 
-## 2026-09-13 media fallback and fixed details panel
+## 2026-09-12 media fallback and fixed details panel
 
 - Mod media resolution now falls back to the bundled external extractor for
   non-ZIP SCS/HashFS packages. The extractor listing is filtered for image
@@ -403,6 +403,16 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   `overflow: hidden`). The Mod table, sidebar and right details panel scroll
   independently; scrolling the Mod list no longer moves the details panel out
   of view.
-- Verification on 2026-09-13: Rust backend 34 tests passed, TypeScript build
+- Verification on 2026-09-12: Rust backend 34 tests passed, TypeScript build
   and Vite production build passed. The bundled extractor successfully listed
   `/imagen.jpg` from a real local HashFS SCS package.
+
+## 2026-09-12 SQLite write contention fix
+
+- Startup scans now persist `mod_index_state(id=1)` only after the package
+  index transaction commits. Subsequent launches use this marker to enter the
+  shallow CRUD path instead of repeating a full Mod read.
+- Every SQLite connection sets a 15-second `busy_timeout`. Mod index writes and
+  media-cache writes share a process-wide mutex so concurrent thumbnail
+  loading cannot race the scan transaction and surface `database is locked`.
+- Existing media/index/category schemas remain backward compatible.
