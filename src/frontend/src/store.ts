@@ -207,6 +207,32 @@ let saveSelectionRequest = 0;
 let localizationRequest = 0;
 const loadMedia = createMediaLoader(backend);
 
+async function hydrateMedia(mods: ModRecord[]): Promise<ModRecord[]> {
+  if (!mods.length || !backend.real) return mods;
+  const results = new Map<string, ModMedia>();
+  const chunks: ModRecord[][] = [];
+  for (let index = 0; index < mods.length; index += 8) chunks.push(mods.slice(index, index + 8));
+  let cursor = 0;
+  async function worker() {
+    while (cursor < chunks.length) {
+      const chunk = chunks[cursor++];
+      try {
+        const rows = await backend.loadModMedia(chunk);
+        rows.forEach((row) => results.set(row.modId, row));
+      } catch {
+        // Individual media failures must not block the Mod workspace.
+      }
+    }
+  }
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return mods.map((mod) => {
+    const media = results.get(mod.id);
+    return media
+      ? { ...mod, iconUrl: media.iconUrl, previewUrl: media.previewUrl, mediaLoaded: true, mediaAttempts: 0 }
+      : mod;
+  });
+}
+
 interface PresetSnapshot {
   id: string;
   enabled: boolean;
@@ -494,18 +520,19 @@ export const useModStore = create<ModState>((set, get) => ({
       // incremental scanner checks additions/removals in the background.
       const categoryState = await backend.listCategories();
       const mods = applyCategories(selectedProfileId ? await backend.listMods(selectedProfileId) : [], categoryState);
+      const hydratedMods = await hydrateMedia(mods);
       const saves = selectedProfileId ? await backend.listSaves(selectedProfileId) : [];
       const presets = selectedProfileId ? await backend.listPresets(selectedProfileId) : [];
       set({
         selectedProfileId,
-        mods,
+        mods: hydratedMods,
         categoryState,
         selectedModIds: [],
         saves,
         selectedSave: null,
         saveSnapshot: null,
-        selectedModId: mods[0]?.id ?? null,
-        presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
+        selectedModId: hydratedMods[0]?.id ?? null,
+        presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, hydratedMods)])),
         selectedPresetName: presets[0]?.name ?? "",
         dirty: false,
         scanSummary: null,
@@ -532,10 +559,11 @@ export const useModStore = create<ModState>((set, get) => ({
     try {
       const categoryState = await backend.listCategories();
       const mods = applyCategories(await backend.listMods(selectedProfileId), categoryState);
+      const hydratedMods = await hydrateMedia(mods);
       const saves = await backend.listSaves(selectedProfileId);
       const presets = await backend.listPresets(selectedProfileId);
       set({
-        mods,
+        mods: hydratedMods,
         categoryState,
         selectedModIds: [],
         saves,
@@ -544,8 +572,8 @@ export const useModStore = create<ModState>((set, get) => ({
         secondaryPanel: "none",
         localization: null,
         diagnostics: null,
-        selectedModId: mods[0]?.id ?? null,
-        presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
+        selectedModId: hydratedMods[0]?.id ?? null,
+        presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, hydratedMods)])),
         selectedPresetName: presets[0]?.name ?? "",
         dirty: false,
         scanWasCancelled: false,
@@ -594,16 +622,25 @@ export const useModStore = create<ModState>((set, get) => ({
     if (!selected || selected.mediaLoaded) return;
     const key = mediaKey(selected);
     let entry: ModMedia | undefined;
+    let loaded = false;
     try {
       entry = await loadMedia(selected);
+      loaded = true;
     } catch {
-      // A broken image must not block Mod management or create a retry loop.
+      // Transient extractor / SQLite contention must not permanently suppress
+      // the thumbnail. ModThumbnail retries a bounded number of times.
     }
     if (get().selectedProfileId !== selectedProfileId) return;
     set((state) => ({
       mods: state.mods.map((mod) =>
         mediaKey(mod) === key
-          ? { ...mod, iconUrl: entry?.iconUrl ?? mod.iconUrl, previewUrl: entry?.previewUrl ?? mod.previewUrl, mediaLoaded: true }
+          ? {
+              ...mod,
+              iconUrl: entry?.iconUrl ?? mod.iconUrl,
+              previewUrl: entry?.previewUrl ?? mod.previewUrl,
+              mediaLoaded: loaded,
+              mediaAttempts: loaded ? mod.mediaAttempts : (mod.mediaAttempts ?? 0) + 1,
+            }
           : mod,
       ),
     }));

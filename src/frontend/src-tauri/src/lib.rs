@@ -931,15 +931,25 @@ fn shallow_package_candidates(
             if !is_directory && extension != "scs" && extension != "zip" {
                 return None;
             }
-            let modified_ms = metadata
-                .modified()
-                .ok()
-                .and_then(|v| v.duration_since(UNIX_EPOCH).ok())
-                .map(|v| v.as_millis() as i64)
-                .unwrap_or_default();
+            // Directory candidates use the same bounded info-file signature
+            // that is persisted in the header table. Reading only manifest /
+            // description files keeps startup incremental without treating
+            // the directory entry timestamp as a change signal.
+            let (size, modified_ms) = if is_directory {
+                let (info_size, info_modified, _) = directory_info_signature(&path, cancelled);
+                (info_size, info_modified)
+            } else {
+                let modified_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|v| v.duration_since(UNIX_EPOCH).ok())
+                    .map(|v| v.as_millis() as i64)
+                    .unwrap_or_default();
+                (metadata.len(), modified_ms)
+            };
             Some(ShallowCandidate {
                 path,
-                size: metadata.len(),
+                size,
                 modified_ms,
                 is_directory,
                 workshop,
@@ -1063,6 +1073,22 @@ fn ensure_mod_index_state_table(connection: &Connection) -> Result<(), String> {
             );",
         )
         .map_err(|e| format!("initialize mod index state failed: {e}"))
+}
+
+fn backfill_mod_header_state(connection: &Connection) -> Result<(), String> {
+    // Older indexes predate the header table (or only populated it for a
+    // subset of packages). Reconstruct it from persisted rows so startup does
+    // not re-open every unchanged package just to establish cache state.
+    let _write_lock = acquire_db_write_lock();
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO mod_package_header_state(path,size,modified_ms,is_directory)
+             SELECT path,size,modified_ms,CASE WHEN package_type='directory' THEN 1 ELSE 0 END
+             FROM mod_package_v2",
+            [],
+        )
+        .map_err(|e| format!("backfill mod header state failed: {e}"))?;
+    Ok(())
 }
 
 fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> {
@@ -2021,21 +2047,13 @@ where
             ],
         )
         .map_err(|e| format!("write mod index failed: {e}"))?;
-        let header_metadata = fs::metadata(Path::new(&enriched.path)).ok();
-        let header_size = header_metadata
-            .as_ref()
-            .map(|value| value.len())
-            .unwrap_or(enriched.size);
-        let header_modified_ms = header_metadata
-            .as_ref()
-            .and_then(|value| value.modified().ok())
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map(|value| value.as_millis() as i64)
-            .unwrap_or(enriched.modified_ms);
-        let header_is_directory = header_metadata
-            .as_ref()
-            .map(|value| value.is_dir())
-            .unwrap_or_else(|| enriched.package_type == "directory");
+        // Persist exactly the same shallow signature used by startup
+        // comparison. Directory rows use the info-file aggregate returned by
+        // `directory_info_signature`, not the directory entry timestamp,
+        // which Windows may update for unrelated nested asset changes.
+        let header_size = enriched.size;
+        let header_modified_ms = enriched.modified_ms;
+        let header_is_directory = enriched.package_type == "directory";
         tx.execute(
             "INSERT INTO mod_package_header_state(path,size,modified_ms,is_directory)
              VALUES (?1,?2,?3,?4)
@@ -3766,6 +3784,7 @@ where
     let _directory_lock = mod_directory::read_lock(&paths.mod_root)?;
     cancelled.store(false, Ordering::Relaxed);
     let mut db = open_db(&database_path)?;
+    backfill_mod_header_state(&db)?;
     let cached = load_cached(&db)?;
     let initialized = db
         .query_row(
@@ -4613,6 +4632,35 @@ mod tests {
         assert_eq!((removed.total, removed.removed), (0, 1));
         assert_eq!(events.last().unwrap().0, "complete");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn header_state_backfill_uses_persisted_mod_signature() {
+        let connection = Connection::open_in_memory().unwrap();
+        open_db_schema(&connection).unwrap();
+        ensure_header_state_table(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO mod_package_v2(path,mod_id,package_name,package_type,display_name,author,version,size,modified_ms,fingerprint,scanned_at_ms)
+                 VALUES('x','x','x','scs','X','','',42,99,123,1)",
+                [],
+            )
+            .unwrap();
+        backfill_mod_header_state(&connection).unwrap();
+        let row = connection
+            .query_row(
+                "SELECT size,modified_ms,is_directory FROM mod_package_header_state WHERE path='x'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, (42, 99, 0));
     }
 
     #[test]

@@ -19,6 +19,7 @@ export interface ModRecord {
   iconUrl?: string;
   previewUrl?: string;
   mediaLoaded?: boolean;
+  mediaAttempts?: number;
 }
 
 export interface Profile {
