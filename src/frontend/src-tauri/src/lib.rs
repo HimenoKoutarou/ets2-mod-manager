@@ -114,6 +114,8 @@ struct WorkshopCacheEntry {
 }
 
 static WORKSHOP_CACHE: OnceLock<HashMap<String, WorkshopCacheEntry>> = OnceLock::new();
+const EMBEDDED_WORKSHOP_TITLES: &str =
+    include_str!("../../../../assets/cache/workshop_titles.json");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -485,13 +487,19 @@ fn cache_directory() -> Option<PathBuf> {
 
 fn workshop_cache_entries() -> &'static HashMap<String, WorkshopCacheEntry> {
     WORKSHOP_CACHE.get_or_init(|| {
-        let Some(path) = cache_directory().map(|dir| dir.join("workshop_titles.json")) else {
-            return HashMap::new();
-        };
-        let Ok(text) = fs::read_to_string(path) else {
-            return HashMap::new();
-        };
-        serde_json::from_str::<HashMap<String, WorkshopCacheEntry>>(&text).unwrap_or_default()
+        let mut entries =
+            serde_json::from_str::<HashMap<String, WorkshopCacheEntry>>(EMBEDDED_WORKSHOP_TITLES)
+                .unwrap_or_default();
+        if let Some(path) = cache_directory().map(|dir| dir.join("workshop_titles.json")) {
+            if let Ok(text) = fs::read_to_string(path) {
+                if let Ok(external) =
+                    serde_json::from_str::<HashMap<String, WorkshopCacheEntry>>(&text)
+                {
+                    entries.extend(external);
+                }
+            }
+        }
+        entries
     })
 }
 
@@ -1289,6 +1297,44 @@ fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
         .map_err(|e| format!("read mod index failed: {e}"))?;
     rows.map(|row| row.map_err(|e| format!("read mod row failed: {e}")))
         .collect()
+}
+
+fn refresh_cached_workshop_titles(
+    connection: &mut Connection,
+    mods: &mut [ModDto],
+) -> Result<(), String> {
+    let mut updates = Vec::new();
+    for row in mods.iter_mut() {
+        if !is_workshop(row) {
+            continue;
+        }
+        let Some(title) = workshop_cached_title(&row.id) else {
+            continue;
+        };
+        if title == row.display_name {
+            continue;
+        }
+        row.display_name = title.clone();
+        updates.push((row.path.clone(), title));
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|e| format!("begin workshop title refresh failed: {e}"))?;
+    for (path, title) in updates {
+        transaction
+            .execute(
+                "UPDATE mod_package_v2 SET display_name = ?1 WHERE path = ?2",
+                params![title, path],
+            )
+            .map_err(|e| format!("persist workshop title failed: {e}"))?;
+    }
+    transaction
+        .commit()
+        .map_err(|e| format!("commit workshop title refresh failed: {e}"))?;
+    Ok(())
 }
 
 fn metadata_needs_refresh(row: &ModDto) -> bool {
@@ -2719,8 +2765,9 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
         .inner
         .lock()
         .map_err(|_| "backend lock poisoned".to_string())?;
-    let db = open_db(&backend.database_path)?;
+    let mut db = open_db(&backend.database_path)?;
     let mut mods = dedupe_mods(load_cached(&db)?);
+    refresh_cached_workshop_titles(&mut db, &mut mods)?;
     if let Some(profile) = find_profile(&backend.paths, &profile_id) {
         let active = active_for_profile(&profile)?;
         apply_enabled(&mut mods, &active);
