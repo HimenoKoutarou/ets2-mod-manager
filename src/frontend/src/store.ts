@@ -451,23 +451,7 @@ export const useModStore = create<ModState>((set, get) => ({
         dirty: false,
         scanSummary: null,
       });
-      void hydrateModMedia(selectedProfileId, mods);
       set({ loading: false });
-      void backend.initializeMods()
-        .then(async (startupSummary) => {
-          if (get().selectedProfileId !== selectedProfileId) return;
-          const refreshedMods = await backend.listMods(selectedProfileId);
-          if (get().selectedProfileId !== selectedProfileId || get().dirty) return;
-          set({
-            mods: refreshedMods,
-            selectedModId: refreshedMods[0]?.id ?? null,
-            scanSummary: startupSummary,
-          });
-          void hydrateModMedia(selectedProfileId, refreshedMods);
-        })
-        .catch((error) => {
-          set({ error: error instanceof Error ? error.message : String(error) });
-        });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -504,7 +488,6 @@ export const useModStore = create<ModState>((set, get) => ({
         dirty: false,
         scanWasCancelled: false,
       });
-      void hydrateModMedia(selectedProfileId, mods);
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -555,7 +538,6 @@ export const useModStore = create<ModState>((set, get) => ({
       if (profileId && !get().dirty) {
         const mods = await backend.listMods(profileId);
         set({ mods, selectedModId: mods[0]?.id ?? null, dirty: false, scanSummary: summary });
-        void hydrateModMedia(profileId, mods);
       } else {
         set({ scanSummary: summary });
       }
