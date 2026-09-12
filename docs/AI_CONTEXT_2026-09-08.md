@@ -243,3 +243,30 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   Release EXE built successfully with WebView2Loader.dll and PE GUI subsystem 2.
   The real user's Mod library was not rescanned by the tests. The batch file's
   final echo still uses its default path; use the actual Cargo output above.
+
+## 2026-09-12 per-row Mod previews
+
+- Mod list rows now use `ModThumbnail`: IntersectionObserver requests artwork for
+  visible/nearby rows without requiring selection. Preview takes priority over
+  the icon; broken previews fall back to icons, then to the existing placeholder.
+  Thumbnails stay 34x34 and move with their Mod during sorting.
+- `modMedia.ts` deduplicates in-flight requests and limits native image loading
+  to two concurrent requests. The detail panel shares this loader. Missing or
+  failed images cannot trigger an automatic request loop in the current catalog.
+- Native media commands now use a blocking worker instead of the UI thread.
+  SQLite `mod_media_cache` retains image data URLs / preview URL metadata by
+  indexed package path, size, timestamp and directory fingerprint. Unchanged
+  positive results are reused; negative results expire after 24h. Index cleanup
+  removes cache records for removed Mods. Remote image URLs still need browser
+  network/cache access; missing artwork remains a placeholder.
+- ZIP media lookup reads the manifest entry directly instead of reading the
+  whole ZIP. Directory manifests are parsed for custom icon filenames.
+- Verification so far: 21 Rust tests passed; TypeScript passed; Playwright
+  `tests/mod-media-smoke.mjs` passed visible/scroll loading, concurrency, duplicate
+  prevention, preview priority, fallback, missing art and priority reordering.
+- Previous default and startup-progress EXEs remain running on the user's
+  machine. New build target: src/frontend/src-tauri/target/mod-thumbnails/release.
+  Do not tell the user that the older output paths have been updated.
+- Final verification: production frontend and Release EXE built successfully;
+  the startup smoke test passed after a browser-navigation timeout on its first
+  run. Tests use isolated fixtures/mocked IPC, not the user's real Mod library.

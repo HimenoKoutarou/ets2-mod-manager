@@ -100,6 +100,7 @@ button { color: inherit; }
 .mod-name-cell strong { overflow: hidden; color: #172033; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .mod-name-cell small { overflow: hidden; color: #667085; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .mod-badge { width: 34px; height: 34px; display: grid; flex: 0 0 34px; place-items: center; overflow: hidden; border-radius: 5px; color: #2563eb; background: #eff6ff; }
+.mod-thumbnail { display: block; width: 34px; height: 34px; flex: 0 0 34px; }
 img.mod-badge { object-fit: cover; }
 .image-placeholder { color: #2563eb; background: #eff6ff; }
 .badge-0 { background: #dbeafe; }.badge-1 { background: #e0e7ff; }.badge-2 { background: #dcfce7; }.badge-3 { background: #fef3c7; }

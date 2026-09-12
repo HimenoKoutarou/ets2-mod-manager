@@ -9,7 +9,6 @@ import {
   Check,
   ChevronDown,
   FolderOpen,
-  ImageOff,
   Languages,
   LayoutGrid,
   Play,
@@ -24,17 +23,9 @@ import { getCopy } from "./i18n";
 import { isTauriRuntime } from "./backend";
 import InitializerWindow from "./InitializerWindow";
 import { useModStore } from "./store";
+import { ModImage, ModThumbnail } from "./ModImage";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
-
-function ModImage({ src, className, alt }: { src?: string; className: string; alt: string }) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [src]);
-  if (!src || failed) {
-    return <span className={`${className} image-placeholder`} aria-label={alt}><ImageOff size={16} /></span>;
-  }
-  return <img className={className} src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
-}
 
 function isValidSaveDraft(value: string, minimum: number, maximum: number): boolean {
   if (!value.trim()) return false;
@@ -345,7 +336,7 @@ function App() {
             <table className="mod-table">
               <thead><tr><th className="check-column">{text.enabled}</th><th>{text.name}</th><th>{text.category}</th><th>{text.source}</th><th>{text.package}</th></tr></thead>
               <tbody>
-                {filteredMods.map((mod, index) => (
+                {filteredMods.map((mod) => (
                   <tr
                     key={mod.id}
                     draggable={selectedProfile.writable !== false && mod.enabled}
@@ -356,7 +347,7 @@ function App() {
                     onClick={() => selectMod(mod.id)}
                   >
                     <td className="check-column"><button className={`toggle ${mod.enabled ? "is-on" : ""}`} disabled={!selectedProfile.writable} onClick={(event) => { event.stopPropagation(); toggleMod(mod.id); }} aria-label={text.enabled}>{mod.enabled && <Check size={14} />}</button></td>
-                    <td><div className="mod-name-cell"><ModImage src={mod.iconUrl || mod.previewUrl} className={`mod-badge badge-${index % 4}`} alt={mod.displayName} /><span><strong>{mod.displayName}</strong><small>{mod.author}</small></span></div></td>
+                    <td><div className="mod-name-cell"><ModThumbnail mod={mod} /><span><strong>{mod.displayName}</strong><small>{mod.author}</small></span></div></td>
                     <td><span className="tag">{mod.category}</span></td>
                     <td><span className={`source source-${mod.source}`}>{mod.source === "local" ? text.sourceLocal : text.sourceWorkshop}</span></td>
                     <td className="package-cell">{mod.packageName}</td>
@@ -503,7 +494,7 @@ function App() {
             </div>
           ) : selectedMod ? (
             <>
-              <div className="detail-art"><ModImage src={selectedMod.previewUrl || selectedMod.iconUrl} className="detail-image" alt={selectedMod.displayName} /><span>{selectedMod.category}</span></div>
+              <div className="detail-art"><ModImage src={selectedMod.previewUrl || selectedMod.iconUrl} fallback={selectedMod.iconUrl} className="detail-image" alt={selectedMod.displayName} /><span>{selectedMod.category}</span></div>
               <div className="detail-heading"><div className="detail-title">{selectedMod.displayName}</div><span className={`source source-${selectedMod.source}`}>{selectedMod.source === "local" ? text.sourceLocal : text.sourceWorkshop}</span></div>
               <div className="detail-package">{selectedMod.packageName}</div>
               <p className="detail-description">{selectedMod.description}</p>

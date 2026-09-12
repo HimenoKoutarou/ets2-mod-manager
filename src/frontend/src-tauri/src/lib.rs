@@ -864,7 +864,20 @@ fn open_db(path: &Path) -> Result<Connection, String> {
         )
         .map_err(|e| format!("initialize database failed: {e}"))?;
     ensure_mod_fingerprint_column(&connection)?;
+    ensure_media_cache_table(&connection)?;
     Ok(connection)
+}
+
+fn ensure_media_cache_table(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS mod_media_cache (
+            path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified_ms INTEGER NOT NULL,
+            fingerprint INTEGER NOT NULL, icon_url TEXT, preview_url TEXT,
+            cached_at_ms INTEGER NOT NULL
+        );",
+        )
+        .map_err(|e| format!("initialize media cache failed: {e}"))
 }
 
 fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> {
@@ -1121,14 +1134,69 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
                 .and_then(|bytes| data_url(bytes, path.to_string_lossy().as_ref()))
         });
     let package_url = cached_icon.or_else(|| {
-        let icon_filename = manifest_for(Path::new(&row.path)).4;
-        package_media_url(Path::new(&row.path), &row.id, &icon_filename)
+        let path = Path::new(&row.path);
+        // Read only the ZIP manifest entry, not the entire archive.
+        let manifest = if path.is_file() {
+            read_zip_entry_text(path, "manifest.sii")
+        } else {
+            fs::read_to_string(path.join("manifest.sii")).ok()
+        };
+        let icon_filename = manifest
+            .map(|text| archive_core::parse_manifest(&text).icon_filename)
+            .unwrap_or_default();
+        package_media_url(path, &row.id, &icon_filename)
     });
     ModMediaDto {
         mod_id: row.id.clone(),
         icon_url: package_url.clone().or_else(|| cached_preview.clone()),
         preview_url: cached_preview.or(package_url),
     }
+}
+
+fn cached_mod_media<F>(
+    connection: &Connection,
+    row: &ModDto,
+    resolve: F,
+) -> Result<ModMediaDto, String>
+where
+    F: FnOnce(&ModDto) -> ModMediaDto,
+{
+    let cached = connection
+        .query_row(
+            "SELECT icon_url, preview_url FROM mod_media_cache
+         WHERE path=?1 AND size=?2 AND modified_ms=?3 AND fingerprint=?4
+         AND (icon_url IS NOT NULL OR preview_url IS NOT NULL OR cached_at_ms>=?5)",
+            params![
+                row.path,
+                row.size as i64,
+                row.modified_ms,
+                row.fingerprint as i64,
+                now_ms() - 86_400_000
+            ],
+            |value| {
+                Ok(ModMediaDto {
+                    mod_id: row.id.clone(),
+                    icon_url: value.get(0)?,
+                    preview_url: value.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| format!("read media cache failed: {e}"))?;
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
+    let media = resolve(row);
+    // Cache misses too, so packages without artwork are not repeatedly opened.
+    connection.execute(
+        "INSERT INTO mod_media_cache(path,size,modified_ms,fingerprint,icon_url,preview_url,cached_at_ms)
+         VALUES(?1,?2,?3,?4,?5,?6,?7)
+         ON CONFLICT(path) DO UPDATE SET size=excluded.size,modified_ms=excluded.modified_ms,
+         fingerprint=excluded.fingerprint,icon_url=excluded.icon_url,preview_url=excluded.preview_url,
+         cached_at_ms=excluded.cached_at_ms",
+        params![row.path, row.size as i64, row.modified_ms, row.fingerprint as i64, media.icon_url, media.preview_url, now_ms()],
+    ).map_err(|e| format!("persist media cache failed: {e}"))?;
+    Ok(media)
 }
 
 fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
@@ -1533,6 +1601,11 @@ where
         )
         .map_err(|e| format!("write mod index failed: {e}"))?;
     }
+    tx.execute(
+        "DELETE FROM mod_media_cache WHERE path NOT IN (SELECT path FROM mod_package_v2)",
+        [],
+    )
+    .map_err(|e| format!("remove stale media cache failed: {e}"))?;
     progress("persist", incoming.len(), incoming.len(), "", Path::new(""));
     tx.commit()
         .map_err(|e| format!("commit mod index failed: {e}"))?;
@@ -2914,46 +2987,65 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn mod_media(request: ModMediaRequest) -> Result<ModMediaDto, String> {
-    let row = ModDto {
-        id: request.mod_id,
-        package_name: String::new(),
-        path: request.path,
-        package_type: request.package_type,
-        display_name: String::new(),
-        author: String::new(),
-        version: String::new(),
-        size: 0,
-        modified_ms: 0,
-        enabled: false,
-        category: String::new(),
-        fingerprint: 0,
-    };
-    Ok(resolve_mod_media(&row))
+async fn mod_media(
+    request: ModMediaRequest,
+    state: State<'_, BackendState>,
+) -> Result<ModMediaDto, String> {
+    mod_media_batch(vec![request], state)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Media result missing.".into())
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn mod_media_batch(requests: Vec<ModMediaRequest>) -> Result<Vec<ModMediaDto>, String> {
-    Ok(requests
+async fn mod_media_batch(
+    requests: Vec<ModMediaRequest>,
+    state: State<'_, BackendState>,
+) -> Result<Vec<ModMediaDto>, String> {
+    if requests.len() > 8 {
+        return Err("Media batch must contain at most 8 packages.".into());
+    }
+    let database = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?
+        .database_path
+        .clone();
+    #[cfg(feature = "desktop")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            mod_media_batch_impl(&database, requests)
+        })
+        .await
+        .map_err(|e| format!("media worker failed: {e}"))?;
+    }
+    #[cfg(not(feature = "desktop"))]
+    mod_media_batch_impl(&database, requests)
+}
+
+fn mod_media_batch_impl(
+    database: &Path,
+    requests: Vec<ModMediaRequest>,
+) -> Result<Vec<ModMediaDto>, String> {
+    let connection = open_db(database)?;
+    let catalog = load_cached(&connection)?;
+    requests
         .into_iter()
         .map(|request| {
-            let row = ModDto {
-                id: request.mod_id,
-                package_name: String::new(),
-                path: request.path,
-                package_type: request.package_type,
-                display_name: String::new(),
-                author: String::new(),
-                version: String::new(),
-                size: 0,
-                modified_ms: 0,
-                enabled: false,
-                category: String::new(),
-                fingerprint: 0,
+            let Some(row) = catalog
+                .iter()
+                .find(|row| row.path == request.path && row.id == request.mod_id)
+            else {
+                return Ok(ModMediaDto {
+                    mod_id: request.mod_id,
+                    icon_url: None,
+                    preview_url: None,
+                });
             };
-            resolve_mod_media(&row)
+            cached_mod_media(&connection, row, resolve_mod_media)
         })
-        .collect())
+        .collect()
 }
 
 fn is_workshop(row: &ModDto) -> bool {
@@ -3528,6 +3620,115 @@ mod tests {
     }
 
     #[test]
+    fn media_cache_survives_restart_and_invalidates_changed_packages() {
+        let root = std::env::temp_dir().join(format!("ets2-media-cache-{}", now_ms()));
+        let database = root.join("index.db");
+        let mut row = ModDto {
+            id: "demo".into(),
+            package_name: "demo".into(),
+            path: "test-demo.scs".into(),
+            package_type: "scs".into(),
+            display_name: "Demo".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 10,
+            modified_ms: 20,
+            fingerprint: 30,
+            enabled: false,
+            category: String::new(),
+        };
+        let connection = open_db(&database).unwrap();
+        let media = cached_mod_media(&connection, &row, |row| ModMediaDto {
+            mod_id: row.id.clone(),
+            icon_url: Some("data:image/png;base64,AQ==".into()),
+            preview_url: Some("data:image/png;base64,Ag==".into()),
+        })
+        .unwrap();
+        drop(connection);
+        let connection = open_db(&database).unwrap();
+        connection
+            .execute("UPDATE mod_media_cache SET cached_at_ms=0", [])
+            .unwrap();
+        let cached = cached_mod_media(&connection, &row, |_| {
+            panic!("unchanged artwork must be persisted")
+        })
+        .unwrap();
+        assert_eq!(media.preview_url, cached.preview_url);
+        assert_eq!(media.icon_url, cached.icon_url);
+        row.fingerprint += 1;
+        let changed = cached_mod_media(&connection, &row, |row| ModMediaDto {
+            mod_id: row.id.clone(),
+            icon_url: None,
+            preview_url: None,
+        })
+        .unwrap();
+        assert!(changed.preview_url.is_none());
+        cached_mod_media(&connection, &row, |_| {
+            panic!("missing artwork must not be repeatedly opened")
+        })
+        .unwrap();
+        connection
+            .execute("UPDATE mod_media_cache SET cached_at_ms=0", [])
+            .unwrap();
+        let refreshed = cached_mod_media(&connection, &row, |row| ModMediaDto {
+            mod_id: row.id.clone(),
+            icon_url: None,
+            preview_url: Some("restored".into()),
+        })
+        .unwrap();
+        assert_eq!(refreshed.preview_url.as_deref(), Some("restored"));
+        let mut connection = connection;
+        sync_index(&mut connection, &[]).unwrap();
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM mod_media_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn directory_artwork_uses_manifest_icon_and_persisted_bytes() {
+        let root = std::env::temp_dir().join(format!("ets2-media-image-{}", now_ms()));
+        let package = root.join("demo");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("manifest.sii"), "icon: \"custom.png\"").unwrap();
+        fs::write(package.join("custom.png"), [1, 2, 3]).unwrap();
+        let row = ModDto {
+            id: "demo".into(),
+            package_name: "demo".into(),
+            path: normalize_path(&package),
+            package_type: "directory".into(),
+            display_name: "Demo".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 3,
+            modified_ms: 1,
+            fingerprint: 2,
+            enabled: false,
+            category: String::new(),
+        };
+        let connection = open_db(&root.join("index.db")).unwrap();
+        let first = cached_mod_media(&connection, &row, resolve_mod_media).unwrap();
+        assert_eq!(
+            first.preview_url.as_deref(),
+            Some("data:image/png;base64,AQID")
+        );
+        fs::remove_file(package.join("custom.png")).unwrap();
+        let cached =
+            cached_mod_media(&connection, &row, |_| panic!("must reuse image bytes")).unwrap();
+        assert_eq!(first.preview_url, cached.preview_url);
+        let changed = ModDto {
+            fingerprint: 3,
+            ..row
+        };
+        let refreshed = cached_mod_media(&connection, &changed, resolve_mod_media).unwrap();
+        assert!(refreshed.preview_url.is_none());
+        drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn discovery_reports_current_package_before_reading_its_contents() {
         let root = std::env::temp_dir().join(format!("ets2-progress-discovery-{}", now_ms()));
         let package = root.join("demo_mod");
@@ -3919,7 +4120,8 @@ fn open_db_schema(connection: &Connection) -> Result<(), String> {
              CREATE INDEX IF NOT EXISTS ix_localization_entry_v2_key
                ON localization_entry_v2(target_locale, key);",
         )
-        .map_err(|e| format!("initialize database failed: {e}"))
+        .map_err(|e| format!("initialize database failed: {e}"))?;
+    ensure_media_cache_table(connection)
 }
 
 #[cfg(feature = "desktop")]

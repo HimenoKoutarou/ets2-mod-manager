@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
+import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
 import { getCopy } from "./i18n";
+import { createMediaLoader, mediaKey } from "./modMedia";
 import type { Language, ModRecord, ModView, Profile, SaveSlot } from "./types";
 
 export const fixtureProfiles: Profile[] = [
@@ -182,33 +183,7 @@ const initialUiProfiles = backend.real ? [] : fixtureProfiles;
 const initialUiMods = backend.real ? [] : initialMods;
 let saveSelectionRequest = 0;
 let localizationRequest = 0;
-let mediaRequest = 0;
-
-async function hydrateModMedia(profileId: string, mods: ModRecord[]): Promise<void> {
-  if (!mods.length) return;
-  const requestId = ++mediaRequest;
-  const chunks: ModRecord[][] = [];
-  for (let index = 0; index < mods.length; index += 24) {
-    chunks.push(mods.slice(index, index + 24));
-  }
-  try {
-    for (const chunk of chunks) {
-      const media = await backend.loadModMedia(chunk);
-      if (requestId !== mediaRequest || useModStore.getState().selectedProfileId !== profileId) return;
-      const byId = new Map(media.map((entry) => [entry.modId, entry]));
-      useModStore.setState((state) => ({
-        mods: state.mods.map((mod) => {
-          const entry = byId.get(mod.id);
-          return entry ? { ...mod, iconUrl: entry.iconUrl, previewUrl: entry.previewUrl } : mod;
-        }),
-      }));
-    }
-  } catch (error) {
-    if (requestId === mediaRequest) {
-      useModStore.setState({ error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-}
+const loadMedia = createMediaLoader(backend);
 
 interface PresetSnapshot {
   id: string;
@@ -293,6 +268,7 @@ interface ModState {
   invertAll: () => void;
   selectMod: (id: string) => void;
   loadSelectedModMedia: () => Promise<void>;
+  loadModMedia: (id: string) => Promise<void>;
   moveMod: (id: string, targetIndex: number) => void;
   scan: () => Promise<void>;
   cancelScan: () => Promise<void>;
@@ -523,31 +499,28 @@ export const useModStore = create<ModState>((set, get) => ({
     })),
   selectMod: (selectedModId) => set({ selectedModId }),
   loadSelectedModMedia: async () => {
-    const { selectedProfileId, selectedModId, mods } = get();
-    const selected = mods.find((mod) => mod.id === selectedModId);
-    if (!selected || !selectedProfileId || (selected.iconUrl && selected.previewUrl)) return;
-    const requestId = ++mediaRequest;
+    const id = get().selectedModId;
+    if (id) await get().loadModMedia(id);
+  },
+  loadModMedia: async (id) => {
+    const { selectedProfileId, mods } = get();
+    const selected = mods.find((mod) => mod.id === id);
+    if (!selected || selected.mediaLoaded) return;
+    const key = mediaKey(selected);
+    let entry: ModMedia | undefined;
     try {
-      const media = await backend.loadModMedia([selected]);
-      if (
-        requestId !== mediaRequest
-        || get().selectedProfileId !== selectedProfileId
-        || get().selectedModId !== selectedModId
-      ) return;
-      const entry = media[0];
-      if (!entry) return;
-      set((state) => ({
-        mods: state.mods.map((mod) =>
-          mod.id === selectedModId
-            ? { ...mod, iconUrl: entry.iconUrl, previewUrl: entry.previewUrl }
-            : mod,
-        ),
-      }));
-    } catch (error) {
-      if (requestId === mediaRequest) {
-        set({ error: error instanceof Error ? error.message : String(error) });
-      }
+      entry = await loadMedia(selected);
+    } catch {
+      // A broken image must not block Mod management or create a retry loop.
     }
+    if (get().selectedProfileId !== selectedProfileId) return;
+    set((state) => ({
+      mods: state.mods.map((mod) =>
+        mediaKey(mod) === key
+          ? { ...mod, iconUrl: entry?.iconUrl ?? mod.iconUrl, previewUrl: entry?.previewUrl ?? mod.previewUrl, mediaLoaded: true }
+          : mod,
+      ),
+    }));
   },
   moveMod: (id, targetIndex) =>
     set((state) => {
