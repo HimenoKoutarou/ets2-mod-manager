@@ -576,6 +576,7 @@ fn remap_cache(database: &Path, source: &Path, destination: &Path, reverse: bool
     for (table, column) in [
         ("mod_package_v2", "path"),
         ("mod_media_cache", "path"),
+        ("mod_media_cache_meta", "path"),
         ("localization_package_v2", "package_path"),
         ("localization_entry_v2", "package_path"),
         ("localization_entry_v2", "source_path"),

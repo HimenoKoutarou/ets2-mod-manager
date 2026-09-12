@@ -387,3 +387,22 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - The initializer continues to report `cache`, `cached`, `local`, `workshop`,
   `metadata`, `persist` and `complete` phases, including the concrete package
   name/path for deep reads.
+
+## 2026-09-13 media fallback and fixed details panel
+
+- Mod media resolution now falls back to the bundled external extractor for
+  non-ZIP SCS/HashFS packages. The extractor listing is filtered for image
+  extensions, prioritizes icon/preview/thumb/cover/logo/banner names, extracts
+  up to 24 candidates in one call, and returns the first valid image as a data
+  URL. Child extractor processes are hidden on Windows.
+- Media cache schema remains backward compatible: the original seven-column
+  `mod_media_cache` table is unchanged. `mod_media_cache_meta` stores a media
+  resolver version so older negative cache entries are retried after resolver
+  improvements. Stale metadata is removed and directory relocation remaps it.
+- The desktop shell is now fixed to the viewport (`height: 100vh`,
+  `overflow: hidden`). The Mod table, sidebar and right details panel scroll
+  independently; scrolling the Mod list no longer moves the details panel out
+  of view.
+- Verification on 2026-09-13: Rust backend 34 tests passed, TypeScript build
+  and Vite production build passed. The bundled extractor successfully listed
+  `/imagen.jpg` from a real local HashFS SCS package.

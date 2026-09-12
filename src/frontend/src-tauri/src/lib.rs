@@ -10,6 +10,8 @@ use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -1015,7 +1017,15 @@ fn ensure_media_cache_table(connection: &Connection) -> Result<(), String> {
             cached_at_ms INTEGER NOT NULL
         );",
         )
-        .map_err(|e| format!("initialize media cache failed: {e}"))
+        .map_err(|e| format!("initialize media cache failed: {e}"))?;
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS mod_media_cache_meta (
+                path TEXT PRIMARY KEY,
+                resolver_version INTEGER NOT NULL
+            );",
+        )
+        .map_err(|e| format!("initialize media cache metadata failed: {e}"))
 }
 
 fn ensure_header_state_table(connection: &Connection) -> Result<(), String> {
@@ -1072,6 +1082,7 @@ fn manifest_for(path: &Path) -> (String, String, String, String, String) {
 }
 
 const MAX_MEDIA_BYTES: u64 = 8 * 1024 * 1024;
+const MEDIA_RESOLVER_VERSION: i64 = 2;
 
 fn media_extension(path: &str) -> Option<&'static str> {
     let extension = Path::new(path)
@@ -1099,6 +1110,13 @@ fn data_url(bytes: Vec<u8>, name: &str) -> Option<String> {
     }
     let mime = media_extension(name)?;
     Some(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
+}
+
+fn hide_child_process(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(0x08000000);
+    }
 }
 
 fn read_zip_entry_bytes(path: &Path, wanted: &str) -> Option<Vec<u8>> {
@@ -1270,6 +1288,155 @@ fn cached_workshop_preview_url(mod_id: &str) -> Option<String> {
     None
 }
 
+fn extractor_path() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.extend(exe.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        roots.extend(current.ancestors().map(Path::to_path_buf));
+    }
+    let mut candidates = Vec::new();
+    for root in roots {
+        candidates.push(root.join("assets/tools/extractor-2025-10-21.exe"));
+        candidates.push(root.join("assets/tools/extractor.exe"));
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn external_archive_image(path: &Path, mod_id: &str) -> Option<String> {
+    if !path.is_file() || extractor_path().is_none() {
+        return None;
+    }
+    let extractor = extractor_path()?;
+    let mut list_command = std::process::Command::new(&extractor);
+    hide_child_process(&mut list_command);
+    let output = list_command
+        .arg(path)
+        .arg("--deep")
+        .arg("--list")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let name = line
+            .split_whitespace()
+            .find(|value| {
+                let lower = value.to_ascii_lowercase();
+                lower.ends_with(".jpg")
+                    || lower.ends_with(".jpeg")
+                    || lower.ends_with(".png")
+                    || lower.ends_with(".webp")
+                    || lower.ends_with(".gif")
+                    || lower.ends_with(".bmp")
+            })
+            .unwrap_or_default()
+            .trim_matches(|value| value == '"' || value == '\'')
+            .replace('\\', "/");
+        let lower = name.to_ascii_lowercase();
+        if !lower.ends_with(".jpg")
+            && !lower.ends_with(".jpeg")
+            && !lower.ends_with(".png")
+            && !lower.ends_with(".webp")
+            && !lower.ends_with(".gif")
+            && !lower.ends_with(".bmp")
+        {
+            continue;
+        }
+        if !names.iter().any(|value| value == &name) {
+            names.push(name);
+        }
+    }
+    let priority = ["icon", "preview", "thumb", "cover", "logo", "banner"];
+    names.sort_by_key(|name| {
+        (
+            if priority
+                .iter()
+                .any(|part| name.to_ascii_lowercase().contains(part))
+            {
+                0
+            } else {
+                1
+            },
+            name.len(),
+            name.to_ascii_lowercase(),
+        )
+    });
+    names.truncate(24);
+    if names.is_empty() {
+        return None;
+    }
+    let mut temp_hasher = Sha1::new();
+    temp_hasher.update(normalize_path(path).as_bytes());
+    let temp_key = format!("{:x}", temp_hasher.finalize());
+    let temp =
+        std::env::temp_dir().join(format!("ets2mm-preview-{}-{temp_key}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).ok()?;
+    let partial = names
+        .iter()
+        .map(|name| {
+            if name.starts_with('/') {
+                name.clone()
+            } else {
+                format!("/{name}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut extract_command = std::process::Command::new(&extractor);
+    hide_child_process(&mut extract_command);
+    let status = extract_command
+        .arg(path)
+        .arg("--deep")
+        .arg(format!("--partial={partial}"))
+        .arg("-d")
+        .arg(&temp)
+        .arg("-s")
+        .status()
+        .ok();
+    let mut result = None;
+    if status.is_some_and(|value| value.success()) {
+        let mut stack = vec![temp.clone()];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let candidate = entry.path();
+                if candidate.is_dir() {
+                    stack.push(candidate);
+                    continue;
+                }
+                if media_extension(candidate.to_string_lossy().as_ref()).is_none() {
+                    continue;
+                }
+                if fs::metadata(&candidate)
+                    .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
+                    .unwrap_or(false)
+                {
+                    if let Ok(bytes) = fs::read(&candidate) {
+                        result = data_url(bytes, candidate.to_string_lossy().as_ref());
+                        if result.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            if result.is_some() {
+                break;
+            }
+        }
+    }
+    let _ = fs::remove_dir_all(&temp);
+    let _ = mod_id;
+    result
+}
+
 fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
     let workshop_id = row.id.trim().trim_end_matches("_workshop").to_string();
     let cached_preview = if is_workshop(row) {
@@ -1296,6 +1463,7 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
             .map(|text| archive_core::parse_manifest(&text).icon_filename)
             .unwrap_or_default();
         package_media_url(path, &row.id, &icon_filename)
+            .or_else(|| external_archive_image(path, &row.id))
     });
     ModMediaDto {
         mod_id: row.id.clone(),
@@ -1314,14 +1482,17 @@ where
 {
     let cached = connection
         .query_row(
-            "SELECT icon_url, preview_url FROM mod_media_cache
-         WHERE path=?1 AND size=?2 AND modified_ms=?3 AND fingerprint=?4
-         AND (icon_url IS NOT NULL OR preview_url IS NOT NULL OR cached_at_ms>=?5)",
+            "SELECT c.icon_url, c.preview_url FROM mod_media_cache c
+         LEFT JOIN mod_media_cache_meta m ON m.path = c.path
+         WHERE c.path=?1 AND c.size=?2 AND c.modified_ms=?3 AND c.fingerprint=?4
+         AND COALESCE(m.resolver_version, 1)=?5
+         AND (c.icon_url IS NOT NULL OR c.preview_url IS NOT NULL OR c.cached_at_ms>=?6)",
             params![
                 row.path,
                 row.size as i64,
                 row.modified_ms,
                 row.fingerprint as i64,
+                MEDIA_RESOLVER_VERSION,
                 now_ms() - 86_400_000
             ],
             |value| {
@@ -1345,8 +1516,23 @@ where
          ON CONFLICT(path) DO UPDATE SET size=excluded.size,modified_ms=excluded.modified_ms,
          fingerprint=excluded.fingerprint,icon_url=excluded.icon_url,preview_url=excluded.preview_url,
          cached_at_ms=excluded.cached_at_ms",
-        params![row.path, row.size as i64, row.modified_ms, row.fingerprint as i64, media.icon_url, media.preview_url, now_ms()],
+        params![
+            row.path,
+            row.size as i64,
+            row.modified_ms,
+            row.fingerprint as i64,
+            media.icon_url,
+            media.preview_url,
+            now_ms()
+        ],
     ).map_err(|e| format!("persist media cache failed: {e}"))?;
+    connection
+        .execute(
+            "INSERT INTO mod_media_cache_meta(path,resolver_version) VALUES(?1,?2)
+             ON CONFLICT(path) DO UPDATE SET resolver_version=excluded.resolver_version",
+            params![row.path, MEDIA_RESOLVER_VERSION],
+        )
+        .map_err(|e| format!("persist media cache metadata failed: {e}"))?;
     Ok(media)
 }
 
@@ -1790,6 +1976,11 @@ where
         [],
     )
     .map_err(|e| format!("remove stale media cache failed: {e}"))?;
+    tx.execute(
+        "DELETE FROM mod_media_cache_meta WHERE path NOT IN (SELECT path FROM mod_package_v2)",
+        [],
+    )
+    .map_err(|e| format!("remove stale media cache metadata failed: {e}"))?;
     progress("persist", incoming.len(), incoming.len(), "", Path::new(""));
     tx.commit()
         .map_err(|e| format!("commit mod index failed: {e}"))?;
