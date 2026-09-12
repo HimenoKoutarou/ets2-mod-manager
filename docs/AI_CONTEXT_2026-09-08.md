@@ -369,3 +369,21 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   `src/frontend/src-tauri/target/mod-thumbnails/release/ets2-mod-manager.exe`,
   with WebView2Loader.dll beside it; no installer. Older default-target EXEs are
   still running and were not killed. The default start.bat remains an old target.
+
+## 2026-09-12 startup incremental CRUD scan
+
+- Startup initialization now uses `startup_incremental_scan` instead of always
+  deep-reading every package. It enumerates only direct children of the local
+  Mod root and Workshop roots, reading path/type/size/modified time.
+- Existing packages whose shallow header is unchanged are loaded directly from
+  `mod_package_v2`; new, removed, or changed entries are reconciled through the
+  normal index transaction. Manual `mod_scan` remains a complete deep scan.
+- Added persistent `mod_package_header_state(path,size,modified_ms,is_directory)`
+  storage. Header state is updated transactionally with the package index and
+  stale rows are removed with deleted packages.
+- Directory package headers deliberately store root-directory metadata, while
+  the package index may continue to store the recursive directory signature.
+  This prevents unchanged directory Mods from being rescanned on every launch.
+- The initializer continues to report `cache`, `cached`, `local`, `workshop`,
+  `metadata`, `persist` and `complete` phases, including the concrete package
+  name/path for deep reads.

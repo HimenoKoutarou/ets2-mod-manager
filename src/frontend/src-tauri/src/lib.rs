@@ -862,12 +862,148 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                PRIMARY KEY(package_path, target_locale, entry_order)
              );
              CREATE INDEX IF NOT EXISTS ix_localization_entry_v2_key
-               ON localization_entry_v2(target_locale, key);",
+               ON localization_entry_v2(target_locale, key);
+             CREATE TABLE IF NOT EXISTS mod_index_state (
+               id INTEGER PRIMARY KEY CHECK (id = 1),
+               completed_at_ms INTEGER NOT NULL,
+               package_count INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS mod_package_header_state (
+               path TEXT PRIMARY KEY,
+               size INTEGER NOT NULL,
+               modified_ms INTEGER NOT NULL,
+               is_directory INTEGER NOT NULL
+             );",
         )
         .map_err(|e| format!("initialize database failed: {e}"))?;
     ensure_mod_fingerprint_column(&connection)?;
+    ensure_header_state_table(&connection)?;
     ensure_media_cache_table(&connection)?;
     Ok(connection)
+}
+
+#[derive(Clone, Debug)]
+struct ShallowCandidate {
+    path: PathBuf,
+    size: u64,
+    modified_ms: i64,
+    is_directory: bool,
+    workshop: bool,
+}
+
+fn shallow_package_candidates(
+    root: Option<&Path>,
+    workshop: bool,
+    cancelled: &AtomicBool,
+) -> Vec<ShallowCandidate> {
+    let Some(root) = root else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+            let path = entry.path();
+            let metadata = fs::metadata(&path).ok()?;
+            let is_directory = metadata.is_dir();
+            let extension = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !is_directory && extension != "scs" && extension != "zip" {
+                return None;
+            }
+            let modified_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|v| v.duration_since(UNIX_EPOCH).ok())
+                .map(|v| v.as_millis() as i64)
+                .unwrap_or_default();
+            Some(ShallowCandidate {
+                path,
+                size: metadata.len(),
+                modified_ms,
+                is_directory,
+                workshop,
+            })
+        })
+        .collect()
+}
+
+fn discover_single_candidate(
+    candidate: &ShallowCandidate,
+    cancelled: &AtomicBool,
+    progress: &mut impl FnMut(&str, usize, usize, &str, &Path),
+) -> Option<ModDto> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let path = &candidate.path;
+    let extension = path
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let id = if candidate.workshop {
+        path.file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        path.file_stem()
+            .and_then(|x| x.to_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let display_name = if candidate.workshop {
+        workshop_cached_title(&id).unwrap_or_else(|| id.replace('_', " "))
+    } else {
+        id.replace('_', " ")
+    };
+    progress(
+        if candidate.workshop {
+            "workshop"
+        } else {
+            "local"
+        },
+        0,
+        1,
+        &display_name,
+        path,
+    );
+    let (size, modified_ms, fingerprint) = if candidate.is_directory {
+        directory_signature(path, cancelled)
+    } else {
+        let fingerprint = candidate
+            .size
+            .wrapping_mul(1099511628211)
+            .wrapping_add(candidate.modified_ms as u64);
+        (candidate.size, candidate.modified_ms, fingerprint)
+    };
+    Some(ModDto {
+        id: id.clone(),
+        package_name: id,
+        path: normalize_path(path),
+        package_type: if candidate.workshop {
+            "workshop".into()
+        } else if candidate.is_directory {
+            "directory".into()
+        } else {
+            extension
+        },
+        display_name,
+        author: String::new(),
+        version: String::new(),
+        size,
+        modified_ms,
+        enabled: false,
+        category: "unknown".into(),
+        fingerprint,
+    })
 }
 
 fn ensure_media_cache_table(connection: &Connection) -> Result<(), String> {
@@ -880,6 +1016,19 @@ fn ensure_media_cache_table(connection: &Connection) -> Result<(), String> {
         );",
         )
         .map_err(|e| format!("initialize media cache failed: {e}"))
+}
+
+fn ensure_header_state_table(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS mod_package_header_state (
+                path TEXT PRIMARY KEY,
+                size INTEGER NOT NULL,
+                modified_ms INTEGER NOT NULL,
+                is_directory INTEGER NOT NULL
+            );",
+        )
+        .map_err(|e| format!("initialize mod header state failed: {e}"))
 }
 
 fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> {
@@ -1486,6 +1635,7 @@ where
     F: FnMut(&str, usize, usize, &str, &Path),
 {
     let started = std::time::Instant::now();
+    ensure_header_state_table(connection)?;
     let cached = load_cached(connection)?;
     let old: HashMap<String, (i64, u64, u64)> = cached
         .iter()
@@ -1501,6 +1651,11 @@ where
     for path in old.keys().filter(|path| !next.contains(*path)) {
         tx.execute("DELETE FROM mod_package_v2 WHERE path = ?1", params![path])
             .map_err(|e| format!("remove stale index row failed: {e}"))?;
+        tx.execute(
+            "DELETE FROM mod_package_header_state WHERE path = ?1",
+            params![path],
+        )
+        .map_err(|e| format!("remove stale header state failed: {e}"))?;
     }
     for (index, mod_row) in incoming.iter().enumerate() {
         let changed = old
@@ -1602,6 +1757,33 @@ where
             ],
         )
         .map_err(|e| format!("write mod index failed: {e}"))?;
+        let header_metadata = fs::metadata(Path::new(&enriched.path)).ok();
+        let header_size = header_metadata
+            .as_ref()
+            .map(|value| value.len())
+            .unwrap_or(enriched.size);
+        let header_modified_ms = header_metadata
+            .as_ref()
+            .and_then(|value| value.modified().ok())
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as i64)
+            .unwrap_or(enriched.modified_ms);
+        let header_is_directory = header_metadata
+            .as_ref()
+            .map(|value| value.is_dir())
+            .unwrap_or_else(|| enriched.package_type == "directory");
+        tx.execute(
+            "INSERT INTO mod_package_header_state(path,size,modified_ms,is_directory)
+             VALUES (?1,?2,?3,?4)
+             ON CONFLICT(path) DO UPDATE SET size=excluded.size, modified_ms=excluded.modified_ms, is_directory=excluded.is_directory",
+            params![
+                enriched.path,
+                header_size as i64,
+                header_modified_ms,
+                if header_is_directory { 1 } else { 0 }
+            ],
+        )
+        .map_err(|e| format!("write mod header state failed: {e}"))?;
     }
     tx.execute(
         "DELETE FROM mod_media_cache WHERE path NOT IN (SELECT path FROM mod_package_v2)",
@@ -3273,6 +3455,84 @@ where
     sync_index_with_progress(&mut db, &discovered, progress)
 }
 
+fn startup_incremental_scan<F>(
+    paths: Paths,
+    database_path: PathBuf,
+    cancelled: Arc<AtomicBool>,
+    progress: &mut F,
+) -> Result<ScanSummary, String>
+where
+    F: FnMut(&str, usize, usize, &str, &Path),
+{
+    let _directory_lock = mod_directory::read_lock(&paths.mod_root)?;
+    cancelled.store(false, Ordering::Relaxed);
+    let mut db = open_db(&database_path)?;
+    let cached = load_cached(&db)?;
+    if cached.is_empty() {
+        return scan_mod_inputs_with_progress(paths, database_path, cancelled, progress);
+    }
+    progress("cache", cached.len(), cached.len(), "", &database_path);
+    let mut candidates = shallow_package_candidates(Some(&paths.mod_root), false, &cancelled);
+    for root in &paths.workshop_roots {
+        candidates.extend(shallow_package_candidates(Some(root), true, &cancelled));
+    }
+    let headers: HashMap<String, (u64, i64, bool)> = db
+        .prepare("SELECT path,size,modified_ms,is_directory FROM mod_package_header_state")
+        .map_err(|e| format!("query mod headers failed: {e}"))?
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get::<_, i64>(1)?.max(0) as u64,
+                row.get(2)?,
+                row.get::<_, i64>(3)? != 0,
+            ))
+        })
+        .map_err(|e| format!("query mod headers failed: {e}"))?
+        .filter_map(Result::ok)
+        .map(|(path, size, modified, is_dir)| (path, (size, modified, is_dir)))
+        .collect();
+    let cached_by_path: HashMap<String, ModDto> =
+        cached.into_iter().map(|m| (m.path.clone(), m)).collect();
+    let mut discovered = Vec::with_capacity(candidates.len());
+    let mut inspected = 0usize;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let path = normalize_path(&candidate.path);
+        let unchanged = headers
+            .get(&path)
+            .map(|(size, modified, is_dir)| {
+                *size == candidate.size
+                    && *modified == candidate.modified_ms
+                    && *is_dir == candidate.is_directory
+            })
+            .unwrap_or(false);
+        if unchanged {
+            if let Some(row) = cached_by_path.get(&path) {
+                progress(
+                    "cached",
+                    index + 1,
+                    candidates.len(),
+                    &row.display_name,
+                    &candidate.path,
+                );
+                discovered.push(row.clone());
+                continue;
+            }
+        }
+        inspected += 1;
+        if let Some(row) = discover_single_candidate(candidate, &cancelled, progress) {
+            discovered.push(row);
+        }
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Scan cancelled.".into());
+    }
+    let summary = sync_index_with_progress(&mut db, &discovered, progress)?;
+    Ok(ScanSummary {
+        inspected,
+        ..summary
+    })
+}
+
 #[cfg(feature = "desktop")]
 #[tauri::command(rename_all = "camelCase")]
 async fn mod_initialize(
@@ -3304,7 +3564,7 @@ async fn mod_initialize(
                 elapsed_ms: 0,
             });
         }
-        scan_mod_inputs_with_progress(
+        startup_incremental_scan(
             paths,
             database_path,
             cancelled,
