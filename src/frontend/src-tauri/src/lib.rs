@@ -990,7 +990,7 @@ fn discover_single_candidate(
         path,
     );
     let (size, modified_ms, fingerprint) = if candidate.is_directory {
-        directory_signature(path, cancelled)
+        directory_info_signature(path, cancelled)
     } else {
         let fingerprint = candidate
             .size
@@ -1085,7 +1085,11 @@ fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> 
 }
 
 fn manifest_for(path: &Path) -> (String, String, String, String, String) {
-    let mut manifest = archive_core::read_manifest(path).unwrap_or_default();
+    let mut manifest = if path.is_dir() {
+        read_directory_info_manifest(path)
+    } else {
+        archive_core::read_manifest(path).unwrap_or_default()
+    };
     if manifest.package_name.is_empty()
         && manifest.display_name.is_empty()
         && manifest.author.is_empty()
@@ -1103,6 +1107,44 @@ fn manifest_for(path: &Path) -> (String, String, String, String, String) {
         manifest.version,
         manifest.icon_filename,
     )
+}
+
+fn read_directory_info_manifest(root: &Path) -> archive_core::Manifest {
+    const INFO_FILES: [&str; 2] = ["manifest.sii", "mods_info.sii"];
+    let mut fallback = archive_core::Manifest::default();
+    let Ok(entries) = fs::read_dir(root) else {
+        return fallback;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !INFO_FILES
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let parsed = archive_core::parse_manifest(&text);
+        if name.eq_ignore_ascii_case("manifest.sii") {
+            return parsed;
+        }
+        if fallback.display_name.is_empty()
+            && fallback.package_name.is_empty()
+            && fallback.author.is_empty()
+            && fallback.version.is_empty()
+        {
+            fallback = parsed;
+        }
+    }
+    fallback
 }
 
 const MAX_MEDIA_BYTES: u64 = 8 * 1024 * 1024;
@@ -1561,19 +1603,33 @@ where
     Ok(media)
 }
 
-fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
-    let mut stack = vec![path.to_path_buf()];
+fn directory_info_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
     let mut total_size = 0u64;
     let mut latest_modified = 0i64;
     let mut fingerprint = 1469598103934665603u64;
     let mut files = Vec::new();
-    while let Some(current) = stack.pop() {
+    let Ok(entries) = fs::read_dir(path) else {
+        return (0, 0, fingerprint);
+    };
+    for entry in entries.flatten() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
+        let current = entry.path();
         let Ok(metadata) = fs::metadata(&current) else {
             continue;
         };
+        if !metadata.is_file() {
+            continue;
+        }
+        let relative = current
+            .strip_prefix(path)
+            .unwrap_or(&current)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !is_mod_info_path(&relative) {
+            continue;
+        }
         if let Some(modified) = metadata
             .modified()
             .ok()
@@ -1582,28 +1638,14 @@ fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
         {
             latest_modified = latest_modified.max(modified);
         }
-        if metadata.is_file() {
-            total_size = total_size.saturating_add(metadata.len());
-            let relative = current
-                .strip_prefix(path)
-                .unwrap_or(&current)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_millis() as u64)
-                .unwrap_or_default();
-            files.push((relative, metadata.len(), modified));
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            stack.push(entry.path());
-        }
+        total_size = total_size.saturating_add(metadata.len());
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or_default();
+        files.push((relative, metadata.len(), modified));
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     for (relative, size, modified) in files {
@@ -1617,6 +1659,15 @@ fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
         fingerprint = fingerprint.wrapping_mul(1099511628211);
     }
     (total_size, latest_modified, fingerprint)
+}
+
+fn is_mod_info_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/").to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or_default();
+    matches!(
+        name,
+        "manifest.sii" | "mods_info.sii" | "mod_description.txt" | "description.txt"
+    )
 }
 
 fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool) -> Vec<ModDto> {
@@ -1688,7 +1739,7 @@ where
         progress(phase, index, total, &display_name, &path);
         let metadata = fs::metadata(&path).ok();
         let (size, modified_ms, fingerprint) = if is_dir {
-            directory_signature(&path, cancelled)
+            directory_info_signature(&path, cancelled)
         } else {
             let size = metadata
                 .as_ref()
@@ -2039,7 +2090,20 @@ where
 fn package_fingerprint(path: &Path) -> (String, i64, i64) {
     if path.is_dir() {
         let mut hash = 1469598103934665603u64;
-        let mut stack = vec![path.to_path_buf()];
+        let mut stack = fs::read_dir(path)
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+            .filter(|entry| {
+                entry.is_dir()
+                    && entry
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|name| {
+                            name.eq_ignore_ascii_case("def") || name.eq_ignore_ascii_case("locale")
+                        })
+            })
+            .collect::<Vec<_>>();
         let mut files = Vec::new();
         while let Some(current) = stack.pop() {
             let Ok(metadata) = fs::metadata(&current) else {
@@ -2100,25 +2164,21 @@ fn package_fingerprint(path: &Path) -> (String, i64, i64) {
     (kind, size, modified)
 }
 
+fn has_path_segment(path: &str, segment: &str) -> bool {
+    path.split('/')
+        .any(|part| part.eq_ignore_ascii_case(segment))
+}
+
 fn is_localization_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
     (normalized.ends_with(".sii") || normalized.ends_with(".sui"))
-        && (normalized.contains("/locale/")
-            || normalized.starts_with("locale/")
-            || normalized.contains("localization")
-            || normalized.contains("translation")
-            || normalized.contains("language")
-            || normalized.contains("/local/"))
+        && has_path_segment(&normalized, "locale")
 }
 
 fn is_definition_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
     (normalized.ends_with(".sii") || normalized.ends_with(".sui"))
-        && (normalized.starts_with("def/")
-            || normalized.contains("/def/")
-            || normalized.contains("/city/")
-            || normalized.contains("/country/")
-            || normalized.contains("/ferry/"))
+        && has_path_segment(&normalized, "def")
 }
 
 fn category_for_path(path: &str) -> String {
@@ -2311,7 +2371,19 @@ fn scan_localization_directory(
     let Ok(files) = fs::read_dir(root) else {
         return output;
     };
-    let mut stack: Vec<PathBuf> = files.flatten().map(|entry| entry.path()).collect();
+    let mut stack: Vec<PathBuf> = files
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                || path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| {
+                        name.eq_ignore_ascii_case("def") || name.eq_ignore_ascii_case("locale")
+                    })
+        })
+        .collect();
     stack.sort_by(|left, right| right.cmp(left));
     while let Some(path) = stack.pop() {
         if cancelled.load(Ordering::Relaxed) {
@@ -2494,6 +2566,7 @@ fn save_localization_snapshots(
     current_paths: &[String],
     snapshots: &[(String, (String, i64, i64), Vec<LocalizationEntryDto>)],
 ) -> Result<(), String> {
+    let _write_lock = acquire_db_write_lock();
     let transaction = connection
         .transaction()
         .map_err(|error| format!("begin localization transaction failed: {error}"))?;
@@ -4195,18 +4268,40 @@ mod tests {
     }
 
     #[test]
-    fn directory_fingerprint_detects_same_size_rename() {
+    fn directory_info_signature_ignores_game_assets() {
         let root = std::env::temp_dir().join(format!("ets2modmanager-fingerprint-{}", now_ms()));
         fs::create_dir_all(&root).expect("create temp directory");
-        let first = root.join("first.scs");
-        let second = root.join("second.scs");
-        fs::write(&first, b"same-size").expect("write first package");
-        let before = directory_signature(&root, &AtomicBool::new(false));
-        fs::rename(&first, &second).expect("rename package");
-        let after = directory_signature(&root, &AtomicBool::new(false));
+        fs::write(root.join("manifest.sii"), b"display_name: \"Demo\"").expect("write manifest");
+        fs::create_dir_all(root.join("vehicle")).expect("create game directory");
+        fs::write(root.join("vehicle/truck.pmd"), b"before").expect("write game asset");
+        let before = directory_info_signature(&root, &AtomicBool::new(false));
+        fs::write(root.join("vehicle/truck.pmd"), b"after").expect("rewrite game asset");
+        let after = directory_info_signature(&root, &AtomicBool::new(false));
         let _ = fs::remove_dir_all(&root);
         assert_eq!(before.0, after.0);
+        assert_eq!(before.1, after.1);
+        assert_eq!(before.2, after.2);
+    }
+
+    #[test]
+    fn directory_info_signature_changes_when_manifest_changes() {
+        let root = std::env::temp_dir().join(format!("ets2modmanager-info-signature-{}", now_ms()));
+        fs::create_dir_all(&root).expect("create temp directory");
+        fs::write(root.join("manifest.sii"), b"display_name: \"One\"").expect("write manifest");
+        let before = directory_info_signature(&root, &AtomicBool::new(false));
+        fs::write(root.join("manifest.sii"), b"display_name: \"Two Longer\"")
+            .expect("rewrite manifest");
+        let after = directory_info_signature(&root, &AtomicBool::new(false));
+        let _ = fs::remove_dir_all(&root);
         assert_ne!(before.2, after.2);
+    }
+
+    #[test]
+    fn localization_paths_only_accept_def_and_locale_segments() {
+        assert!(is_definition_path("def/world/city.sii"));
+        assert!(is_localization_path("locale/en_us/localization.sii"));
+        assert!(!is_definition_path("city/world/city.sii"));
+        assert!(!is_localization_path("localization/custom.sii"));
     }
 
     #[test]
@@ -4419,7 +4514,8 @@ mod tests {
             },
         );
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].size, 20);
+        // Discovery only fingerprints Mod information files; game assets are ignored.
+        assert_eq!(rows[0].size, 0);
         assert!(events
             .iter()
             .any(|(phase, current, total, name, path)| phase == "local"
@@ -4498,7 +4594,7 @@ mod tests {
         assert!(!events.iter().any(|event| event.0 == "metadata"));
         assert!(events
             .iter()
-            .any(|event| event.0 == "cached" && event.1 == 1 && event.3 == "demo mod"));
+            .any(|event| event.0 == "cached" && event.1 == 1 && event.3 == "Demo Mod"));
         let db = open_db(&database).unwrap();
         let next_timestamp: i64 = db
             .query_row("SELECT scanned_at_ms FROM mod_package_v2", [], |row| {
@@ -4509,8 +4605,9 @@ mod tests {
         drop(db);
         fs::write(package.join("added.txt"), "new file").unwrap();
         let (changed, events) = run();
-        assert_eq!(changed.updated, 1);
-        assert!(events.iter().any(|event| event.0 == "metadata"));
+        assert_eq!(changed.updated, 0);
+        assert_eq!(changed.inspected, 0);
+        assert!(!events.iter().any(|event| event.0 == "metadata"));
         fs::remove_dir_all(&package).unwrap();
         let (removed, events) = run();
         assert_eq!((removed.total, removed.removed), (0, 1));

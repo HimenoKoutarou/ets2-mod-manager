@@ -95,8 +95,10 @@ pub fn parse_manifest(text: &str) -> Manifest {
 }
 
 fn is_placeholder_package_name(value: &str) -> bool {
-    let normalized = value.trim().trim_start_matches('.').to_ascii_lowercase();
-    normalized.is_empty()
+    let trimmed = value.trim();
+    let normalized = trimmed.trim_start_matches('.').to_ascii_lowercase();
+    trimmed.starts_with('.')
+        || normalized.is_empty()
         || matches!(
             normalized.as_str(),
             "manifest" | "package_name" | "mods_info" | "nameless" | "mod_package"
