@@ -270,3 +270,50 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
 - Final verification: production frontend and Release EXE built successfully;
   the startup smoke test passed after a browser-navigation timeout on its first
   run. Tests use isolated fixtures/mocked IPC, not the user's real Mod library.
+
+## 2026-09-12 restored Mod directory relocation
+
+- User reported that the legacy change-Mod-path feature was missing. Confirmed
+  that this means copying/migrating local Mods and redirecting the game's `mod`
+  directory with a Junction, not merely changing a scanner setting.
+- Added the top-bar Mod directory dialog, localized in Chinese, English and
+  Russian: actual/game path, native folder chooser, relocation, restore, broken
+  link repair and interrupted-operation recovery. Commands require confirmation.
+  Unsaved Mod order/enabled changes block migration. Busy operations prevent
+  modal/window closure and report the current file plus byte progress.
+- Native implementation: `src/frontend/src-tauri/src/mod_directory.rs`. Uses
+  junction 2.0.0 and rfd 0.15.4, background workers, exclusive OS file locks,
+  a persisted operation journal, SHA-1 copy verification and source-change
+  detection. No Python, PowerShell or cmd subprocess for directory operations.
+  Game-process checks run hidden and fail closed; checks occur before copying
+  and immediately before switching directories.
+- Scope/constraints: local Mods only; Workshop locations remain unchanged.
+  Relocation targets must be empty or absent with an existing parent. Nested
+  reparse points and overlapping source/target paths are rejected. Originals
+  are retained as backups (shown in the success result), not automatically
+  deleted; this is explicitly disclosed in confirmation text. Restore likewise
+  retains the former target's contents. No automatic space reclamation.
+- Persistence: actual location comes from the filesystem link, not a transient
+  frontend setting. SQLite package/media/localization paths are remapped in a
+  transaction, with rollback support. File AND directory timestamps are kept.
+  Relocation/restore reload the cached catalog without rescanning; repairing a
+  link performs an incremental scan because it may point to different Mods.
+- Scan, media and localization work take shared directory locks; new application
+  instances cannot launch the game or migrate during an exclusive operation.
+  Interrupted initialization opens the cached workspace so recovery is reachable.
+  Older already-running EXEs do not participate in these new locks.
+- Verification: 29 Rust tests passed, including real Windows Junction
+  migrate/relocate/restore/repair, overlap/conflict/nested-link refusal, rollback,
+  interrupted recovery, cache remapping and zero changed/inspected packages
+  after relocation. Tests use unique temporary fixtures, never user Mods.
+  Cross-volume hardware faults and forced machine power loss were not exercised.
+- TypeScript and production frontend passed. Playwright mocked-IPC directory
+  smoke passed all three languages, folder selection, confirmation, progress,
+  persistence, restore/repair/recovery, native failure reporting and dirty-Mod
+  protection. Existing preview/reorder and initializer smoke tests also passed.
+- Release EXE built at 2026-09-12 17:48:
+  `src/frontend/src-tauri/target/mod-thumbnails/release/ets2-mod-manager.exe`
+  (28,260,015 bytes), alongside WebView2Loader.dll. No installer was built.
+  The user still had old default-target EXEs running; those were not terminated.
+  `start.bat` and the final build script echo still reference the old default
+  target. Give the explicit mod-thumbnails executable path when handing off.

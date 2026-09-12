@@ -24,6 +24,7 @@ import { isTauriRuntime } from "./backend";
 import InitializerWindow from "./InitializerWindow";
 import { useModStore } from "./store";
 import { ModImage, ModThumbnail } from "./ModImage";
+import ModDirectoryDialog, { directoryCopy } from "./ModDirectoryDialog";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
 
@@ -95,6 +96,7 @@ function App() {
     error,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
+  const [directoryOpen, setDirectoryOpen] = useState(false);
   const startupLoad = useRef<Promise<void> | null>(null);
   const [saveValues, setSaveValues] = useState<Record<SaveDraftKey, string>>({
     money_account: "",
@@ -232,6 +234,9 @@ function App() {
           </div>
         </div>
         <div className="header-actions">
+          <button className="button button-quiet" disabled={loading || scanning || localizationScanning || !isTauriRuntime()} onClick={() => setDirectoryOpen(true)}>
+            <FolderOpen size={16} />{directoryCopy[language].title}
+          </button>
           <button className={`button ${scanning ? "button-warning" : "button-primary"}`} onClick={() => { void (scanning ? cancelScan() : scan()); }}>
             <RefreshCw size={16} className={scanning ? "spin" : ""} />{scanning ? text.cancelScan : text.scan}
           </button>
@@ -510,6 +515,7 @@ function App() {
           )}
         </aside>
       </main>
+      {directoryOpen && <ModDirectoryDialog onClose={() => setDirectoryOpen(false)} />}
     </div>
   );
 }

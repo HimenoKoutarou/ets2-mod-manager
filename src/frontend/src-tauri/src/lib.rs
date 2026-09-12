@@ -27,6 +27,7 @@ use tauri::{AppHandle, Emitter, State};
 #[cfg(not(feature = "desktop"))]
 type State<'a, T> = &'a T;
 use zip::ZipArchive;
+mod mod_directory;
 
 #[cfg(windows)]
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
@@ -2264,6 +2265,7 @@ fn localization_scan_impl(
     database_path: PathBuf,
     cancelled: Arc<AtomicBool>,
 ) -> Result<LocalizationScanDto, String> {
+    let _directory_lock = mod_directory::read_lock(&paths.mod_root)?;
     let started = std::time::Instant::now();
     let locale = request
         .target_locale
@@ -2875,14 +2877,106 @@ fn is_game_running() -> bool {
     if !cfg!(target_os = "windows") {
         return false;
     }
-    std::process::Command::new("tasklist")
+    game_running_checked().unwrap_or(true)
+}
+
+fn game_running_checked() -> Result<bool, String> {
+    let mut command = std::process::Command::new("tasklist");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
         .args(["/FO", "CSV", "/NH"])
         .output()
-        .map(|output| {
+        .map_err(|e| format!("Could not check game process: {e}"))
+        .and_then(|output| {
+            if !output.status.success() {
+                return Err("Could not check game process.".into());
+            }
             let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-            stdout.contains("\"eurotrucks2.exe\"") || stdout.contains("\"amtrucks.exe\"")
+            Ok(stdout.contains("\"eurotrucks2.exe\"") || stdout.contains("\"amtrucks.exe\""))
         })
-        .unwrap_or(false)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn mod_directory_status(
+    state: State<'_, BackendState>,
+) -> Result<mod_directory::Status, String> {
+    let root = state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .paths
+        .mod_root
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || mod_directory::status(&root))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn mod_directory_pick() -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(windows)]
+        return Ok(rfd::FileDialog::new()
+            .pick_folder()
+            .map(|path| path.to_string_lossy().into_owned()));
+        #[cfg(not(windows))]
+        Ok(None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command(rename_all = "camelCase")]
+async fn mod_directory_change(
+    operation: String,
+    target: String,
+    app: AppHandle,
+    state: State<'_, BackendState>,
+) -> Result<mod_directory::Outcome, String> {
+    let (root, database) = {
+        let backend = state.inner.lock().map_err(|e| e.to_string())?;
+        (
+            backend.paths.mod_root.clone(),
+            backend.database_path.clone(),
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let guard = || {
+            if game_running_checked()? {
+                return Err("Close ETS2 / ATS before changing the Mod directory.".into());
+            }
+            Ok(())
+        };
+        if operation == "recover" {
+            guard()?;
+            return mod_directory::recover(&root, &database);
+        }
+        let mut last_event = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        mod_directory::change(
+            &root,
+            Path::new(&target),
+            &operation,
+            &database,
+            guard,
+            |progress| {
+                if last_event.elapsed().as_millis() >= 100
+                    || matches!(progress.phase.as_str(), "switch" | "complete")
+                {
+                    let _ = app.emit_to("main", "ets2-directory-progress", &progress);
+                    last_event = std::time::Instant::now();
+                }
+            },
+        )
+    })
+    .await
+    .map_err(|e| format!("Directory worker failed: {e}"))?
 }
 
 fn find_profile(paths: &Paths, profile_id: &str) -> Option<ProfileDto> {
@@ -3028,6 +3122,12 @@ fn mod_media_batch_impl(
     database: &Path,
     requests: Vec<ModMediaRequest>,
 ) -> Result<Vec<ModMediaDto>, String> {
+    let _directory_lock = mod_directory::read_lock(
+        &database
+            .parent()
+            .ok_or("Database directory is missing.")?
+            .join("mod"),
+    )?;
     let connection = open_db(database)?;
     let catalog = load_cached(&connection)?;
     requests
@@ -3111,6 +3211,7 @@ fn scan_mod_inputs_with_progress<F>(
 where
     F: FnMut(&str, usize, usize, &str, &Path),
 {
+    let _directory_lock = mod_directory::read_lock(&paths.mod_root)?;
     cancelled.store(false, Ordering::Relaxed);
     progress("cache", 0, 0, "", &database_path);
     let mut db = open_db(&database_path)?;
@@ -3145,6 +3246,19 @@ async fn mod_initialize(
         )
     };
     tauri::async_runtime::spawn_blocking(move || {
+        // Interrupted migrations must not trap the user in the initializer:
+        // open the cached workspace so directory recovery remains accessible.
+        if mod_directory::status(&paths.mod_root)?.recovery_pending {
+            let cached = load_cached(&open_db(&database_path)?)?;
+            return Ok(ScanSummary {
+                total: cached.len(),
+                added: 0,
+                updated: 0,
+                removed: 0,
+                inspected: 0,
+                elapsed_ms: 0,
+            });
+        }
         scan_mod_inputs_with_progress(
             paths,
             database_path,
@@ -3384,6 +3498,10 @@ fn save_list_local(
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn game_launch(state: State<'_, BackendState>) -> Result<SaveResult, String> {
+    let _directory_lock = {
+        let backend = state.inner.lock().map_err(|e| e.to_string())?;
+        mod_directory::read_lock(&backend.paths.mod_root)?
+    };
     let executable = {
         let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
         backend.paths.game_executable.clone()
@@ -4148,6 +4266,9 @@ pub fn run() {
             mod_scan,
             mod_initialize,
             mod_cancel,
+            mod_directory_status,
+            mod_directory_pick,
+            mod_directory_change,
             mod_set_enabled,
             mod_move,
             preset_list,

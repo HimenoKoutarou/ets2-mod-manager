@@ -192,6 +192,33 @@ img.mod-badge { object-fit: cover; }
 .initializer-percent { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; }
 .initializer-error { width: 100%; max-height: 60px; overflow: auto; overflow-wrap: anywhere; color: #b42318; font-size: 11px; line-height: 1.5; }
 
+.directory-dialog { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 40px); padding: 0; border: 1px solid #d9e2ef; border-radius: 8px; background: #fff; color: #172033; box-shadow: 0 16px 50px #17203326; }
+.directory-dialog::backdrop { background: #17203355; }
+.directory-heading { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #e6eaf0; }
+.directory-heading h2 { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 17px; }
+.directory-heading h2 svg { color: #2563eb; }
+.directory-body { padding: 20px; font-size: 13px; }
+.directory-kind { color: #15803d; font-weight: 600; }
+.directory-kind.is-broken, .directory-warning { color: #b45309; }
+.directory-paths { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 12px; margin: 18px 0 24px; }
+.directory-paths dt { color: #667085; }
+.directory-paths dd { margin: 0; overflow-wrap: anywhere; }
+.directory-target { display: block; margin-bottom: 8px; font-weight: 600; }
+.directory-input { display: flex; gap: 8px; }
+.directory-input input { width: 100%; min-width: 0; height: 36px; padding: 0 10px; border: 1px solid #cbd5e1; border-radius: 4px; color: #172033; background: #fff; }
+.directory-input input:focus { outline: 2px solid #bfdbfe; border-color: #2563eb; }
+.directory-input .icon-button { width: 36px; height: 36px; flex-shrink: 0; }
+.directory-confirm { margin-top: 18px; padding-top: 12px; border-top: 1px solid #e6eaf0; line-height: 1.7; }
+.directory-confirm strong { display: block; overflow-wrap: anywhere; color: #2563eb; }
+.directory-progress { display: grid; gap: 12px; margin-top: 20px; }
+.directory-progress progress { width: 100%; }
+.directory-progress span { height: 48px; overflow: auto; overflow-wrap: anywhere; color: #667085; }
+.directory-notice, .directory-error { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; margin-bottom: 0; }
+.directory-notice { color: #15803d; }
+.directory-error { color: #b42318; }
+.directory-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 16px 20px; border-top: 1px solid #e6eaf0; }
+.directory-actions .button { height: auto; min-height: 34px; white-space: normal; }
+
 @media (max-width: 1180px) {
   body { min-width: 980px; }
   .workspace { grid-template-columns: 218px minmax(500px, 1fr); }
