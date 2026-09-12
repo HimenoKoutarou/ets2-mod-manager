@@ -55,6 +55,8 @@ function InitializerWindow() {
   const mainReady = useRef(false);
   const initializationFinished = useRef(false);
   const [status, setStatus] = useState("正在准备 Mod 索引…");
+  const [stage, setStage] = useState("准备启动");
+  const [progress, setProgress] = useState(4);
   const [error, setError] = useState("");
   const locale = typeof navigator !== "undefined" ? navigator.language.toLowerCase() : "zh";
   const copy = locale.startsWith("ru")
@@ -63,7 +65,9 @@ function InitializerWindow() {
       ? { preparing: "Preparing the mod index…", cache: "Reading the persistent cache…", done: (total: number) => `Incremental check complete: ${total} mods`, failed: "Initialization failed", retry: "Retry" }
       : { preparing: "正在准备 Mod 索引…", cache: "正在读取持久化缓存…", done: (total: number) => `已完成增量检查，共 ${total} 个 Mod`, failed: "初始化失败", retry: "重试" };
   useEffect(() => {
+    document.body.classList.add("initializer-body");
     setStatus(copy.preparing);
+    return () => document.body.classList.remove("initializer-body");
   }, []);
 
   useEffect(() => {
@@ -89,11 +93,23 @@ function InitializerWindow() {
         } else {
           mainReady.current = true;
         }
+        setStage(locale.startsWith("ru") ? "Запуск" : locale.startsWith("en") ? "Starting" : "启动");
+        setProgress(8);
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        setStage(locale.startsWith("ru") ? "Чтение сохранённого индекса" : locale.startsWith("en") ? "Reading persistent index" : "读取持久化索引");
+        setProgress(28);
         setStatus(copy.cache);
+        await new Promise((resolve) => window.setTimeout(resolve, 180));
+        setStage(locale.startsWith("ru") ? "Проверка новых и изменённых модов" : locale.startsWith("en") ? "Checking added and changed mods" : "检查新增和变化的 Mod");
+        setProgress(52);
         const summary = await initializeModIndex();
         if (cancelled) return;
+        setStage(locale.startsWith("ru") ? "Сохранение индекса" : locale.startsWith("en") ? "Persisting mod index" : "保存 Mod 索引");
+        setProgress(88);
         setStatus(copy.done(summary.total));
         await new Promise((resolve) => window.setTimeout(resolve, 320));
+        setProgress(100);
+        setStage(locale.startsWith("ru") ? "Готово" : locale.startsWith("en") ? "Ready" : "完成");
         initializationFinished.current = true;
         await finish();
       } catch (initializationError) {
@@ -110,8 +126,12 @@ function InitializerWindow() {
     <div className="initializer-shell">
       <div className="initializer-mark"><Sparkles size={22} /></div>
       <div className="initializer-title">ETS2 Mod Manager</div>
+      <div className="initializer-stage">{stage}</div>
       <div className="initializer-status">{status}</div>
-      <div className="initializer-progress"><span /></div>
+      <div className="initializer-progress" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <div className="initializer-percent">{progress}%</div>
       {error && <div className="initializer-error">{error}</div>}
       {error && <button className="button button-primary" onClick={() => window.location.reload()}>{copy.retry}</button>}
     </div>

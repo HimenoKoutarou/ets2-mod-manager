@@ -14,8 +14,8 @@
       {
         "label": "initializer",
         "title": "ETS2 Mod Manager",
-        "width": 440,
-        "height": 300,
+        "width": 520,
+        "height": 340,
         "resizable": false,
         "decorations": false,
         "center": true

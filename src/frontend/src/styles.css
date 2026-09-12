@@ -9,6 +9,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 1120px; min-height: 100vh; background: #f5f8fc; }
+body.initializer-body { min-width: 0; min-height: 0; overflow: hidden; background: #ffffff; }
 button, input, select { font: inherit; }
 button { color: inherit; }
 
@@ -156,6 +157,7 @@ img.mod-badge { object-fit: cover; }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 
 .initializer-shell {
+  width: 100%;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -177,9 +179,11 @@ img.mod-badge { object-fit: cover; }
   background: #2563eb;
 }
 .initializer-title { font-size: 18px; font-weight: 700; }
+.initializer-stage { color: #2563eb; font-size: 12px; font-weight: 700; }
 .initializer-status { min-height: 18px; color: #667085; font-size: 12px; }
-.initializer-progress { width: 260px; height: 5px; overflow: hidden; border-radius: 99px; background: #dbeafe; }
-.initializer-progress span { display: block; width: 40%; height: 100%; border-radius: inherit; background: #2563eb; animation: initializer-progress 1.2s ease-in-out infinite; }
+.initializer-progress { width: min(300px, 84vw); height: 8px; overflow: hidden; border: 1px solid #bfdbfe; border-radius: 99px; background: #eff6ff; }
+.initializer-progress span { display: block; height: 100%; border-radius: inherit; background: #2563eb; transition: width .25s ease; }
+.initializer-percent { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; }
 .initializer-error { max-width: 340px; color: #b42318; font-size: 11px; line-height: 1.5; }
 @keyframes initializer-progress { 0% { transform: translateX(-110%); } 100% { transform: translateX(360%); } }
 
