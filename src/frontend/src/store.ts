@@ -427,16 +427,19 @@ export const useModStore = create<ModState>((set, get) => ({
     }
     set({ loading: true, localizationScanning: false, error: "" });
     try {
-      const startupSummary = await backend.initializeMods();
       const profiles = await backend.listProfiles();
       const selectedProfileId = profiles.some((profile) => profile.id === get().selectedProfileId)
         ? get().selectedProfileId
         : profiles[0]?.id ?? "";
+      // Publish the real local profile catalog before any potentially expensive
+      // work. A scan failure must not hide the profile picker.
+      set({ profiles, selectedProfileId });
+      // Load the persisted index first so the UI remains usable while the
+      // incremental scanner checks additions/removals in the background.
       const mods = selectedProfileId ? await backend.listMods(selectedProfileId) : [];
       const saves = selectedProfileId ? await backend.listSaves(selectedProfileId) : [];
       const presets = selectedProfileId ? await backend.listPresets(selectedProfileId) : [];
       set({
-        profiles,
         selectedProfileId,
         mods,
         saves,
@@ -446,9 +449,25 @@ export const useModStore = create<ModState>((set, get) => ({
         presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, mods)])),
         selectedPresetName: presets[0]?.name ?? "",
         dirty: false,
-        scanSummary: startupSummary,
+        scanSummary: null,
       });
       void hydrateModMedia(selectedProfileId, mods);
+      set({ loading: false });
+      void backend.initializeMods()
+        .then(async (startupSummary) => {
+          if (get().selectedProfileId !== selectedProfileId) return;
+          const refreshedMods = await backend.listMods(selectedProfileId);
+          if (get().selectedProfileId !== selectedProfileId || get().dirty) return;
+          set({
+            mods: refreshedMods,
+            selectedModId: refreshedMods[0]?.id ?? null,
+            scanSummary: startupSummary,
+          });
+          void hydrateModMedia(selectedProfileId, refreshedMods);
+        })
+        .catch((error) => {
+          set({ error: error instanceof Error ? error.message : String(error) });
+        });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
