@@ -48,6 +48,7 @@ try {
           if (command === "profile_list") return [{ id: "local", name: "本地 Profile", company: "", location: "local", writable: true }];
           if (command === "mod_list") return [{ id: "sample", packageName: "sample", path: `${state.actualPath}\\sample.scs`, displayName: "Sample Mod", enabled: true }];
           if (["mod_media_batch", "preset_list", "save_list_local"].includes(command)) return [];
+          if (command === "category_list") return { folders: [], assignments: {} };
           if (command === "profile_write_active") return { success: true };
           if (command === "mod_scan") { state.scans++; return { total: 1, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 0 }; }
           if (command === "mod_directory_status") return { gamePath, actualPath: state.actualPath, kind: state.kind, recoveryPending: state.recoveryPending };

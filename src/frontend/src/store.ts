@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import { createBackend, type CrashPrecheck, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
+import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
+import { ALL_CATEGORIES, batchEnabled, moveBatch, type BatchAction, type MoveDirection } from "./modBatch";
 import { getCopy } from "./i18n";
 import { createMediaLoader, mediaKey } from "./modMedia";
 import type { Language, ModRecord, ModView, Profile, SaveSlot } from "./types";
@@ -76,8 +77,29 @@ export const initialMods: ModRecord[] = [
   },
 ];
 
+let fixtureCategories: CategorySnapshot = {
+  folders: [...new Set(initialMods.map((mod) => mod.category))],
+  assignments: Object.fromEntries(initialMods.map((mod) => [mod.id, mod.category])),
+};
 export const fixtureBackend: ModBackend = {
   real: false,
+  listCategories: async () => structuredClone(fixtureCategories),
+  mutateCategories: async (request) => {
+    const next = structuredClone(fixtureCategories);
+    if (request.operation === "create") {
+      if (next.folders.includes(request.name)) throw new Error("category_exists");
+      next.folders.push(request.name);
+    } else if (request.operation === "assign") {
+      for (const id of request.modIds ?? []) next.assignments[id] = request.name;
+    } else {
+      next.folders = next.folders.flatMap((name) => name === request.name ? request.operation === "delete" ? [] : [request.newName!] : [name]);
+      for (const id of Object.keys(next.assignments)) {
+        if (next.assignments[id] === request.name) next.assignments[id] = request.operation === "delete" ? "" : request.newName!;
+      }
+    }
+    fixtureCategories = next;
+    return structuredClone(next);
+  },
   initializeMods: async () => ({ total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 0 }),
   listProfiles: async () => fixtureProfiles.map((profile) => ({ ...profile })),
   listMods: async () => initialMods.map((mod) => ({ ...mod })),
@@ -242,6 +264,13 @@ interface ModState {
   selectedCategory: string;
   query: string;
   selectedModId: string | null;
+  selectedModIds: string[];
+  categoryState: CategorySnapshot;
+  categoryBusy: boolean;
+  mutateCategory: (request: CategoryMutation) => Promise<boolean>;
+  selectMods: (ids: string[], focusId?: string) => void;
+  batchMods: (ids: string[], action: BatchAction) => void;
+  moveMods: (ids: string[], direction: MoveDirection, steps?: number, beforeId?: string) => void;
   dirty: boolean;
   scanning: boolean;
   localizationScanning: boolean;
@@ -279,6 +308,18 @@ interface ModState {
   loadPreset: () => Promise<void>;
 }
 
+function applyCategories(mods: ModRecord[], categories: CategorySnapshot): ModRecord[] {
+  const folders = new Set(categories.folders);
+  return mods.map((mod) => {
+    const category = categories.assignments[mod.id] ?? "";
+    return { ...mod, category: folders.has(category) ? category : "" };
+  });
+}
+
+function canEditMods(state: ModState): boolean {
+  return !state.loading && state.profiles.some((profile) => profile.id === state.selectedProfileId && profile.writable !== false);
+}
+
 export const useModStore = create<ModState>((set, get) => ({
   language: "zh_CN",
   profiles: initialUiProfiles,
@@ -291,9 +332,47 @@ export const useModStore = create<ModState>((set, get) => ({
   diagnostics: null,
   secondaryPanel: "none",
   view: "all",
-  selectedCategory: "all",
+  selectedCategory: ALL_CATEGORIES,
   query: "",
   selectedModId: initialUiMods[0]?.id ?? null,
+  selectedModIds: [],
+  categoryState: { folders: [], assignments: {} },
+  categoryBusy: false,
+  mutateCategory: async (request) => {
+    if (get().categoryBusy || get().loading || get().scanning) return false;
+    set({ categoryBusy: true, error: "" });
+    try {
+      const categoryState = await backend.mutateCategories(request);
+      set((state) => ({
+        categoryState,
+        mods: applyCategories(state.mods, categoryState),
+        selectedCategory: state.selectedCategory === request.name && request.operation === "rename"
+          ? request.newName! : state.selectedCategory === request.name && request.operation === "delete"
+          ? "" : state.selectedCategory,
+      }));
+      return true;
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+      return false;
+    } finally { set({ categoryBusy: false }); }
+  },
+  selectMods: (ids, focusId) => set((state) => {
+    const known = new Set(state.mods.map((mod) => mod.id));
+    return {
+      selectedModIds: [...new Set(ids)].filter((id) => known.has(id)),
+      ...(focusId ? { selectedModId: focusId } : {}),
+    };
+  }),
+  batchMods: (ids, action) => set((state) => {
+    if (!canEditMods(state)) return state;
+    const mods = batchEnabled(state.mods, ids, action);
+    return mods === state.mods ? state : { mods, dirty: true };
+  }),
+  moveMods: (ids, direction, steps = 1, beforeId) => set((state) => {
+    if (!canEditMods(state)) return state;
+    const mods = moveBatch(state.mods, ids, direction, steps, beforeId);
+    return mods === state.mods ? state : { mods, dirty: true };
+  }),
   dirty: false,
   scanning: false,
   localizationScanning: false,
@@ -413,12 +492,15 @@ export const useModStore = create<ModState>((set, get) => ({
       set({ profiles, selectedProfileId });
       // Load the persisted index first so the UI remains usable while the
       // incremental scanner checks additions/removals in the background.
-      const mods = selectedProfileId ? await backend.listMods(selectedProfileId) : [];
+      const categoryState = await backend.listCategories();
+      const mods = applyCategories(selectedProfileId ? await backend.listMods(selectedProfileId) : [], categoryState);
       const saves = selectedProfileId ? await backend.listSaves(selectedProfileId) : [];
       const presets = selectedProfileId ? await backend.listPresets(selectedProfileId) : [];
       set({
         selectedProfileId,
         mods,
+        categoryState,
+        selectedModIds: [],
         saves,
         selectedSave: null,
         saveSnapshot: null,
@@ -448,11 +530,14 @@ export const useModStore = create<ModState>((set, get) => ({
     }
     set({ selectedProfileId, loading: true, localizationScanning: false, error: "" });
     try {
-      const mods = await backend.listMods(selectedProfileId);
+      const categoryState = await backend.listCategories();
+      const mods = applyCategories(await backend.listMods(selectedProfileId), categoryState);
       const saves = await backend.listSaves(selectedProfileId);
       const presets = await backend.listPresets(selectedProfileId);
       set({
         mods,
+        categoryState,
+        selectedModIds: [],
         saves,
         selectedSave: null,
         saveSnapshot: null,
@@ -471,11 +556,12 @@ export const useModStore = create<ModState>((set, get) => ({
       set({ loading: false });
     }
   },
-  setView: (view) => set({ view }),
-  setCategory: (selectedCategory) => set({ selectedCategory }),
-  setQuery: (query) => set({ query }),
+  setView: (view) => set({ view, selectedModIds: [] }),
+  setCategory: (selectedCategory) => set({ selectedCategory, selectedModIds: [] }),
+  setQuery: (query) => set({ query, selectedModIds: [] }),
   toggleMod: (id) =>
     set((state) => {
+      if (!canEditMods(state)) return state;
       const target = state.mods.find((mod) => mod.id === id);
       if (!target) return state;
       const nextEnabled = !target.enabled;
@@ -497,7 +583,7 @@ export const useModStore = create<ModState>((set, get) => ({
       mods: normalizeModOrder(state.mods.map((mod) => ({ ...mod, enabled: !mod.enabled }))),
       dirty: true,
     })),
-  selectMod: (selectedModId) => set({ selectedModId }),
+  selectMod: (selectedModId) => set({ selectedModId, selectedModIds: [selectedModId] }),
   loadSelectedModMedia: async () => {
     const id = get().selectedModId;
     if (id) await get().loadModMedia(id);
@@ -531,14 +617,15 @@ export const useModStore = create<ModState>((set, get) => ({
       return { mods, selectedModId: id, dirty: true };
     }),
   scan: async () => {
-    if (get().scanning) return;
+    if (get().scanning || get().categoryBusy) return;
     set({ scanning: true, error: "", scanWasCancelled: false });
     try {
       const summary = await backend.scan();
       const profileId = get().selectedProfileId;
       if (profileId && !get().dirty) {
-        const mods = await backend.listMods(profileId);
-        set({ mods, selectedModId: mods[0]?.id ?? null, dirty: false, scanSummary: summary });
+        const categoryState = await backend.listCategories();
+        const mods = applyCategories(await backend.listMods(profileId), categoryState);
+        set({ mods, categoryState, selectedModIds: [], selectedModId: mods[0]?.id ?? null, dirty: false, scanSummary: summary });
       } else {
         set({ scanSummary: summary });
       }

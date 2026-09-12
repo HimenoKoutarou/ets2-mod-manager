@@ -52,6 +52,7 @@ try {
           packageType: "scs", displayName: `Preview test ${index}`, enabled: true, size: index, modifiedMs: 1,
         }));
         if (command === "save_list_local" || command === "preset_list") return [];
+        if (command === "category_list") return { folders: [], assignments: {} };
         if (command === "mod_media_batch") {
           const id = args.requests[0].modId;
           state.media.push(id);

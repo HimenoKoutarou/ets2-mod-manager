@@ -317,3 +317,55 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   The user still had old default-target EXEs running; those were not terminated.
   `start.bat` and the final build script echo still reference the old default
   target. Give the explicit mod-thumbnails executable path when handing off.
+
+## 2026-09-12 restored categories and batch Mod management
+
+- User reported missing custom categorization and batch enable/disable/movement.
+  Compared the legacy category service, category tree handlers and
+  `domain/mod_priority_rules.py` before restoring the behavior.
+- Native category storage now lives in SQLite, separate from the disposable
+  package index: category_folder, category_assignment, category_import.
+  Background `category_list` and `category_mutate` commands support create,
+  rename, delete and atomic bulk assignment. Deleting a category only makes its
+  Mods uncategorized; no Mod files or Profile enable flags are changed.
+- Imports legacy assets/cache/user_folders.json and known_mods.json, plus the
+  .NET LocalAppData/ETS2ModManager/categories.json format, once. Deleted legacy
+  folders are not resurrected from stale known_mods records. JSON sources are
+  read only. Invalid legacy JSON produces a sidebar warning without blocking
+  the workspace or marking the import complete.
+- Assignments use stable case-normalized Mod identity, accepting legacy archive
+  extensions and Workshop package hex aliases. Copy suffixes are preserved.
+  Rescans, directory relocation and temporarily removed packages do not erase
+  manual assignments. Snapshot responses map assignments back to current IDs.
+- Frontend: CategorySidebar provides folder CRUD, counts, mixed-state category
+  enable checkboxes, right-click/action menus and drop-to-category assignment.
+  Added a selection checkbox column, Ctrl/Meta selection, Shift range selection,
+  select-filtered-list and clear-selection controls.
+- Batch controls explicitly choose Selected Mods / Current filter / Whole
+  category. Scope counts are visible. Enable, disable, invert and category
+  assignment act only on that scope. Category-scope actions intentionally include
+  category members hidden by the current search or enabled-only view.
+- `modBatch.ts` ports the legacy stable block movement contract: selected enabled
+  Mods keep relative order when moved up/down/top/bottom or dragged before another
+  row. Disabled Mods are not priority-moved. Steps support 1/10/50/100.
+  Enabled/order edits remain drafts until Save Profile; categories persist
+  separately and cannot clear unsaved sorting. Read-only Profiles block batch
+  enable/order edits. Scanning and category mutations are mutually excluded in
+  the UI store to avoid stale scan results replacing category feedback.
+- New controls and errors have Chinese/English/Russian copy. Screenshots exposed
+  a narrow-window Russian header overlap; widened the enabled column and added
+  a text-boundary assertion. All-selection validation and category grouping use
+  single-pass sets/maps rather than repeated full-catalog searches.
+- Verification: 34 Rust tests passed; `tests/mod-batch-rules.mjs` passed explicit
+  boundaries and 1,024 subset movement cases. New Playwright
+  `tests/mod-categories-smoke.mjs` covers CRUD, multi/range selection, drag
+  classification, restart persistence, stable sorting, reversed active_mods
+  serialization, scoped toggles, hidden category members, failed writes,
+  read-only protection and three languages. Existing preview/reorder, directory
+  migration and startup smoke suites passed with the new category IPC mocked.
+  Rust tests use temporary SQLite fixtures and frontend tests mock native IPC;
+  the user's real Profile, Mod files and old category files were not modified.
+- Native layer committed separately as 78bc502. Release builds continue to use
+  `src/frontend/src-tauri/target/mod-thumbnails/release/ets2-mod-manager.exe`,
+  with WebView2Loader.dll beside it; no installer. Older default-target EXEs are
+  still running and were not killed. The default start.bat remains an old target.

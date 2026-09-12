@@ -48,6 +48,7 @@ async function pageFor(label, locale, width = 520) {
           state.rejectScan = reject;
         });
         if (command === "profile_list") return new Promise((resolve) => { state.resolveProfiles = resolve; });
+        if (command === "category_list") return { folders: [], assignments: {} };
         if (command === "plugin:window|get_all_windows") return ["main", "initializer"];
         if (command === "plugin:window|show" || command === "plugin:window|close") return;
         throw new Error(`Unexpected IPC call: ${command}`);

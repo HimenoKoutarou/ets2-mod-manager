@@ -24,6 +24,18 @@ export interface ModMedia {
   previewUrl?: string;
 }
 
+export interface CategorySnapshot {
+  folders: string[];
+  assignments: Record<string, string>;
+  warning?: string;
+}
+export interface CategoryMutation {
+  operation: "create" | "rename" | "delete" | "assign";
+  name: string;
+  newName?: string;
+  modIds?: string[];
+}
+
 export interface PresetRecord {
   name: string;
   activeMods: string[];
@@ -168,6 +180,8 @@ function mapMod(value: {
 
 export interface ModBackend {
   readonly real: boolean;
+  listCategories(): Promise<CategorySnapshot>;
+  mutateCategories(request: CategoryMutation): Promise<CategorySnapshot>;
   initializeMods(): Promise<ScanSummary>;
   listProfiles(): Promise<Profile[]>;
   listMods(profileId: string): Promise<ModRecord[]>;
@@ -190,6 +204,8 @@ export interface ModBackend {
 
 const tauriBackend: ModBackend = {
   real: true,
+  listCategories: () => invoke<CategorySnapshot>("category_list"),
+  mutateCategories: (request) => invoke<CategorySnapshot>("category_mutate", { request }),
   initializeMods() {
     return invoke<ScanSummary>("mod_initialize");
   },

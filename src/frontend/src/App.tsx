@@ -7,6 +7,7 @@ import {
   ArrowUp,
   ArrowUpToLine,
   Check,
+  CheckSquare,
   ChevronDown,
   FolderOpen,
   Languages,
@@ -15,9 +16,10 @@ import {
   RefreshCw,
   Save,
   Search,
-  SlidersHorizontal,
+  FolderInput,
   Sparkles,
   Wrench,
+  X,
 } from "lucide-react";
 import { getCopy } from "./i18n";
 import { isTauriRuntime } from "./backend";
@@ -25,6 +27,9 @@ import InitializerWindow from "./InitializerWindow";
 import { useModStore } from "./store";
 import { ModImage, ModThumbnail } from "./ModImage";
 import ModDirectoryDialog, { directoryCopy } from "./ModDirectoryDialog";
+import CategorySidebar, { TriCheckbox, readDraggedMods } from "./CategorySidebar";
+import { ALL_CATEGORIES } from "./modBatch";
+import { categoryCopy, categoryError } from "./categoryI18n";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
 
@@ -60,6 +65,13 @@ function App() {
     selectedCategory,
     query,
     selectedModId,
+    selectedModIds,
+    categoryState,
+    categoryBusy,
+    mutateCategory,
+    selectMods,
+    batchMods,
+    moveMods,
     dirty,
     scanning,
     localizationScanning,
@@ -74,11 +86,7 @@ function App() {
     setCategory,
     setQuery,
     toggleMod,
-    setAll,
-    invertAll,
-    selectMod,
     loadSelectedModMedia,
-    moveMod,
     scan,
     cancelScan,
     save,
@@ -97,6 +105,9 @@ function App() {
   } = useModStore();
   const [presetName, setPresetName] = useState("");
   const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
+  const [moveSteps, setMoveSteps] = useState(1);
+  const selectionAnchor = useRef<string | null>(null);
   const startupLoad = useRef<Promise<void> | null>(null);
   const [saveValues, setSaveValues] = useState<Record<SaveDraftKey, string>>({
     money_account: "",
@@ -154,6 +165,7 @@ function App() {
     });
   }, [selectedSave?.gameSii]);
   const text = getCopy(language);
+  const categoryText = categoryCopy[language];
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
     id: "",
     name: text.profiles,
@@ -165,7 +177,7 @@ function App() {
     const needle = query.trim().toLocaleLowerCase();
     return mods.filter((mod) => {
       const matchesView = view === "all" || mod.enabled;
-      const matchesCategory = selectedCategory === "all" || mod.category === selectedCategory;
+      const matchesCategory = selectedCategory === ALL_CATEGORIES || mod.category === selectedCategory;
       if (!matchesView) return false;
       if (!matchesCategory) return false;
       if (!needle) return true;
@@ -179,6 +191,13 @@ function App() {
     if (selectedMod) void loadSelectedModMedia();
   }, [selectedMod?.id, selectedMod?.iconUrl, selectedMod?.previewUrl, loadSelectedModMedia]);
   const activeCount = mods.filter((mod) => mod.enabled).length;
+  const selectedIds = new Set(selectedModIds);
+  const visibleIds = filteredMods.map((mod) => mod.id);
+  const categoryIds = selectedCategory === ALL_CATEGORIES ? [] : mods.filter((mod) => mod.category === selectedCategory).map((mod) => mod.id);
+  const batchIds = batchScope === "selection" ? selectedModIds : batchScope === "category" ? categoryIds : visibleIds;
+  const batchIdSet = new Set(batchIds);
+  const canBatch = selectedProfile.writable !== false && !!selectedProfileId && !loading && batchIds.length > 0;
+  const canMove = canBatch && mods.some((mod) => mod.enabled && batchIdSet.has(mod.id));
   const formatSaveDate = (value: number) =>
     value > 0
       ? new Intl.DateTimeFormat(language.replace("_", "-"), {
@@ -188,21 +207,31 @@ function App() {
       : "—";
 
   function moveSelected(target: "top" | "up" | "down" | "bottom") {
-    if (!selectedMod || !selectedMod.enabled) return;
-    const activeMods = mods.filter((mod) => mod.enabled);
-    const index = activeMods.findIndex((mod) => mod.id === selectedMod.id);
-    const targetIndex =
-      target === "top" ? 0 : target === "bottom" ? activeMods.length - 1 : target === "up" ? index - 1 : index + 1;
-    moveMod(selectedMod.id, targetIndex);
+    moveMods(batchIds, target, moveSteps);
   }
 
   function onDrop(id: string, event: React.DragEvent<HTMLTableRowElement>) {
     event.preventDefault();
-    const targetMod = mods.find((mod) => mod.id === id);
-    const sourceId = event.dataTransfer.getData("text/mod-id");
-    if (!sourceId || !targetMod?.enabled) return;
-    const target = mods.filter((mod) => mod.enabled).findIndex((mod) => mod.id === id);
-    if (target >= 0) moveMod(sourceId, target);
+    moveMods(readDraggedMods(event), "top", 1, id);
+  }
+
+  function selectRow(id: string, event: React.MouseEvent) {
+    if (event.shiftKey && selectionAnchor.current && visibleIds.includes(selectionAnchor.current)) {
+      const a = visibleIds.indexOf(selectionAnchor.current);
+      const b = visibleIds.indexOf(id);
+      const range = visibleIds.slice(Math.min(a, b), Math.max(a, b) + 1);
+      selectMods(event.ctrlKey || event.metaKey ? [...selectedModIds, ...range] : range, id);
+    } else {
+      selectMods(event.ctrlKey || event.metaKey ? selectedIds.has(id) ? selectedModIds.filter((value) => value !== id) : [...selectedModIds, id] : [id], id);
+      selectionAnchor.current = id;
+    }
+    setBatchScope("selection");
+  }
+
+  function chooseCategory(category: string) {
+    setCategory(category);
+    setBatchScope(category === ALL_CATEGORIES ? "filtered" : "category");
+    selectionAnchor.current = null;
   }
 
   function updateSaveDraft(key: SaveDraftKey, value: string) {
@@ -237,7 +266,7 @@ function App() {
           <button className="button button-quiet" disabled={loading || scanning || localizationScanning || !isTauriRuntime()} onClick={() => setDirectoryOpen(true)}>
             <FolderOpen size={16} />{directoryCopy[language].title}
           </button>
-          <button className={`button ${scanning ? "button-warning" : "button-primary"}`} onClick={() => { void (scanning ? cancelScan() : scan()); }}>
+          <button className={`button ${scanning ? "button-warning" : "button-primary"}`} disabled={categoryBusy} onClick={() => { void (scanning ? cancelScan() : scan()); }}>
             <RefreshCw size={16} className={scanning ? "spin" : ""} />{scanning ? text.cancelScan : text.scan}
           </button>
           <button className="button button-primary" onClick={() => { void save(); }} disabled={!dirty || selectedProfile.writable === false}><Save size={16} />{text.save}</button>
@@ -275,15 +304,7 @@ function App() {
               ))}
             </div>
           </section>
-          <section className="sidebar-section">
-            <div className="section-heading"><span>{text.categories}</span><SlidersHorizontal size={14} /></div>
-            <button className={`category-item ${selectedCategory === "all" ? "is-selected" : ""}`} onClick={() => setCategory("all")}><span className="category-dot dot-all" />{text.allMods}<span>{mods.length}</span></button>
-            {Array.from(new Set(mods.map((mod) => mod.category).filter((category) => category && category !== "unknown"))).sort((a, b) => a.localeCompare(b)).map((category) => (
-              <button className={`category-item ${selectedCategory === category ? "is-selected" : ""}`} key={category} onClick={() => setCategory(category)}>
-                <span className="category-dot" />{category}<span>{mods.filter((mod) => mod.category === category).length}</span>
-              </button>
-            ))}
-          </section>
+          <CategorySidebar onCategory={chooseCategory} />
           <section className="sidebar-secondary">
             <div className="section-heading"><span>{text.secondary}</span></div>
             <button className={`secondary-item ${secondaryPanel === "localization" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("localization"); void scanLocalization(); }}>
@@ -300,34 +321,50 @@ function App() {
         </aside>
 
         <section className="mod-panel">
-          {error && <div className="error-banner" role="alert">{error}</div>}
+          {error && <div className="error-banner" role="alert">{categoryError(error, language)}</div>}
           <div className="panel-toolbar">
             <div>
               <div className="panel-title">{text.modWorkspace}</div>
               <div className="panel-subtitle">{selectedProfile.name} · {text.statusCount(activeCount, mods.length)}{selectedProfile.writable === false ? ` · ${text.readOnly}` : ""}</div>
             </div>
-            <div className="batch-actions">
-              <button className="button button-small" onClick={() => setAll(true)} disabled={!selectedProfile.writable}>{text.enableAll}</button>
-              <button className="button button-small" onClick={() => setAll(false)} disabled={!selectedProfile.writable}>{text.disableAll}</button>
-              <button className="button button-small" onClick={invertAll} disabled={!selectedProfile.writable}>{text.invert}</button>
-            </div>
           </div>
 
           <div className="view-row">
             <div className="segmented-control">
-              <button className={view === "all" ? "is-active" : ""} onClick={() => setView("all")}>{text.allMods}</button>
-              <button className={view === "active" ? "is-active" : ""} onClick={() => setView("active")}>{text.activeMods}</button>
+              <button className={view === "all" ? "is-active" : ""} onClick={() => { setView("all"); setBatchScope("filtered"); }}>{text.allMods}</button>
+              <button className={view === "active" ? "is-active" : ""} onClick={() => { setView("active"); setBatchScope("filtered"); }}>{text.activeMods}</button>
             </div>
-            <div className="search-box"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={text.searchPlaceholder} /></div>
+            <div className="search-box"><Search size={16} /><input value={query} onChange={(event) => { setQuery(event.target.value); setBatchScope("filtered"); }} placeholder={text.searchPlaceholder} /></div>
           </div>
 
+          <div className="batch-toolbar">
+            <select className="batch-scope" value={batchScope} aria-label={categoryText.scope} onChange={(event) => setBatchScope(event.target.value as typeof batchScope)}>
+              <option value="selection">{categoryText.selection} ({selectedModIds.length})</option>
+              <option value="filtered">{categoryText.filtered} ({visibleIds.length})</option>
+              <option value="category" disabled={selectedCategory === ALL_CATEGORIES}>{categoryText.category} ({categoryIds.length})</option>
+            </select>
+            <button className="button button-small" onClick={() => batchMods(batchIds, "enable")} disabled={!canBatch}><Check size={14} />{categoryText.enable}</button>
+            <button className="button button-small" onClick={() => batchMods(batchIds, "disable")} disabled={!canBatch}><X size={14} />{categoryText.disable}</button>
+            <button className="icon-button" title={categoryText.invert} aria-label={categoryText.invert} onClick={() => batchMods(batchIds, "invert")} disabled={!canBatch}><CheckSquare size={16} /></button>
+            <span className="toolbar-divider" />
+            <label className="category-assign"><FolderInput size={16} /><select aria-label={categoryText.assign} value="" disabled={categoryBusy || loading || scanning || !batchIds.length} onChange={(event) => {
+              if (event.target.value) void mutateCategory({ operation: "assign", name: event.target.value === "\0none" ? "" : event.target.value, modIds: batchIds });
+            }}>
+              <option value="" disabled>{categoryText.assign}</option>
+              <option value={"\0none"}>{categoryText.uncategorized}</option>
+              {categoryState.folders.map((name) => <option value={name} key={name}>{name}</option>)}
+            </select></label>
+            <button className="icon-button" title={categoryText.clear} aria-label={categoryText.clear} disabled={!selectedModIds.length} onClick={() => selectMods([])}><X size={15} /></button>
+          </div>
           <div className="priority-row">
             <span className="priority-label">{text.priority}</span>
-            <button className="icon-button" onClick={() => moveSelected("top")} title={text.moveTop} disabled={!selectedProfile.writable}><ArrowUpToLine size={16} /></button>
-            <button className="icon-button" onClick={() => moveSelected("up")} title={text.moveUp} disabled={!selectedProfile.writable}><ArrowUp size={16} /></button>
-            <button className="icon-button" onClick={() => moveSelected("down")} title={text.moveDown} disabled={!selectedProfile.writable}><ArrowDown size={16} /></button>
-            <button className="icon-button" onClick={() => moveSelected("bottom")} title={text.moveBottom} disabled={!selectedProfile.writable}><ArrowDownToLine size={16} /></button>
-            <span className="toolbar-divider" />
+            <button className="icon-button" onClick={() => moveSelected("top")} title={text.moveTop} disabled={!canMove}><ArrowUpToLine size={16} /></button>
+            <button className="icon-button" onClick={() => moveSelected("up")} title={text.moveUp} disabled={!canMove}><ArrowUp size={16} /></button>
+            <select className="move-steps" value={moveSteps} aria-label={categoryText.steps} title={categoryText.steps} onChange={(event) => setMoveSteps(Number(event.target.value))}>{[1, 10, 50, 100].map((n) => <option key={n}>{n}</option>)}</select>
+            <button className="icon-button" onClick={() => moveSelected("down")} title={text.moveDown} disabled={!canMove}><ArrowDown size={16} /></button>
+            <button className="icon-button" onClick={() => moveSelected("bottom")} title={text.moveBottom} disabled={!canMove}><ArrowDownToLine size={16} /></button>
+          </div>
+          <div className="preset-row">
             <input className="preset-input" value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder={text.presetPlaceholder} />
             <button className="button button-small" disabled={!presetName.trim() || selectedProfile.writable === false} onClick={() => { void savePreset(presetName); setPresetName(""); }}>{text.savePreset}</button>
             <select className="preset-select" value={selectedPresetName} onChange={(event) => selectPreset(event.target.value)} aria-label={text.loadPreset} disabled={!selectedProfile.writable}>
@@ -339,21 +376,36 @@ function App() {
 
           <div className="table-wrap">
             <table className="mod-table">
-              <thead><tr><th className="check-column">{text.enabled}</th><th>{text.name}</th><th>{text.category}</th><th>{text.source}</th><th>{text.package}</th></tr></thead>
+              <colgroup><col className="selection-column" /><col className="enabled-column" /><col /><col className="category-column" /><col className="source-column" /><col className="package-column" /></colgroup>
+              <thead><tr><th className="selection-column"><TriCheckbox checked={visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))}
+                partial={visibleIds.some((id) => selectedIds.has(id)) && !visibleIds.every((id) => selectedIds.has(id))}
+                label={categoryText.selectVisible} onChange={() => { selectMods(visibleIds.every((id) => selectedIds.has(id)) ? [] : visibleIds); setBatchScope("selection"); }} /></th>
+                <th className="check-column">{text.enabled}</th><th>{text.name}</th><th>{text.category}</th><th>{text.source}</th><th>{text.package}</th></tr></thead>
               <tbody>
                 {filteredMods.map((mod) => (
                   <tr
                     key={mod.id}
-                    draggable={selectedProfile.writable !== false && mod.enabled}
-                    onDragStart={(event) => event.dataTransfer.setData("text/mod-id", mod.id)}
+                    data-mod-id={mod.id}
+                    draggable={!loading && !categoryBusy}
+                    onDragStart={(event) => {
+                      const ids = selectedIds.has(mod.id) ? selectedModIds : [mod.id];
+                      event.dataTransfer.setData("text/mod-id", mod.id);
+                      event.dataTransfer.setData("application/x-ets2-mod-ids", JSON.stringify(ids));
+                      selectMods(ids, mod.id); setBatchScope("selection");
+                    }}
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => onDrop(mod.id, event)}
-                    className={mod.id === selectedModId ? "is-selected" : ""}
-                    onClick={() => selectMod(mod.id)}
+                    className={selectedIds.has(mod.id) ? "is-selected" : mod.id === selectedModId ? "is-focused" : ""}
+                    aria-selected={selectedIds.has(mod.id)}
+                    onClick={(event) => selectRow(mod.id, event)}
                   >
-                    <td className="check-column"><button className={`toggle ${mod.enabled ? "is-on" : ""}`} disabled={!selectedProfile.writable} onClick={(event) => { event.stopPropagation(); toggleMod(mod.id); }} aria-label={text.enabled}>{mod.enabled && <Check size={14} />}</button></td>
+                    <td className="selection-column"><TriCheckbox checked={selectedIds.has(mod.id)} label={`${categoryText.select}: ${mod.displayName}`} onChange={() => {
+                      selectMods(selectedIds.has(mod.id) ? selectedModIds.filter((id) => id !== mod.id) : [...selectedModIds, mod.id], mod.id);
+                      selectionAnchor.current = mod.id; setBatchScope("selection");
+                    }} /></td>
+                    <td className="check-column"><button className={`toggle ${mod.enabled ? "is-on" : ""}`} disabled={loading || !selectedProfile.writable} onClick={(event) => { event.stopPropagation(); toggleMod(mod.id); }} aria-label={text.enabled}>{mod.enabled && <Check size={14} />}</button></td>
                     <td><div className="mod-name-cell"><ModThumbnail mod={mod} /><span><strong>{mod.displayName}</strong><small>{mod.author}</small></span></div></td>
-                    <td><span className="tag">{mod.category}</span></td>
+                    <td><span className="tag" title={mod.category || categoryText.uncategorized}>{mod.category || categoryText.uncategorized}</span></td>
                     <td><span className={`source source-${mod.source}`}>{mod.source === "local" ? text.sourceLocal : text.sourceWorkshop}</span></td>
                     <td className="package-cell">{mod.packageName}</td>
                   </tr>
@@ -499,7 +551,7 @@ function App() {
             </div>
           ) : selectedMod ? (
             <>
-              <div className="detail-art"><ModImage src={selectedMod.previewUrl || selectedMod.iconUrl} fallback={selectedMod.iconUrl} className="detail-image" alt={selectedMod.displayName} /><span>{selectedMod.category}</span></div>
+              <div className="detail-art"><ModImage src={selectedMod.previewUrl || selectedMod.iconUrl} fallback={selectedMod.iconUrl} className="detail-image" alt={selectedMod.displayName} /><span>{selectedMod.category || categoryText.uncategorized}</span></div>
               <div className="detail-heading"><div className="detail-title">{selectedMod.displayName}</div><span className={`source source-${selectedMod.source}`}>{selectedMod.source === "local" ? text.sourceLocal : text.sourceWorkshop}</span></div>
               <div className="detail-package">{selectedMod.packageName}</div>
               <p className="detail-description">{selectedMod.description}</p>
@@ -507,7 +559,7 @@ function App() {
                 <div><dt>{text.author}</dt><dd>{selectedMod.author}</dd></div>
                 <div><dt>{text.version}</dt><dd>{selectedMod.version}</dd></div>
                 <div><dt>{text.compatible}</dt><dd>{selectedMod.compatible}</dd></div>
-                <div><dt>{text.category}</dt><dd>{selectedMod.category}</dd></div>
+                <div><dt>{text.category}</dt><dd>{selectedMod.category || categoryText.uncategorized}</dd></div>
               </dl>
             </>
           ) : (
