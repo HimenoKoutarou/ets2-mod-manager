@@ -12,13 +12,23 @@
   "app": {
     "windows": [
       {
+        "label": "initializer",
+        "title": "ETS2 Mod Manager",
+        "width": 440,
+        "height": 300,
+        "resizable": false,
+        "decorations": false,
+        "center": true
+      },
+      {
         "label": "main",
         "title": "ETS2 Mod Manager",
         "width": 1440,
         "height": 900,
         "minWidth": 1100,
         "minHeight": 700,
-        "resizable": true
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

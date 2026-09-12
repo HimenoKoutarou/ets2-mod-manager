@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow, Window } from "@tauri-apps/api/window";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowDown,
   ArrowDownToLine,
@@ -19,6 +21,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { getCopy } from "./i18n";
+import { initializeModIndex, isTauriRuntime } from "./backend";
 import { useModStore } from "./store";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
@@ -47,7 +50,76 @@ function levelFromExperience(value: number): number {
   return level;
 }
 
+function InitializerWindow() {
+  const started = useRef(false);
+  const mainReady = useRef(false);
+  const initializationFinished = useRef(false);
+  const [status, setStatus] = useState("正在准备 Mod 索引…");
+  const [error, setError] = useState("");
+  const locale = typeof navigator !== "undefined" ? navigator.language.toLowerCase() : "zh";
+  const copy = locale.startsWith("ru")
+    ? { preparing: "Подготовка индекса модов…", cache: "Чтение сохранённого кэша…", done: (total: number) => `Инкрементальная проверка завершена: ${total} модов`, failed: "Ошибка инициализации", retry: "Повторить" }
+    : locale.startsWith("en")
+      ? { preparing: "Preparing the mod index…", cache: "Reading the persistent cache…", done: (total: number) => `Incremental check complete: ${total} mods`, failed: "Initialization failed", retry: "Retry" }
+      : { preparing: "正在准备 Mod 索引…", cache: "正在读取持久化缓存…", done: (total: number) => `已完成增量检查，共 ${total} 个 Mod`, failed: "初始化失败", retry: "重试" };
+  useEffect(() => {
+    setStatus(copy.preparing);
+  }, []);
+
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    let cancelled = false;
+    let unlisten: UnlistenFn | undefined;
+    const finish = async () => {
+      if (cancelled || !initializationFinished.current || !mainReady.current || !isTauriRuntime()) return;
+      const main = await Window.getByLabel("main");
+      if (!main) return;
+      await getCurrentWindow().emitTo("main", "ets2-initialization-complete");
+      await main.show();
+      await getCurrentWindow().close();
+    };
+    void (async () => {
+      try {
+        if (isTauriRuntime()) {
+          unlisten = await getCurrentWindow().listen("ets2-main-ready", () => {
+            mainReady.current = true;
+            void finish();
+          });
+        } else {
+          mainReady.current = true;
+        }
+        setStatus(copy.cache);
+        const summary = await initializeModIndex();
+        if (cancelled) return;
+        setStatus(copy.done(summary.total));
+        await new Promise((resolve) => window.setTimeout(resolve, 320));
+        initializationFinished.current = true;
+        await finish();
+      } catch (initializationError) {
+        if (cancelled) return;
+        setError(initializationError instanceof Error ? initializationError.message : String(initializationError));
+        setStatus(copy.failed);
+      }
+    })();
+    // Keep the startup task alive across React StrictMode's development
+    // effect replay. The initializer window closes itself after handoff.
+  }, []);
+
+  return (
+    <div className="initializer-shell">
+      <div className="initializer-mark"><Sparkles size={22} /></div>
+      <div className="initializer-title">ETS2 Mod Manager</div>
+      <div className="initializer-status">{status}</div>
+      <div className="initializer-progress"><span /></div>
+      {error && <div className="initializer-error">{error}</div>}
+      {error && <button className="button button-primary" onClick={() => window.location.reload()}>{copy.retry}</button>}
+    </div>
+  );
+}
+
 function App() {
+  const windowLabel = isTauriRuntime() ? getCurrentWindow().label : "main";
   const {
     language,
     profiles,
@@ -80,6 +152,7 @@ function App() {
     setAll,
     invertAll,
     selectMod,
+    loadSelectedModMedia,
     moveMod,
     scan,
     cancelScan,
@@ -104,8 +177,25 @@ function App() {
     level: "",
   });
   useEffect(() => {
-    void initialize();
-  }, []);
+    if (windowLabel === "initializer") return;
+    if (!isTauriRuntime()) {
+      void initialize();
+      return;
+    }
+    let unlisten: UnlistenFn | undefined;
+    let active = true;
+    void (async () => {
+      const current = getCurrentWindow();
+      unlisten = await current.listen("ets2-initialization-complete", () => {
+        if (active) void initialize();
+      });
+      await current.emitTo("initializer", "ets2-main-ready");
+    })();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [initialize, windowLabel]);
   useEffect(() => {
     setSaveValues({
       money_account: "",
@@ -135,6 +225,9 @@ function App() {
     });
   }, [mods, query, selectedCategory, view]);
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
+  useEffect(() => {
+    if (selectedMod) void loadSelectedModMedia();
+  }, [selectedMod?.id, selectedMod?.iconUrl, selectedMod?.previewUrl, loadSelectedModMedia]);
   const activeCount = mods.filter((mod) => mod.enabled).length;
   const formatSaveDate = (value: number) =>
     value > 0
@@ -177,6 +270,8 @@ function App() {
     void mutateSave(operation, Number(raw));
     updateSaveDraft(key, "");
   }
+
+  if (windowLabel === "initializer") return <InitializerWindow />;
 
   return (
     <div className="app-shell">

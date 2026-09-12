@@ -292,6 +292,7 @@ interface ModState {
   setAll: (enabled: boolean) => void;
   invertAll: () => void;
   selectMod: (id: string) => void;
+  loadSelectedModMedia: () => Promise<void>;
   moveMod: (id: string, targetIndex: number) => void;
   scan: () => Promise<void>;
   cancelScan: () => Promise<void>;
@@ -521,6 +522,33 @@ export const useModStore = create<ModState>((set, get) => ({
       dirty: true,
     })),
   selectMod: (selectedModId) => set({ selectedModId }),
+  loadSelectedModMedia: async () => {
+    const { selectedProfileId, selectedModId, mods } = get();
+    const selected = mods.find((mod) => mod.id === selectedModId);
+    if (!selected || !selectedProfileId || (selected.iconUrl && selected.previewUrl)) return;
+    const requestId = ++mediaRequest;
+    try {
+      const media = await backend.loadModMedia([selected]);
+      if (
+        requestId !== mediaRequest
+        || get().selectedProfileId !== selectedProfileId
+        || get().selectedModId !== selectedModId
+      ) return;
+      const entry = media[0];
+      if (!entry) return;
+      set((state) => ({
+        mods: state.mods.map((mod) =>
+          mod.id === selectedModId
+            ? { ...mod, iconUrl: entry.iconUrl, previewUrl: entry.previewUrl }
+            : mod,
+        ),
+      }));
+    } catch (error) {
+      if (requestId === mediaRequest) {
+        set({ error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+  },
   moveMod: (id, targetIndex) =>
     set((state) => {
       const target = state.mods.find((mod) => mod.id === id);

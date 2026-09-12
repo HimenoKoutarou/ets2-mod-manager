@@ -265,3 +265,8 @@ const tauriBackend: ModBackend = {
 export function createBackend(fixture: ModBackend): ModBackend {
   return isTauriRuntime() ? tauriBackend : fixture;
 }
+
+export function initializeModIndex(): Promise<ScanSummary> {
+  if (isTauriRuntime()) return invoke<ScanSummary>("mod_initialize");
+  return Promise.resolve({ total: 0, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 0 });
+}
