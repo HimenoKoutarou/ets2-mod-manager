@@ -27,6 +27,7 @@ use tauri::{AppHandle, Emitter, State};
 #[cfg(not(feature = "desktop"))]
 type State<'a, T> = &'a T;
 use zip::ZipArchive;
+mod categories;
 mod mod_directory;
 
 #[cfg(windows)]
@@ -2902,6 +2903,50 @@ fn game_running_checked() -> Result<bool, String> {
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+async fn category_list(state: State<'_, BackendState>) -> Result<categories::Snapshot, String> {
+    let database = state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .database_path
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut db = open_db(&database)?;
+        let legacy = cache_directory();
+        let dotnet = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("ETS2ModManager").join("categories.json"));
+        let warning =
+            categories::import_legacy(&mut db, legacy.as_deref(), dotnet.as_deref()).err();
+        let mut snapshot = categories::snapshot(&db)?;
+        snapshot.warning = warning;
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn category_mutate(
+    request: categories::Mutation,
+    state: State<'_, BackendState>,
+) -> Result<categories::Snapshot, String> {
+    let database = state
+        .inner
+        .lock()
+        .map_err(|e| e.to_string())?
+        .database_path
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        categories::mutate(&mut open_db(&database)?, request)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 async fn mod_directory_status(
     state: State<'_, BackendState>,
 ) -> Result<mod_directory::Status, String> {
@@ -4269,6 +4314,8 @@ pub fn run() {
             mod_directory_status,
             mod_directory_pick,
             mod_directory_change,
+            category_list,
+            category_mutate,
             mod_set_enabled,
             mod_move,
             preset_list,
