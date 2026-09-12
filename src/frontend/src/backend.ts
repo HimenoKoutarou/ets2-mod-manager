@@ -10,6 +10,14 @@ export interface ScanSummary {
   elapsedMs: number;
 }
 
+export interface ScanProgress {
+  phase: "cache" | "local" | "workshop" | "metadata" | "cached" | "persist" | "complete";
+  current: number;
+  total: number;
+  name: string;
+  path: string;
+}
+
 export interface ModMedia {
   modId: string;
   iconUrl?: string;
@@ -266,7 +274,16 @@ export function createBackend(fixture: ModBackend): ModBackend {
   return isTauriRuntime() ? tauriBackend : fixture;
 }
 
+let indexInitialization: Promise<ScanSummary> | undefined;
+
 export function initializeModIndex(): Promise<ScanSummary> {
-  if (isTauriRuntime()) return invoke<ScanSummary>("mod_initialize");
-  return Promise.resolve({ total: 0, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 0 });
+  // StrictMode may remount effects while the native worker is still running.
+  indexInitialization ??= (isTauriRuntime()
+    ? invoke<ScanSummary>("mod_initialize")
+    : Promise.resolve({ total: 0, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 0 })
+  ).catch((error: unknown) => {
+    indexInitialization = undefined;
+    throw error;
+  });
+  return indexInitialization;
 }

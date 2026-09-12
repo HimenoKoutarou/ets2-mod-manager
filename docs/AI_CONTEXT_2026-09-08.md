@@ -211,3 +211,35 @@ BSII 只读解析和金钱/经验/等级的结构化读写已完成；磨损、�
   Tauri `cargo check --locked` passed, and the release executable was
   regenerated successfully. The existing GNU linker `.drectve` warning is
   non-fatal.
+
+## 2026-09-12 startup progress
+
+- User wants an EXE after each build, plus commits; do not generate an installer
+  unless explicitly requested. Release entry point suppresses the console.
+- The former 52% was a frontend constant, not actual scan progress. Initialization
+  now runs on `tauri::async_runtime::spawn_blocking` and emits
+  `ets2-scan-progress` to the initializer before directory traversal or manifest
+  extraction. Payload: phase, completed count, stage total, Mod name and path.
+- `InitializerWindow.tsx` displays the current package, full scrollable path,
+  elapsed time for the current operation and stage-based counts. Unknown totals,
+  database commit and main-window loading are indeterminate, not fake percentages.
+- SQLite incremental index semantics are unchanged. Regression tests exercise
+  closing/reopening the database, unchanged-cache reuse, changed files, removal,
+  pre-read notifications and failed writes without completion.
+- Main window repeats its readiness handshake to avoid missed events and only
+  shows after its persisted data load succeeds. Scan errors remain visible with
+  retry. React StrictMode cannot start duplicate native initialization jobs.
+- Frontend smoke test: `src/frontend/tests/startup-smoke.mjs`. It uses Playwright
+  (optional PLAYWRIGHT_MODULE_PATH / PLAYWRIGHT_CHANNEL environment variables),
+  runs a temporary Vite server, mocks native IPC, and covers three locales,
+  narrow/normal layouts, progress/path/counts, ticking elapsed time, retry and
+  late main readiness. Screenshots are in ignored frontend/build/startup-smoke.
+- At build time the user's old EXE was running and locked WebView2Loader.dll.
+  Do not kill it or overwrite its loaded files. The alternate build uses
+  CARGO_TARGET_DIR=F:\ETS2ModManager\src\frontend\src-tauri\target\startup-progress;
+  new output is that directory's release/ets2-mod-manager.exe.
+- Verification: 19 backend tests passed; frontend TypeScript/production build
+  passed; Playwright mocked-IPC smoke passed in zh-CN/en-US/ru-RU; alternate
+  Release EXE built successfully with WebView2Loader.dll and PE GUI subsystem 2.
+  The real user's Mod library was not rescanned by the tests. The batch file's
+  final echo still uses its default path; use the actual Cargo output above.

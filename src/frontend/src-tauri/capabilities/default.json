@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default permissions for the main ETS2 Mod Manager window",
   "windows": ["main", "initializer"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-show", "core:window:allow-close"]
 }

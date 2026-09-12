@@ -22,7 +22,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 #[cfg(feature = "desktop")]
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 #[cfg(not(feature = "desktop"))]
 type State<'a, T> = &'a T;
@@ -133,6 +133,16 @@ struct ScanSummary {
     removed: usize,
     inspected: usize,
     elapsed_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgress {
+    phase: String,
+    current: usize,
+    total: usize,
+    name: String,
+    path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1180,27 +1190,54 @@ fn directory_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
 }
 
 fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool) -> Vec<ModDto> {
-    let Some(root) = root.filter(|p| p.is_dir()) else {
+    discover_packages_with_progress(root, workshop, cancelled, &mut |_, _, _, _, _| {})
+}
+
+fn discover_packages_with_progress<F>(
+    root: Option<&Path>,
+    workshop: bool,
+    cancelled: &AtomicBool,
+    progress: &mut F,
+) -> Vec<ModDto>
+where
+    F: FnMut(&str, usize, usize, &str, &Path),
+{
+    let Some(root) = root else {
         return Vec::new();
     };
+    let phase = if workshop { "workshop" } else { "local" };
+    progress(phase, 0, 0, "", root);
+    if !root.is_dir() {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return Vec::new();
     };
-    let mut result = Vec::new();
-    for entry in entries.flatten() {
+    let candidates: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let is_dir = path.is_dir();
+            let extension = path
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            is_dir || extension == "scs" || extension == "zip"
+        })
+        .collect();
+    let total = candidates.len();
+    let mut result = Vec::with_capacity(total);
+    for (index, path) in candidates.into_iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let path = entry.path();
         let is_dir = path.is_dir();
         let extension = path
             .extension()
             .and_then(|x| x.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if !is_dir && extension != "scs" && extension != "zip" {
-            continue;
-        }
         let id = if workshop {
             path.file_name()
                 .and_then(|x| x.to_str())
@@ -1212,6 +1249,13 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
                 .unwrap_or_default()
                 .to_string()
         };
+        let display_name = if workshop {
+            workshop_cached_title(&id).unwrap_or_else(|| id.replace('_', " "))
+        } else {
+            id.replace('_', " ")
+        };
+        // Publish the current package before traversing its files.
+        progress(phase, index, total, &display_name, &path);
         let metadata = fs::metadata(&path).ok();
         let (size, modified_ms, fingerprint) = if is_dir {
             directory_signature(&path, cancelled)
@@ -1229,11 +1273,6 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
                 .wrapping_mul(1099511628211)
                 .wrapping_add(modified_ms as u64);
             (size, modified_ms, fingerprint)
-        };
-        let display_name = if workshop {
-            workshop_cached_title(&id).unwrap_or_else(|| id.replace('_', " "))
-        } else {
-            id.replace('_', " ")
         };
         result.push(ModDto {
             id: id.clone(),
@@ -1256,13 +1295,30 @@ fn discover_packages(root: Option<&Path>, workshop: bool, cancelled: &AtomicBool
             fingerprint,
         });
     }
+    progress(phase, result.len(), total, "", root);
     result
 }
 
 fn discover_workshop_packages(roots: &[PathBuf], cancelled: &AtomicBool) -> Vec<ModDto> {
+    discover_workshop_packages_with_progress(roots, cancelled, &mut |_, _, _, _, _| {})
+}
+
+fn discover_workshop_packages_with_progress<F>(
+    roots: &[PathBuf],
+    cancelled: &AtomicBool,
+    progress: &mut F,
+) -> Vec<ModDto>
+where
+    F: FnMut(&str, usize, usize, &str, &Path),
+{
     let mut result = Vec::new();
     for root in roots {
-        result.extend(discover_packages(Some(root), true, cancelled));
+        result.extend(discover_packages_with_progress(
+            Some(root),
+            true,
+            cancelled,
+            progress,
+        ));
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
@@ -1348,6 +1404,17 @@ fn metadata_needs_refresh(row: &ModDto) -> bool {
 }
 
 fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSummary, String> {
+    sync_index_with_progress(connection, incoming, &mut |_, _, _, _, _| {})
+}
+
+fn sync_index_with_progress<F>(
+    connection: &mut Connection,
+    incoming: &[ModDto],
+    progress: &mut F,
+) -> Result<ScanSummary, String>
+where
+    F: FnMut(&str, usize, usize, &str, &Path),
+{
     let started = std::time::Instant::now();
     let cached = load_cached(connection)?;
     let old: HashMap<String, (i64, u64, u64)> = cached
@@ -1365,7 +1432,7 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
         tx.execute("DELETE FROM mod_package_v2 WHERE path = ?1", params![path])
             .map_err(|e| format!("remove stale index row failed: {e}"))?;
     }
-    for mod_row in incoming {
+    for (index, mod_row) in incoming.iter().enumerate() {
         let changed = old
             .get(&mod_row.path)
             .map(|(modified, size, fingerprint)| {
@@ -1376,6 +1443,13 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
             .unwrap_or(true);
         let previous = cached.iter().find(|row| row.path == mod_row.path);
         if !changed && !previous.is_some_and(metadata_needs_refresh) {
+            progress(
+                "cached",
+                index + 1,
+                incoming.len(),
+                &previous.unwrap().display_name,
+                Path::new(&mod_row.path),
+            );
             continue;
         }
         if changed && old.contains_key(&mod_row.path) {
@@ -1384,6 +1458,16 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
             added += 1;
         }
         let mut enriched = mod_row.clone();
+        // Manifest parsing can be expensive for large SCS archives.
+        progress(
+            "metadata",
+            index,
+            incoming.len(),
+            previous
+                .map(|row| row.display_name.as_str())
+                .unwrap_or(&mod_row.display_name),
+            Path::new(&mod_row.path),
+        );
         let (package_name, display_name, author, version, _icon_filename) =
             manifest_for(Path::new(&mod_row.path));
         if !package_name.is_empty() {
@@ -1449,8 +1533,16 @@ fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSu
         )
         .map_err(|e| format!("write mod index failed: {e}"))?;
     }
+    progress("persist", incoming.len(), incoming.len(), "", Path::new(""));
     tx.commit()
         .map_err(|e| format!("commit mod index failed: {e}"))?;
+    progress(
+        "complete",
+        incoming.len(),
+        incoming.len(),
+        "",
+        Path::new(""),
+    );
     Ok(ScanSummary {
         total: incoming.len(),
         added,
@@ -2915,21 +3007,40 @@ fn scan_mod_inputs(
     database_path: PathBuf,
     cancelled: Arc<AtomicBool>,
 ) -> Result<ScanSummary, String> {
+    scan_mod_inputs_with_progress(paths, database_path, cancelled, &mut |_, _, _, _, _| {})
+}
+
+fn scan_mod_inputs_with_progress<F>(
+    paths: Paths,
+    database_path: PathBuf,
+    cancelled: Arc<AtomicBool>,
+    progress: &mut F,
+) -> Result<ScanSummary, String>
+where
+    F: FnMut(&str, usize, usize, &str, &Path),
+{
     cancelled.store(false, Ordering::Relaxed);
-    let mut discovered = discover_packages(Some(&paths.mod_root), false, &cancelled);
-    discovered.extend(discover_workshop_packages(
+    progress("cache", 0, 0, "", &database_path);
+    let mut db = open_db(&database_path)?;
+    let mut discovered =
+        discover_packages_with_progress(Some(&paths.mod_root), false, &cancelled, progress);
+    discovered.extend(discover_workshop_packages_with_progress(
         &paths.workshop_roots,
         &cancelled,
+        progress,
     ));
     if cancelled.load(Ordering::Relaxed) {
         return Err("Scan cancelled.".into());
     }
-    let mut db = open_db(&database_path)?;
-    sync_index(&mut db, &discovered)
+    sync_index_with_progress(&mut db, &discovered, progress)
 }
 
-#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn mod_initialize(state: State<'_, BackendState>) -> Result<ScanSummary, String> {
+#[cfg(feature = "desktop")]
+#[tauri::command(rename_all = "camelCase")]
+async fn mod_initialize(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+) -> Result<ScanSummary, String> {
     let (paths, database_path, cancelled) = {
         let backend = state
             .inner
@@ -2941,10 +3052,32 @@ fn mod_initialize(state: State<'_, BackendState>) -> Result<ScanSummary, String>
             Arc::clone(&backend.scan_cancelled),
         )
     };
-    // Startup uses the same persisted index and incremental scanner as the
-    // explicit Scan button. It therefore detects additions/removals while
-    // keeping unchanged package metadata untouched.
-    scan_mod_inputs(paths, database_path, cancelled)
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_mod_inputs_with_progress(
+            paths,
+            database_path,
+            cancelled,
+            &mut |phase, current, total, name, path| {
+                let _ = app.emit_to(
+                    "initializer",
+                    "ets2-scan-progress",
+                    ScanProgress {
+                        phase: phase.into(),
+                        current,
+                        total,
+                        name: name.into(),
+                        path: if path.as_os_str().is_empty() {
+                            String::new()
+                        } else {
+                            normalize_path(path)
+                        },
+                    },
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("initialization worker failed: {error}"))?
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
@@ -3392,6 +3525,165 @@ mod tests {
         let cached = load_cached(&connection).expect("cached");
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].path, first.path);
+    }
+
+    #[test]
+    fn discovery_reports_current_package_before_reading_its_contents() {
+        let root = std::env::temp_dir().join(format!("ets2-progress-discovery-{}", now_ms()));
+        let package = root.join("demo_mod");
+        fs::create_dir_all(&package).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let mut events = Vec::new();
+        let rows = discover_packages_with_progress(
+            Some(&root),
+            false,
+            &cancelled,
+            &mut |phase, current, total, name, path| {
+                events.push((
+                    phase.to_string(),
+                    current,
+                    total,
+                    name.to_string(),
+                    path.to_path_buf(),
+                ));
+                if name == "demo mod" {
+                    // The signature must include a file created by the pre-read notification.
+                    fs::write(path.join("test.txt"), "progress before read").unwrap();
+                }
+            },
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].size, 20);
+        assert!(events
+            .iter()
+            .any(|(phase, current, total, name, path)| phase == "local"
+                && *current == 0
+                && *total == 1
+                && name == "demo mod"
+                && path == &package));
+        assert_eq!(events.last().unwrap().1, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_progress_keeps_persisted_cache_across_restarts() {
+        let root = std::env::temp_dir().join(format!("ets2-progress-cache-{}", now_ms()));
+        let package = root.join("mod/demo_mod");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("manifest.sii"),
+            "SiiNunit\n{\nmod_package : .demo {\n display_name: \"Demo Mod\"\n}\n}\n",
+        )
+        .unwrap();
+        let paths = Paths {
+            game_root: root.clone(),
+            mod_root: root.join("mod"),
+            profiles_root: root.join("profiles"),
+            steam_profiles_root: None,
+            cloud_profiles_root: None,
+            workshop_roots: Vec::new(),
+            game_executable: None,
+        };
+        let database = root.join("index.db");
+        let mut events = Vec::new();
+        let mut run = || {
+            events.clear();
+            let summary = scan_mod_inputs_with_progress(
+                paths.clone(),
+                database.clone(),
+                Arc::new(AtomicBool::new(false)),
+                &mut |phase, current, total, name, path| {
+                    events.push((
+                        phase.to_string(),
+                        current,
+                        total,
+                        name.to_string(),
+                        path.to_path_buf(),
+                    ));
+                },
+            )
+            .unwrap();
+            (summary, events.clone())
+        };
+        let (first, events) = run();
+        assert_eq!(first.added, 1);
+        assert!(events.iter().any(|event| event.0 == "metadata"
+            && event.1 == 0
+            && event.2 == 1
+            && event.4 == fs::canonicalize(&package).unwrap()));
+        assert_eq!(events.last().unwrap().0, "complete");
+        let db = open_db(&database).unwrap();
+        let timestamp: i64 = db
+            .query_row("SELECT scanned_at_ms FROM mod_package_v2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        drop(db);
+        let (second, events) = run();
+        assert_eq!(
+            (
+                second.added,
+                second.updated,
+                second.removed,
+                second.inspected
+            ),
+            (0, 0, 0, 0)
+        );
+        assert!(!events.iter().any(|event| event.0 == "metadata"));
+        assert!(events
+            .iter()
+            .any(|event| event.0 == "cached" && event.1 == 1 && event.3 == "demo mod"));
+        let db = open_db(&database).unwrap();
+        let next_timestamp: i64 = db
+            .query_row("SELECT scanned_at_ms FROM mod_package_v2", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(timestamp, next_timestamp);
+        drop(db);
+        fs::write(package.join("added.txt"), "new file").unwrap();
+        let (changed, events) = run();
+        assert_eq!(changed.updated, 1);
+        assert!(events.iter().any(|event| event.0 == "metadata"));
+        fs::remove_dir_all(&package).unwrap();
+        let (removed, events) = run();
+        assert_eq!((removed.total, removed.removed), (0, 1));
+        assert_eq!(events.last().unwrap().0, "complete");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_index_write_does_not_report_completion() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        open_db_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_write BEFORE INSERT ON mod_package_v2
+            BEGIN SELECT RAISE(ABORT, 'test write failure'); END;",
+            )
+            .unwrap();
+        let row = ModDto {
+            id: "test".into(),
+            package_name: "test".into(),
+            path: "missing-test.scs".into(),
+            package_type: "scs".into(),
+            display_name: "Test Mod".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 0,
+            modified_ms: 0,
+            fingerprint: 0,
+            enabled: false,
+            category: "unknown".into(),
+        };
+        let mut phases = Vec::new();
+        let result = sync_index_with_progress(&mut connection, &[row], &mut |phase, _, _, _, _| {
+            phases.push(phase.to_string())
+        });
+        assert!(result.is_err());
+        assert!(phases.iter().any(|phase| phase == "metadata"));
+        assert!(!phases.iter().any(|phase| phase == "complete"));
+        assert!(load_cached(&connection).unwrap().is_empty());
     }
 
     #[test]

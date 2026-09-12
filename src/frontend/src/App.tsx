@@ -21,7 +21,8 @@ import {
   Wrench,
 } from "lucide-react";
 import { getCopy } from "./i18n";
-import { initializeModIndex, isTauriRuntime } from "./backend";
+import { isTauriRuntime } from "./backend";
+import InitializerWindow from "./InitializerWindow";
 import { useModStore } from "./store";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
@@ -48,94 +49,6 @@ function levelFromExperience(value: number): number {
     level += 1;
   }
   return level;
-}
-
-function InitializerWindow() {
-  const started = useRef(false);
-  const mainReady = useRef(false);
-  const initializationFinished = useRef(false);
-  const [status, setStatus] = useState("正在准备 Mod 索引…");
-  const [stage, setStage] = useState("准备启动");
-  const [progress, setProgress] = useState(4);
-  const [error, setError] = useState("");
-  const locale = typeof navigator !== "undefined" ? navigator.language.toLowerCase() : "zh";
-  const copy = locale.startsWith("ru")
-    ? { preparing: "Подготовка индекса модов…", cache: "Чтение сохранённого кэша…", done: (total: number) => `Инкрементальная проверка завершена: ${total} модов`, failed: "Ошибка инициализации", retry: "Повторить" }
-    : locale.startsWith("en")
-      ? { preparing: "Preparing the mod index…", cache: "Reading the persistent cache…", done: (total: number) => `Incremental check complete: ${total} mods`, failed: "Initialization failed", retry: "Retry" }
-      : { preparing: "正在准备 Mod 索引…", cache: "正在读取持久化缓存…", done: (total: number) => `已完成增量检查，共 ${total} 个 Mod`, failed: "初始化失败", retry: "重试" };
-  useEffect(() => {
-    document.body.classList.add("initializer-body");
-    setStatus(copy.preparing);
-    return () => document.body.classList.remove("initializer-body");
-  }, []);
-
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    let cancelled = false;
-    let unlisten: UnlistenFn | undefined;
-    const finish = async () => {
-      if (cancelled || !initializationFinished.current || !mainReady.current || !isTauriRuntime()) return;
-      const main = await Window.getByLabel("main");
-      if (!main) return;
-      await getCurrentWindow().emitTo("main", "ets2-initialization-complete");
-      await main.show();
-      await getCurrentWindow().close();
-    };
-    void (async () => {
-      try {
-        if (isTauriRuntime()) {
-          unlisten = await getCurrentWindow().listen("ets2-main-ready", () => {
-            mainReady.current = true;
-            void finish();
-          });
-        } else {
-          mainReady.current = true;
-        }
-        setStage(locale.startsWith("ru") ? "Запуск" : locale.startsWith("en") ? "Starting" : "启动");
-        setProgress(8);
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-        setStage(locale.startsWith("ru") ? "Чтение сохранённого индекса" : locale.startsWith("en") ? "Reading persistent index" : "读取持久化索引");
-        setProgress(28);
-        setStatus(copy.cache);
-        await new Promise((resolve) => window.setTimeout(resolve, 180));
-        setStage(locale.startsWith("ru") ? "Проверка новых и изменённых модов" : locale.startsWith("en") ? "Checking added and changed mods" : "检查新增和变化的 Mod");
-        setProgress(52);
-        const summary = await initializeModIndex();
-        if (cancelled) return;
-        setStage(locale.startsWith("ru") ? "Сохранение индекса" : locale.startsWith("en") ? "Persisting mod index" : "保存 Mod 索引");
-        setProgress(88);
-        setStatus(copy.done(summary.total));
-        await new Promise((resolve) => window.setTimeout(resolve, 320));
-        setProgress(100);
-        setStage(locale.startsWith("ru") ? "Готово" : locale.startsWith("en") ? "Ready" : "完成");
-        initializationFinished.current = true;
-        await finish();
-      } catch (initializationError) {
-        if (cancelled) return;
-        setError(initializationError instanceof Error ? initializationError.message : String(initializationError));
-        setStatus(copy.failed);
-      }
-    })();
-    // Keep the startup task alive across React StrictMode's development
-    // effect replay. The initializer window closes itself after handoff.
-  }, []);
-
-  return (
-    <div className="initializer-shell">
-      <div className="initializer-mark"><Sparkles size={22} /></div>
-      <div className="initializer-title">ETS2 Mod Manager</div>
-      <div className="initializer-stage">{stage}</div>
-      <div className="initializer-status">{status}</div>
-      <div className="initializer-progress" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
-        <span style={{ width: `${progress}%` }} />
-      </div>
-      <div className="initializer-percent">{progress}%</div>
-      {error && <div className="initializer-error">{error}</div>}
-      {error && <button className="button button-primary" onClick={() => window.location.reload()}>{copy.retry}</button>}
-    </div>
-  );
 }
 
 function App() {
@@ -191,6 +104,7 @@ function App() {
     error,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
+  const startupLoad = useRef<Promise<void> | null>(null);
   const [saveValues, setSaveValues] = useState<Record<SaveDraftKey, string>>({
     money_account: "",
     experience_points: "",
@@ -203,16 +117,39 @@ function App() {
       return;
     }
     let unlisten: UnlistenFn | undefined;
+    let readyTimer: number | undefined;
     let active = true;
     void (async () => {
       const current = getCurrentWindow();
       unlisten = await current.listen("ets2-initialization-complete", () => {
-        if (active) void initialize();
+        if (!active || startupLoad.current) return;
+        startupLoad.current = (async () => {
+          try {
+            await initialize();
+            const failure = useModStore.getState().error;
+            if (failure) throw new Error(failure);
+            await current.show();
+            const initializer = await Window.getByLabel("initializer");
+            await initializer?.close();
+            window.clearInterval(readyTimer);
+          } catch (reason) {
+            startupLoad.current = null;
+            await current.emitTo("initializer", "ets2-initialization-error", String(reason));
+          }
+        })();
       });
-      await current.emitTo("initializer", "ets2-main-ready");
-    })();
+      if (!active) {
+        unlisten();
+        return;
+      }
+      // Repeat the handshake in case the other webview subscribes later.
+      const ready = () => { void current.emitTo("initializer", "ets2-main-ready").catch(() => {}); };
+      ready();
+      readyTimer = window.setInterval(ready, 500);
+    })().catch((reason) => useModStore.setState({ error: String(reason) }));
     return () => {
       active = false;
+      window.clearInterval(readyTimer);
       unlisten?.();
     };
   }, [initialize, windowLabel]);

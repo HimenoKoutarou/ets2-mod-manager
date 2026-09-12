@@ -163,29 +163,33 @@ img.mod-badge { object-fit: cover; }
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 28px;
+  gap: 10px;
+  padding: 22px;
   background: #ffffff;
   color: #172033;
   text-align: center;
 }
 .initializer-mark {
-  width: 48px;
-  height: 48px;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
-  border-radius: 10px;
+  border-radius: 8px;
   color: #ffffff;
   background: #2563eb;
 }
 .initializer-title { font-size: 18px; font-weight: 700; }
 .initializer-stage { color: #2563eb; font-size: 12px; font-weight: 700; }
 .initializer-status { min-height: 18px; color: #667085; font-size: 12px; }
-.initializer-progress { width: min(300px, 84vw); height: 8px; overflow: hidden; border: 1px solid #bfdbfe; border-radius: 99px; background: #eff6ff; }
-.initializer-progress span { display: block; height: 100%; border-radius: inherit; background: #2563eb; transition: width .25s ease; }
+.initializer-current { width: 100%; min-width: 0; height: 70px; font-size: 12px; }
+.initializer-current strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.initializer-path { margin-top: 6px; max-height: 48px; overflow: auto; overflow-wrap: anywhere; color: #667085; font-size: 11px; line-height: 16px; text-align: left; }
+.initializer-progress { appearance: none; width: min(360px, 84vw); height: 8px; overflow: hidden; border: 1px solid #bfdbfe; border-radius: 4px; background: #eff6ff; accent-color: #2563eb; }
+.initializer-progress::-webkit-progress-bar { background: #eff6ff; }
+.initializer-progress::-webkit-progress-value { background: #2563eb; }
+.initializer-progress:indeterminate::-webkit-progress-bar { background: repeating-linear-gradient(90deg, #eff6ff 0 20px, #bfdbfe 20px 40px); }
 .initializer-percent { color: #667085; font-size: 11px; font-variant-numeric: tabular-nums; }
-.initializer-error { max-width: 340px; color: #b42318; font-size: 11px; line-height: 1.5; }
-@keyframes initializer-progress { 0% { transform: translateX(-110%); } 100% { transform: translateX(360%); } }
+.initializer-error { width: 100%; max-height: 60px; overflow: auto; overflow-wrap: anywhere; color: #b42318; font-size: 11px; line-height: 1.5; }
 
 @media (max-width: 1180px) {
   body { min-width: 980px; }
