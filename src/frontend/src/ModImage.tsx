@@ -19,17 +19,34 @@ export const ModThumbnail = memo(function ModThumbnail({ mod }: { mod: ModRecord
   const load = useModStore((state) => state.loadModMedia);
   useEffect(() => {
     if (mod.mediaLoaded || (mod.mediaAttempts ?? 0) >= 3 || !element.current) return;
-    const scrollRoot = element.current.closest(".table-wrap");
+    const scrollRoot = element.current.closest<HTMLElement>(".table-wrap");
+    const loadIfVisible = () => {
+      const node = element.current;
+      if (!node) return;
+      const nodeRect = node.getBoundingClientRect();
+      const rootRect = scrollRoot?.getBoundingClientRect();
+      const top = rootRect?.top ?? 0;
+      const bottom = rootRect?.bottom ?? window.innerHeight;
+      if (nodeRect.bottom < top - 240 || nodeRect.top > bottom + 240) return;
+      observer.disconnect();
+      scrollRoot?.removeEventListener("scroll", loadIfVisible);
+      void load(mod.id);
+    };
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
       observer.disconnect();
+      scrollRoot?.removeEventListener("scroll", loadIfVisible);
       void load(mod.id);
     }, { root: scrollRoot, rootMargin: "240px" });
     observer.observe(element.current);
-    const retry = window.setTimeout(() => {
-      if (!mod.mediaLoaded && (mod.mediaAttempts ?? 0) < 3) void load(mod.id);
-    }, 1800);
-    return () => { observer.disconnect(); window.clearTimeout(retry); };
+    scrollRoot?.addEventListener("scroll", loadIfVisible, { passive: true });
+    // Some WebView builds do not reliably deliver IntersectionObserver events
+    // for a nested table scroller; check the initial viewport explicitly.
+    loadIfVisible();
+    return () => {
+      observer.disconnect();
+      scrollRoot?.removeEventListener("scroll", loadIfVisible);
+    };
   }, [mod.id, mod.path, mod.size, mod.modifiedMs, mod.mediaLoaded, mod.mediaAttempts, load]);
   return <span ref={element} className="mod-thumbnail">
     <ModImage src={mod.previewUrl || mod.iconUrl} fallback={mod.iconUrl} className="mod-badge" alt={mod.displayName} />
