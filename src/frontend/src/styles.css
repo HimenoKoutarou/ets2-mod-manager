@@ -127,6 +127,8 @@ button { color: inherit; }
 .mod-context-menu button:disabled { color: #a8b2c1; cursor: default; }
 .mod-context-menu button svg:last-child { margin-left: auto; }
 .context-menu-group { position: relative; }
+.localization-base-control { display: grid; gap: 6px; margin: 10px 0; padding: 8px; border: 1px solid #e1e8f2; border-radius: 5px; background: #f8fbff; }
+.localization-base-control .detail-package { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-submenu {
   position: absolute;
   left: calc(100% + 4px);

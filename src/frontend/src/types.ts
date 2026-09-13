@@ -62,6 +62,8 @@ export interface UiCopy {
   profileOpenLocalization: string;
   profileOpenDiagnostics: string;
   profileOpenFolder: string;
+  localizationBase: string;
+  chooseLocalizationBase: string;
   scan: string;
   cancelScan: string;
   scanning: string;

@@ -187,7 +187,9 @@ export interface ModBackend {
   listMods(profileId: string): Promise<ModRecord[]>;
   loadModMedia(mods: ModRecord[]): Promise<ModMedia[]>;
   listSaves(profileId: string): Promise<SaveSlot[]>;
-  scanLocalization(profileId: string, targetLocale: string): Promise<LocalizationScan>;
+  scanLocalization(profileId: string, targetLocale: string, baseFile?: string | null): Promise<LocalizationScan>;
+  getLocalizationBase(): Promise<string | null>;
+  pickLocalizationBase(): Promise<string | null>;
   cancelLocalization(): Promise<void>;
   precheckCrash(profileId: string): Promise<CrashPrecheck>;
   inspectBsii(path: string): Promise<BsiiSummary>;
@@ -241,10 +243,16 @@ const tauriBackend: ModBackend = {
       profileLocation: row.profileLocation === "local" ? "local" : "readonly",
     }));
   },
-  scanLocalization(profileId, targetLocale) {
+  scanLocalization(profileId, targetLocale, baseFile) {
     return invoke<LocalizationScan>("localization_scan", {
-      request: { profileId, targetLocale },
+      request: { profileId, targetLocale, baseFile },
     });
+  },
+  getLocalizationBase() {
+    return invoke<string | null>("localization_base_get");
+  },
+  pickLocalizationBase() {
+    return invoke<string | null>("localization_base_pick");
   },
   cancelLocalization() {
     return invoke<void>("localization_cancel");

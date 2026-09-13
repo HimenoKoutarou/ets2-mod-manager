@@ -62,6 +62,7 @@ function App() {
     selectedSave,
     saveSnapshot,
     localization,
+    localizationBase,
     diagnostics,
     secondaryPanel,
     view,
@@ -104,6 +105,8 @@ function App() {
     selectSave,
     mutateSave,
     scanLocalization,
+    loadLocalizationBase,
+    pickLocalizationBase,
     cancelLocalization,
     runDiagnostics,
     initialize,
@@ -195,6 +198,7 @@ function App() {
       level: "",
     });
   }, [selectedSave?.gameSii]);
+  useEffect(() => { void loadLocalizationBase(); }, [loadLocalizationBase]);
   const text = getCopy(language);
   const categoryText = categoryCopy[language];
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
@@ -791,6 +795,14 @@ function App() {
               <button className="button button-small panel-action" onClick={() => { void (localizationScanning ? cancelLocalization() : scanLocalization()); }} disabled={scanning}>
                 {localizationScanning ? text.cancelScan : text.scan}
               </button>
+              <div className="localization-base-control">
+                <div className="detail-package" title={localizationBase ?? ""}>
+                  {text.localizationBase}: {localizationBase ? localizationBase.split(/[\\/]/).pop() : text.noneFound}
+                </div>
+                <button className="button button-small" onClick={() => { void pickLocalizationBase(); }}>
+                  <FolderOpen size={14} />{text.chooseLocalizationBase}
+                </button>
+              </div>
               {localization?.entries.length ? (
                 <div className="support-list">
                   {localization.entries.slice(0, 80).map((entry) => (

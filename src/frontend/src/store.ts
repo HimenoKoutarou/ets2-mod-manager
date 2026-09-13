@@ -193,6 +193,8 @@ export const fixtureBackend: ModBackend = {
   },
   cancelScan: async () => undefined,
   cancelLocalization: async () => undefined,
+  getLocalizationBase: async () => null,
+  pickLocalizationBase: async () => null,
   saveProfile: async () => undefined,
   launchGame: async () => undefined,
   openModLocation: async () => undefined,
@@ -260,6 +262,7 @@ interface ModState {
   selectedSave: SaveSlot | null;
   saveSnapshot: SaveSnapshot | null;
   localization: LocalizationScan | null;
+  localizationBase: string | null;
   diagnostics: CrashPrecheck | null;
   secondaryPanel: "none" | "localization" | "diagnostics" | "saves";
   view: ModView;
@@ -284,6 +287,8 @@ interface ModState {
   selectedPresetName: string;
   setSecondaryPanel: (panel: "none" | "localization" | "diagnostics" | "saves") => void;
   scanLocalization: () => Promise<void>;
+  loadLocalizationBase: () => Promise<void>;
+  pickLocalizationBase: () => Promise<void>;
   cancelLocalization: () => Promise<void>;
   runDiagnostics: () => Promise<void>;
   selectSave: (slot: SaveSlot | null) => Promise<void>;
@@ -333,6 +338,7 @@ export const useModStore = create<ModState>((set, get) => ({
   selectedSave: null,
   saveSnapshot: null,
   localization: null,
+  localizationBase: null,
   diagnostics: null,
   secondaryPanel: "none",
   view: "all",
@@ -402,7 +408,11 @@ export const useModStore = create<ModState>((set, get) => ({
     if (!selectedProfileId) return;
     set({ loading: true, localizationScanning: true, error: "" });
     try {
-      const result = await backend.scanLocalization(selectedProfileId, language === "zh_CN" ? "zh_cn" : language === "ru_RU" ? "ru_ru" : "en_us");
+      const result = await backend.scanLocalization(
+        selectedProfileId,
+        language === "zh_CN" ? "zh_cn" : language === "ru_RU" ? "ru_ru" : "en_us",
+        get().localizationBase,
+      );
       if (
         requestId !== localizationRequest
         || get().selectedProfileId !== selectedProfileId
@@ -418,6 +428,21 @@ export const useModStore = create<ModState>((set, get) => ({
       if (requestId === localizationRequest) {
         set({ loading: false, localizationScanning: false });
       }
+    }
+  },
+  loadLocalizationBase: async () => {
+    try {
+      set({ localizationBase: await backend.getLocalizationBase() });
+    } catch {
+      // Optional preference; scanning remains available without a base file.
+    }
+  },
+  pickLocalizationBase: async () => {
+    try {
+      const selected = await backend.pickLocalizationBase();
+      if (selected !== null) set({ localizationBase: selected });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
     }
   },
   runDiagnostics: async () => {

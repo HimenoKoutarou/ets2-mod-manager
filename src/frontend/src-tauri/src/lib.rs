@@ -222,6 +222,7 @@ struct LocalizationScanDto {
 struct LocalizationScanRequest {
     profile_id: String,
     target_locale: Option<String>,
+    base_file: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -912,6 +913,10 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                size INTEGER NOT NULL,
                modified_ms INTEGER NOT NULL,
                is_directory INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS app_setting (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
              );",
         )
         .map_err(|e| format!("initialize database failed: {e}"))?;
@@ -3204,7 +3209,31 @@ fn localization_scan_impl(
     }
     let profile = find_profile(&paths, &request.profile_id).ok_or("Profile not found.")?;
     let mut connection = open_db(&database_path)?;
-    let packages = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
+    let base_file = request
+        .base_file
+        .or_else(|| read_localization_base(&connection).ok().flatten());
+    let mut packages = Vec::new();
+    if let Some(path) = base_file.filter(|value| Path::new(value).is_file()) {
+        packages.push(ModDto {
+            id: "user-localization-base".into(),
+            package_name: "User localization base".into(),
+            path,
+            package_type: "localization-base".into(),
+            display_name: "User localization base".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 0,
+            modified_ms: 0,
+            enabled: true,
+            category: "base".into(),
+            fingerprint: 0,
+        });
+    }
+    let mut enabled_mods = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
+    packages.append(&mut enabled_mods);
+    let mut system = system_localization_packages(&paths);
+    system.reverse();
+    packages.extend(system);
     let mut snapshots = Vec::new();
     let mut all_entries = Vec::new();
     let mut inspected = 0usize;
@@ -3245,6 +3274,85 @@ fn localization_scan_impl(
         elapsed_ms: started.elapsed().as_millis(),
         entries,
     })
+}
+
+fn system_localization_packages(paths: &Paths) -> Vec<ModDto> {
+    let Some(game_executable) = &paths.game_executable else {
+        return Vec::new();
+    };
+    let Some(game_root) = game_executable.parent().and_then(Path::parent).and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = fs::read_dir(game_root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|path| {
+            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+            path.is_file() && path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("scs"))
+                && (name == "base.scs" || name.starts_with("dlc_"))
+        })
+        .collect();
+    files.sort_by_key(|path| {
+        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
+        if name == "base.scs" { (0, name) } else { (1, name) }
+    });
+    files.into_iter().map(|path| {
+        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_string();
+        let metadata = fs::metadata(&path).ok();
+        ModDto {
+            id: name.clone(),
+            package_name: name.clone(),
+            path: normalize_path(&path),
+            package_type: "system".into(),
+            display_name: name,
+            author: String::new(),
+            version: String::new(),
+            size: metadata.as_ref().map(|value| value.len()).unwrap_or_default(),
+            modified_ms: metadata.and_then(|value| value.modified().ok()).and_then(|value| value.duration_since(UNIX_EPOCH).ok()).map(|value| value.as_millis() as i64).unwrap_or_default(),
+            enabled: true,
+            category: "system".into(),
+            fingerprint: 0,
+        }
+    }).collect()
+}
+
+fn read_localization_base(connection: &Connection) -> Result<Option<String>, String> {
+    connection.query_row("SELECT value FROM app_setting WHERE key = 'localization.base_file'", [], |row| row.get(0))
+        .optional()
+        .map_err(|error| format!("read localization base failed: {error}"))
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn localization_base_get(state: State<'_, BackendState>) -> Result<Option<String>, String> {
+    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let connection = open_db(&backend.database_path)?;
+    read_localization_base(&connection)
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn localization_base_pick(state: State<'_, BackendState>) -> Result<Option<String>, String> {
+    #[cfg(windows)]
+    {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Localization files", &["scs", "zip", "sii", "sui"])
+            .pick_file() else { return Ok(None); };
+        let value = normalize_path(&path);
+        let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+        let mut connection = open_db(&backend.database_path)?;
+        let _lock = acquire_db_write_lock();
+        connection.execute(
+            "INSERT INTO app_setting(key, value) VALUES ('localization.base_file', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![value],
+        ).map_err(|error| format!("save localization base failed: {error}"))?;
+        return Ok(Some(value));
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        Err("Selecting a localization base file is only supported on Windows.".into())
+    }
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
@@ -5664,6 +5772,8 @@ pub fn run() {
             game_launch,
             localization_scan,
             localization_cancel,
+            localization_base_get,
+            localization_base_pick,
             crash_discover,
             crash_precheck,
             save_inspect_bsii,
