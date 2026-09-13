@@ -8,6 +8,7 @@ const messages = {
   zh: {
     stages: { cache: "打开持久化索引", local: "检查本地 Mod 文件", workshop: "检查 Workshop Mod 文件",
       metadata: "读取 Mod 元数据 / manifest", cached: "复用已有 Mod 缓存", persist: "提交 SQLite 索引",
+      media: "提取并持久化 Mod 预览图",
       complete: "加载 Profile 和主窗口" },
     preparing: "正在准备初始化", retry: "重试", failed: "初始化失败",
     progress: (n: number, total: number) => `本阶段已处理 ${n} / ${total}`,
@@ -16,6 +17,7 @@ const messages = {
   en: {
     stages: { cache: "Opening persistent index", local: "Checking local mod files", workshop: "Checking Workshop mod files",
       metadata: "Reading mod metadata / manifest", cached: "Reusing cached mod metadata", persist: "Committing SQLite index",
+      media: "Extracting and caching Mod previews",
       complete: "Loading profiles and main window" },
     preparing: "Preparing initialization", retry: "Retry", failed: "Initialization failed",
     progress: (n: number, total: number) => `Completed in this stage: ${n} / ${total}`,
@@ -24,6 +26,7 @@ const messages = {
   ru: {
     stages: { cache: "Открытие сохранённого индекса", local: "Проверка локальных модов", workshop: "Проверка модов Workshop",
       metadata: "Чтение метаданных / manifest", cached: "Повторное использование кэша", persist: "Сохранение индекса SQLite",
+      media: "Извлечение и сохранение превью модов",
       complete: "Загрузка профилей и главного окна" },
     preparing: "Подготовка инициализации", retry: "Повторить", failed: "Ошибка инициализации",
     progress: (n: number, total: number) => `Обработано на этом этапе: ${n} / ${total}`,
@@ -102,7 +105,7 @@ export default function InitializerWindow() {
 
   // Counts describe this stage, not a fabricated estimate of remaining time.
   const measurable = progress && progress.total > 0
-    && ["local", "workshop", "metadata", "cached"].includes(progress.phase);
+    && ["local", "workshop", "metadata", "cached", "media"].includes(progress.phase);
   const percent = measurable ? Math.floor(100 * progress.current / progress.total) : undefined;
   return (
     <div className="initializer-shell">

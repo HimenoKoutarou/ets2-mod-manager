@@ -1220,6 +1220,84 @@ fn data_url(bytes: Vec<u8>, name: &str) -> Option<String> {
     Some(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
 }
 
+fn media_cache_stem(row: &ModDto) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(row.path.as_bytes());
+    hasher.update([0]);
+    hasher.update(row.size.to_le_bytes());
+    hasher.update(row.modified_ms.to_le_bytes());
+    hasher.update(row.fingerprint.to_le_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn media_cache_directory() -> Option<PathBuf> {
+    let directory = cache_directory()?.join("mod_previews");
+    fs::create_dir_all(&directory).ok()?;
+    Some(directory)
+}
+
+fn data_url_bytes(value: &str) -> Option<(Vec<u8>, &'static str)> {
+    let (header, payload) = value.strip_prefix("data:")?.split_once(',')?;
+    if !header.to_ascii_lowercase().contains(";base64") {
+        return None;
+    }
+    let mime = header.split(';').next()?.trim().to_ascii_lowercase();
+    let extension = match mime.as_str() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        _ => return None,
+    };
+    let bytes = BASE64.decode(payload).ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_MEDIA_BYTES {
+        return None;
+    }
+    Some((bytes, extension))
+}
+
+fn persist_resolved_media(row: &ModDto, media: &ModMediaDto) {
+    let Some(value) = media.preview_url.as_deref().or(media.icon_url.as_deref()) else {
+        return;
+    };
+    let Some((bytes, extension)) = data_url_bytes(value) else {
+        return;
+    };
+    let Some(directory) = media_cache_directory() else {
+        return;
+    };
+    let target = directory.join(format!("{}.{}", media_cache_stem(row), extension));
+    if target.is_file() {
+        return;
+    }
+    let temporary = target.with_extension(format!("{extension}.tmp-{}", std::process::id()));
+    if fs::write(&temporary, bytes).is_ok() {
+        let _ = fs::rename(&temporary, &target);
+        let _ = fs::remove_file(&temporary);
+    }
+}
+
+fn persisted_media_url(row: &ModDto) -> Option<String> {
+    let directory = media_cache_directory()?;
+    let stem = media_cache_stem(row);
+    for extension in ["jpg", "jpeg", "png", "webp", "gif", "bmp"] {
+        let candidate = directory.join(format!("{stem}.{extension}"));
+        if candidate.is_file()
+            && fs::metadata(&candidate)
+                .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
+                .unwrap_or(false)
+        {
+            if let Ok(bytes) = fs::read(&candidate) {
+                if let Some(url) = data_url(bytes, candidate.to_string_lossy().as_ref()) {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn hide_child_process(command: &mut std::process::Command) {
     #[cfg(windows)]
     {
@@ -1553,41 +1631,51 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
     } else {
         None
     };
-    // Workshop metadata already contains a stable preview URL (or a local
-    // downloaded preview). Do not open the Workshop package or invoke the
-    // extractor again when that cache is available.
-    if let Some(preview) = cached_preview.clone() {
-        return ModMediaDto {
+    let media = if let Some(preview) = cached_preview {
+        // Workshop metadata already contains a stable preview URL (or a local
+        // downloaded preview). Do not open the Workshop package or invoke the
+        // extractor again when that cache is available.
+        ModMediaDto {
             mod_id: row.id.clone(),
             icon_url: Some(preview.clone()),
             preview_url: Some(preview),
-        };
-    }
-    let cached_icon =
-        legacy_icon_cache_path(&row.id, Path::new(&row.path)).and_then(|(path, _)| {
-            fs::read(&path)
-                .ok()
-                .and_then(|bytes| data_url(bytes, path.to_string_lossy().as_ref()))
+        }
+    } else if let Some(persisted) = persisted_media_url(row) {
+        // A persisted extraction is authoritative for this package fingerprint.
+        ModMediaDto {
+            mod_id: row.id.clone(),
+            icon_url: Some(persisted.clone()),
+            preview_url: Some(persisted),
+        }
+    } else {
+        let cached_icon =
+            legacy_icon_cache_path(&row.id, Path::new(&row.path)).and_then(|(path, _)| {
+                fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| data_url(bytes, path.to_string_lossy().as_ref()))
+            });
+        let package_url = cached_icon.or_else(|| {
+            let path = Path::new(&row.path);
+            // Read only the ZIP manifest entry, not the entire archive.
+            let manifest = if path.is_file() {
+                read_zip_entry_text(path, "manifest.sii")
+            } else {
+                fs::read_to_string(path.join("manifest.sii")).ok()
+            };
+            let icon_filename = manifest
+                .map(|text| archive_core::parse_manifest(&text).icon_filename)
+                .unwrap_or_default();
+            package_media_url(path, &row.id, &icon_filename)
+                .or_else(|| external_archive_image(path, &row.id))
         });
-    let package_url = cached_icon.or_else(|| {
-        let path = Path::new(&row.path);
-        // Read only the ZIP manifest entry, not the entire archive.
-        let manifest = if path.is_file() {
-            read_zip_entry_text(path, "manifest.sii")
-        } else {
-            fs::read_to_string(path.join("manifest.sii")).ok()
-        };
-        let icon_filename = manifest
-            .map(|text| archive_core::parse_manifest(&text).icon_filename)
-            .unwrap_or_default();
-        package_media_url(path, &row.id, &icon_filename)
-            .or_else(|| external_archive_image(path, &row.id))
-    });
-    ModMediaDto {
-        mod_id: row.id.clone(),
-        icon_url: package_url.clone().or_else(|| cached_preview.clone()),
-        preview_url: cached_preview.or(package_url),
-    }
+        ModMediaDto {
+            mod_id: row.id.clone(),
+            icon_url: package_url.clone(),
+            preview_url: package_url,
+        }
+    };
+    persist_resolved_media(row, &media);
+    media
 }
 
 fn cached_mod_media<F>(
@@ -1604,14 +1692,13 @@ where
          LEFT JOIN mod_media_cache_meta m ON m.path = c.path
          WHERE c.path=?1 AND c.size=?2 AND c.modified_ms=?3 AND c.fingerprint=?4
          AND COALESCE(m.resolver_version, 1)=?5
-         AND (c.icon_url IS NOT NULL OR c.preview_url IS NOT NULL OR c.cached_at_ms>=?6)",
+         AND (c.icon_url IS NOT NULL OR c.preview_url IS NOT NULL OR c.cached_at_ms>0)",
             params![
                 row.path,
                 row.size as i64,
                 row.modified_ms,
                 row.fingerprint as i64,
-                MEDIA_RESOLVER_VERSION,
-                now_ms() - 86_400_000
+                MEDIA_RESOLVER_VERSION
             ],
             |value| {
                 Ok(ModMediaDto {
@@ -1624,6 +1711,9 @@ where
         .optional()
         .map_err(|e| format!("read media cache failed: {e}"))?;
     if let Some(cached) = cached {
+        // Backfill the file cache for entries written by older versions that
+        // only persisted a data URL in SQLite.
+        persist_resolved_media(row, &cached);
         return Ok(cached);
     }
     let media = resolve(row);
@@ -1929,7 +2019,15 @@ fn refresh_cached_workshop_titles(
 fn metadata_needs_refresh(row: &ModDto) -> bool {
     let display = row.display_name.trim();
     let package = row.package_name.trim();
-    display.is_empty() || package.is_empty()
+    if display.is_empty() || package.is_empty() {
+        return true;
+    }
+    // Workshop rows discovered before title metadata was persisted can still
+    // carry the numeric Workshop ID as their display name. Treat that as stale
+    // while a human-readable title is available in the persistent cache.
+    is_workshop(row)
+        && display.chars().all(|value| value.is_ascii_digit())
+        && workshop_cached_title(&row.id).is_some()
 }
 
 fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSummary, String> {
@@ -3717,6 +3815,32 @@ fn mod_media_batch_impl(
         .collect()
 }
 
+fn warm_mod_media_with_progress<F>(
+    database: &Path,
+    cancelled: &AtomicBool,
+    progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(&str, usize, usize, &str, &Path),
+{
+    let connection = open_db(database)?;
+    let catalog = load_cached(&connection)?;
+    let total = catalog.len();
+    progress("media", 0, total, "", database);
+    for (index, row) in catalog.iter().enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            return Err("Scan cancelled.".into());
+        }
+        progress("media", index, total, &row.display_name, Path::new(&row.path));
+        // cached_mod_media performs the fingerprint/resolver-version lookup
+        // first, so initialized packages never reopen their archive or invoke
+        // the extractor again.
+        cached_mod_media(&connection, row, resolve_mod_media)?;
+    }
+    progress("media", total, total, "", database);
+    Ok(())
+}
+
 fn is_workshop(row: &ModDto) -> bool {
     row.package_type.eq_ignore_ascii_case("workshop")
         || row.path.to_ascii_lowercase().contains("workshop")
@@ -3955,10 +4079,10 @@ async fn mod_initialize(
                 elapsed_ms: 0,
             });
         }
-        startup_incremental_scan(
+        let summary = startup_incremental_scan(
             paths,
-            database_path,
-            cancelled,
+            database_path.clone(),
+            Arc::clone(&cancelled),
             &mut |phase, current, total, name, path| {
                 let _ = app.emit_to(
                     "initializer",
@@ -3976,7 +4100,29 @@ async fn mod_initialize(
                     },
                 );
             },
-        )
+        )?;
+        warm_mod_media_with_progress(
+            &database_path,
+            &cancelled,
+            &mut |phase, current, total, name, path| {
+                let _ = app.emit_to(
+                    "initializer",
+                    "ets2-scan-progress",
+                    ScanProgress {
+                        phase: phase.into(),
+                        current,
+                        total,
+                        name: name.into(),
+                        path: if path.as_os_str().is_empty() {
+                            String::new()
+                        } else {
+                            normalize_path(path)
+                        },
+                    },
+                );
+            },
+        )?;
+        Ok(summary)
     })
     .await
     .map_err(|error| format!("initialization worker failed: {error}"))?

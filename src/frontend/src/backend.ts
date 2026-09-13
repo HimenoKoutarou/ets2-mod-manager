@@ -11,7 +11,7 @@ export interface ScanSummary {
 }
 
 export interface ScanProgress {
-  phase: "cache" | "local" | "workshop" | "metadata" | "cached" | "persist" | "complete";
+  phase: "cache" | "local" | "workshop" | "metadata" | "cached" | "persist" | "media" | "complete";
   current: number;
   total: number;
   name: string;
