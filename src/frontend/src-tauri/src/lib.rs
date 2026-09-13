@@ -17,6 +17,7 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
@@ -533,25 +534,6 @@ fn workshop_cached_preview_url(workshop_id: &str) -> Option<String> {
         .get(workshop_id)
         .map(|entry| entry.preview_url.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn legacy_icon_cache_path(mod_id: &str, package_path: &Path) -> Option<(PathBuf, String)> {
-    let cache = cache_directory()?.join("mod_icons");
-    let modified = fs::metadata(package_path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .map(|value| value.as_secs_f64())?;
-    let mut hasher = Sha1::new();
-    hasher.update(format!("{mod_id}\0{modified:.6}").as_bytes());
-    let stem = format!("{:x}", hasher.finalize());
-    for extension in ["jpg", "jpeg", "png", "webp", "bmp", "gif"] {
-        let candidate = cache.join(format!("{stem}.{extension}"));
-        if candidate.is_file() {
-            return Some((candidate, extension.to_string()));
-        }
-    }
-    None
 }
 
 fn profile_sii(folder: &Path) -> PathBuf {
@@ -1190,7 +1172,7 @@ fn read_directory_info_manifest(root: &Path) -> archive_core::Manifest {
 }
 
 const MAX_MEDIA_BYTES: u64 = 8 * 1024 * 1024;
-const MEDIA_RESOLVER_VERSION: i64 = 2;
+const MEDIA_RESOLVER_VERSION: i64 = 3;
 
 fn media_extension(path: &str) -> Option<&'static str> {
     let extension = Path::new(path)
@@ -1343,69 +1325,39 @@ fn read_zip_entry_text(path: &Path, wanted: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn directory_image_path(root: &Path, icon_filename: &str) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if !icon_filename.trim().is_empty() {
-        candidates.push(root.join(icon_filename.replace('\\', "/")));
-        candidates.push(root.join(Path::new(icon_filename).file_name()?));
+fn manifest_icon_path(value: &str) -> Option<String> {
+    let normalized = value.trim().replace('\\', "/");
+    let normalized = normalized.trim_start_matches('/');
+    if normalized.is_empty() {
+        return None;
     }
-    for name in [
-        "mod_icon.jpg",
-        "icon.jpg",
-        "preview.jpg",
-        "thumbnail.jpg",
-        "mod_icon.png",
-        "icon.png",
-        "preview.png",
-        "thumbnail.png",
-        "cover.jpg",
-        "cover.png",
-        "logo.jpg",
-        "logo.png",
-        "banner.jpg",
-        "banner.png",
-    ] {
-        candidates.push(root.join(name));
+    let path = Path::new(normalized);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
     }
-    for candidate in candidates {
-        if candidate.is_file()
-            && media_extension(candidate.to_string_lossy().as_ref()).is_some()
-            && fs::metadata(&candidate)
-                .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
-                .unwrap_or(false)
-        {
-            return Some(candidate);
-        }
-    }
-    let mut stack = vec![root.to_path_buf()];
-    let mut inspected = 0usize;
-    while let Some(current) = stack.pop() {
-        if inspected >= 2000 {
-            break;
-        }
-        let Ok(entries) = fs::read_dir(&current) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            inspected += 1;
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if media_extension(path.to_string_lossy().as_ref()).is_some()
-                && fs::metadata(&path)
-                    .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
-                    .unwrap_or(false)
-            {
-                return Some(path);
-            }
-        }
-    }
-    None
+    Some(normalized.to_string())
 }
 
-fn package_media_url(path: &Path, mod_id: &str, icon_filename: &str) -> Option<String> {
+fn directory_image_path(root: &Path, icon_filename: &str) -> Option<PathBuf> {
+    let icon = manifest_icon_path(icon_filename)?;
+    let candidate = root.join(icon);
+    if candidate.is_file()
+        && media_extension(candidate.to_string_lossy().as_ref()).is_some()
+        && fs::metadata(&candidate)
+            .map(|metadata| metadata.len() <= MAX_MEDIA_BYTES)
+            .unwrap_or(false)
+    {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn package_media_url(path: &Path, icon_filename: &str) -> Option<String> {
     if path.is_dir() {
         if let Some(image) = directory_image_path(path, icon_filename) {
             if let Ok(bytes) = fs::read(&image) {
@@ -1415,41 +1367,12 @@ fn package_media_url(path: &Path, mod_id: &str, icon_filename: &str) -> Option<S
             }
         }
     } else if path.is_file() {
-        let mut candidates = Vec::new();
-        if !icon_filename.trim().is_empty() {
-            candidates.push(icon_filename.to_string());
-        }
-        candidates.extend(
-            [
-                "mod_icon.jpg",
-                "icon.jpg",
-                "preview.jpg",
-                "thumbnail.jpg",
-                "mod_icon.png",
-                "icon.png",
-                "preview.png",
-                "thumbnail.png",
-                "cover.jpg",
-                "cover.png",
-                "logo.jpg",
-                "logo.png",
-                "banner.jpg",
-                "banner.png",
-            ]
-            .into_iter()
-            .map(str::to_string),
-        );
-        for candidate in candidates {
+        if let Some(candidate) = manifest_icon_path(icon_filename) {
             if let Some(bytes) = read_zip_entry_bytes(path, &candidate) {
                 if let Some(url) = data_url(bytes, &candidate) {
                     return Some(url);
                 }
             }
-        }
-    }
-    if let Some((cache_path, _)) = legacy_icon_cache_path(mod_id, path) {
-        if let Ok(bytes) = fs::read(&cache_path) {
-            return data_url(bytes, cache_path.to_string_lossy().as_ref());
         }
     }
     None
@@ -1507,6 +1430,17 @@ fn extractor_temp_directory(path: &Path, suffix: &str) -> Option<PathBuf> {
     Some(temp)
 }
 
+fn external_tool_path(path: &Path) -> PathBuf {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = value.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn external_archive_manifest(path: &Path) -> Option<String> {
     if !path.is_file() || is_zip_archive(path) {
         return None;
@@ -1515,8 +1449,9 @@ fn external_archive_manifest(path: &Path) -> Option<String> {
     let temp = extractor_temp_directory(path, "manifest")?;
     let mut command = std::process::Command::new(&extractor);
     hide_child_process(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let status = command
-        .arg(path)
+        .arg(external_tool_path(path))
         .arg("--partial=/manifest.sii")
         .arg("-d")
         .arg(&temp)
@@ -1533,52 +1468,18 @@ fn external_archive_manifest(path: &Path) -> Option<String> {
 }
 
 fn external_archive_image(path: &Path, icon_filename: &str) -> Option<String> {
+    let icon = manifest_icon_path(icon_filename)?;
     if !path.is_file() || is_zip_archive(path) || extractor_path().is_none() {
         return None;
     }
     let extractor = extractor_path()?;
-    let mut names = Vec::new();
-    if !icon_filename.trim().is_empty() {
-        names.push(icon_filename.replace('\\', "/"));
-    }
-    names.extend(
-        [
-            "mod_icon.jpg",
-            "icon.jpg",
-            "preview.jpg",
-            "thumbnail.jpg",
-            "mod_icon.png",
-            "icon.png",
-            "preview.png",
-            "thumbnail.png",
-            "cover.jpg",
-            "cover.png",
-            "logo.jpg",
-            "logo.png",
-            "banner.jpg",
-            "banner.png",
-        ]
-        .into_iter()
-        .map(str::to_string),
-    );
-    names.sort();
-    names.dedup();
     let temp = extractor_temp_directory(path, "image")?;
-    let partial = names
-        .iter()
-        .map(|name| {
-            if name.starts_with('/') {
-                name.clone()
-            } else {
-                format!("/{name}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+    let partial = format!("/{icon}");
     let mut command = std::process::Command::new(&extractor);
     hide_child_process(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let status = command
-        .arg(path)
+        .arg(external_tool_path(path))
         .arg(format!("--partial={partial}"))
         .arg("-d")
         .arg(&temp)
@@ -1647,13 +1548,7 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
             preview_url: Some(persisted),
         }
     } else {
-        let cached_icon =
-            legacy_icon_cache_path(&row.id, Path::new(&row.path)).and_then(|(path, _)| {
-                fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| data_url(bytes, path.to_string_lossy().as_ref()))
-            });
-        let package_url = cached_icon.or_else(|| {
+        let package_url = {
             let path = Path::new(&row.path);
             // Read only the ZIP manifest entry, not the entire archive.
             let manifest = if path.is_file() {
@@ -1665,9 +1560,9 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
             let icon_filename = manifest
                 .map(|text| archive_core::parse_manifest(&text).icon_filename)
                 .unwrap_or_default();
-            package_media_url(path, &row.id, &icon_filename)
+            package_media_url(path, &icon_filename)
                 .or_else(|| external_archive_image(path, &icon_filename))
-        });
+        };
         ModMediaDto {
             mod_id: row.id.clone(),
             icon_url: package_url.clone(),
@@ -4715,6 +4610,36 @@ mod tests {
         let refreshed = cached_mod_media(&connection, &changed, resolve_mod_media).unwrap();
         assert!(refreshed.preview_url.is_none());
         drop(connection);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_icon_path_is_normalized_without_fallback_names() {
+        assert_eq!(manifest_icon_path("\\ui\\ai.jpg"), Some("ui/ai.jpg".into()));
+        assert_eq!(manifest_icon_path("ai.jpg"), Some("ai.jpg".into()));
+        assert_eq!(manifest_icon_path(""), None);
+        assert_eq!(manifest_icon_path("../outside.jpg"), None);
+        assert_eq!(manifest_icon_path("C:\\outside.jpg"), None);
+    }
+
+    #[test]
+    fn external_tool_path_removes_windows_extended_prefix() {
+        assert_eq!(
+            external_tool_path(Path::new(r"\\?\H:\mods\demo.scs")),
+            PathBuf::from(r"H:\mods\demo.scs")
+        );
+        assert_eq!(
+            external_tool_path(Path::new(r"\\?\UNC\server\share\demo.scs")),
+            PathBuf::from(r"\\server\share\demo.scs")
+        );
+    }
+
+    #[test]
+    fn directory_artwork_does_not_guess_when_manifest_has_no_icon() {
+        let root = std::env::temp_dir().join(format!("ets2-media-no-fallback-{}", now_ms()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("icon.jpg"), [1, 2, 3]).unwrap();
+        assert!(directory_image_path(&root, "").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
