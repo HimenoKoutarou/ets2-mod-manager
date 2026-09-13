@@ -4499,6 +4499,62 @@ fn mod_move(request: MoveRequest, state: State<'_, BackendState>) -> Result<Save
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn mod_open_location(
+    package_name: String,
+    path: String,
+    package_type: String,
+) -> Result<(), String> {
+    let workshop = package_type.eq_ignore_ascii_case("workshop")
+        || workshop_id_from_value(&package_name).is_some()
+        || path.to_ascii_lowercase().contains("workshop");
+    if workshop {
+        let id = workshop_id_from_value(&package_name)
+            .or_else(|| workshop_id_from_value(&path))
+            .ok_or("Workshop ID is unavailable.")?;
+        #[cfg(windows)]
+        {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "start", "", &format!(
+                "https://steamcommunity.com/sharedfiles/filedetails/?id={id}"
+            )]);
+            hide_child_process(&mut command);
+            command
+                .status()
+                .map_err(|error| format!("open Steam Workshop page failed: {error}"))?;
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = id;
+            return Err("Opening Steam Workshop pages is only supported on Windows.".into());
+        }
+    }
+    let target = PathBuf::from(path);
+    if !target.exists() {
+        return Err("Mod path does not exist.".into());
+    }
+    #[cfg(windows)]
+    {
+        let mut command = std::process::Command::new("explorer.exe");
+        if target.is_file() {
+            command.arg("/select,").arg(&target);
+        } else {
+            command.arg(&target);
+        }
+        hide_child_process(&mut command);
+        command
+            .status()
+            .map_err(|error| format!("open Mod location failed: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Err("Opening Mod locations is only supported on Windows.".into())
+    }
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn preset_list(
     profile_id: String,
     state: State<'_, BackendState>,
@@ -5567,6 +5623,7 @@ pub fn run() {
             category_mutate,
             mod_set_enabled,
             mod_move,
+            mod_open_location,
             preset_list,
             preset_save,
             preset_load,

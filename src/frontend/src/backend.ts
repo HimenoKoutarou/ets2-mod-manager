@@ -197,6 +197,7 @@ export interface ModBackend {
   cancelScan(): Promise<void>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
   launchGame(): Promise<void>;
+  openModLocation(mod: ModRecord): Promise<void>;
   listPresets(profileId: string): Promise<PresetRecord[]>;
   savePreset(profileId: string, name: string, mods: ModRecord[]): Promise<void>;
   loadPreset(profileId: string, name: string): Promise<string[]>;
@@ -273,6 +274,13 @@ const tauriBackend: ModBackend = {
   },
   async launchGame() {
     await invoke("game_launch");
+  },
+  async openModLocation(mod) {
+    await invoke("mod_open_location", {
+      packageName: mod.packageName,
+      path: mod.path ?? "",
+      packageType: mod.packageType ?? mod.source,
+    });
   },
   async listPresets(profileId) {
     return invoke<PresetRecord[]>("preset_list", { profileId });

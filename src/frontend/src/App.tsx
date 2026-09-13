@@ -89,6 +89,7 @@ function App() {
     toggleMod,
     loadSelectedModMedia,
     loadModMedia,
+    openModLocation,
     scan,
     cancelScan,
     save,
@@ -109,6 +110,9 @@ function App() {
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
+  const [contextMenu, setContextMenu] = useState<{ modId: string; x: number; y: number } | null>(null);
+  const [contextMoveOpen, setContextMoveOpen] = useState(false);
+  const [contextCategoryOpen, setContextCategoryOpen] = useState(false);
   const [moveSteps, setMoveSteps] = useState(1);
   const selectionAnchor = useRef<string | null>(null);
   const tableWrapRef = useRef<HTMLDivElement>(null);
@@ -118,6 +122,20 @@ function App() {
     experience_points: "",
     level: "",
   });
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => {
+      setContextMenu(null);
+      setContextMoveOpen(false);
+      setContextCategoryOpen(false);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [contextMenu]);
   useEffect(() => {
     if (windowLabel === "initializer") return;
     if (!isTauriRuntime()) {
@@ -193,6 +211,7 @@ function App() {
     });
   }, [mods, query, searchMode, selectedCategory, view]);
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
+  const contextMod = contextMenu ? mods.find((mod) => mod.id === contextMenu.modId) ?? null : null;
   useEffect(() => {
     if (selectedMod) void loadSelectedModMedia();
   }, [selectedMod?.id, selectedMod?.iconUrl, selectedMod?.previewUrl, loadSelectedModMedia]);
@@ -439,6 +458,17 @@ function App() {
                     className={selectedIds.has(mod.id) ? "is-selected" : mod.id === selectedModId ? "is-focused" : ""}
                     aria-selected={selectedIds.has(mod.id)}
                     onClick={(event) => selectRow(mod.id, event)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      selectMods([mod.id], mod.id);
+                      setContextMoveOpen(false);
+                      setContextCategoryOpen(false);
+                      setContextMenu({
+                        modId: mod.id,
+                        x: Math.min(event.clientX, window.innerWidth - 250),
+                        y: Math.min(event.clientY, window.innerHeight - 300),
+                      });
+                    }}
                   >
                     <td className="selection-column"><TriCheckbox checked={selectedIds.has(mod.id)} label={`${categoryText.select}: ${mod.displayName}`} onChange={() => {
                       selectMods(selectedIds.has(mod.id) ? selectedModIds.filter((id) => id !== mod.id) : [...selectedModIds, mod.id], mod.id);
@@ -455,6 +485,29 @@ function App() {
             </table>
             {filteredMods.length === 0 && <div className="empty-state">{text.noMods}</div>}
           </div>
+          {contextMenu && contextMod && <div className="mod-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
+            <div className="context-menu-title">{contextMod.displayName}</div>
+            <div className="context-menu-group">
+              <button onClick={() => { setContextMoveOpen((value) => !value); setContextCategoryOpen(false); }}><ArrowUp size={14} />{text.priority}<ChevronDown size={13} /></button>
+              {contextMoveOpen && <div className="context-submenu">
+                {([["top", text.moveTop], ["up", text.moveUp], ["down", text.moveDown], ["bottom", text.moveBottom]] as const).map(([direction, label]) => (
+                  <button key={direction} onClick={() => { moveMods([contextMod.id], direction, 1); setContextMenu(null); }}>{label}</button>
+                ))}
+                {[2, 5, 10, 25].map((steps) => <button key={`up-${steps}`} onClick={() => { moveMods([contextMod.id], "up", steps); setContextMenu(null); }}>{text.moveUp} {steps}</button>)}
+                {[2, 5, 10, 25].map((steps) => <button key={`down-${steps}`} onClick={() => { moveMods([contextMod.id], "down", steps); setContextMenu(null); }}>{text.moveDown} {steps}</button>)}
+              </div>}
+            </div>
+            <button onClick={() => { batchMods([contextMod.id], "enable"); setContextMenu(null); }} disabled={contextMod.enabled}><Check size={14} />{categoryText.enable}</button>
+            <button onClick={() => { batchMods([contextMod.id], "disable"); setContextMenu(null); }} disabled={!contextMod.enabled}><X size={14} />{categoryText.disable}</button>
+            <button onClick={() => { void openModLocation(contextMod.id); setContextMenu(null); }}><FolderOpen size={14} />{contextMod.source === "workshop" ? text.openWorkshop : text.openLocation}</button>
+            <div className="context-menu-group">
+              <button onClick={() => { setContextCategoryOpen((value) => !value); setContextMoveOpen(false); }}><FolderInput size={14} />{categoryText.assign}<ChevronDown size={13} /></button>
+              {contextCategoryOpen && <div className="context-submenu">
+                <button onClick={() => { void mutateCategory({ operation: "assign", name: "", modIds: [contextMod.id] }); setContextMenu(null); }}>{categoryText.uncategorized}</button>
+                {categoryState.folders.map((name) => <button key={name} onClick={() => { void mutateCategory({ operation: "assign", name, modIds: [contextMod.id] }); setContextMenu(null); }}>{name}</button>)}
+              </div>}
+            </div>
+          </div>}
 
           <div className="panel-status">
             <span className={`status-dot ${dirty ? "dirty" : ""}`} />

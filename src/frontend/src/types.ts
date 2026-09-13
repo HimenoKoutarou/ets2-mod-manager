@@ -75,6 +75,8 @@ export interface UiCopy {
   selectHint: string;
   sourceLocal: string;
   sourceWorkshop: string;
+  openLocation: string;
+  openWorkshop: string;
   source: string;
   name: string;
   package: string;

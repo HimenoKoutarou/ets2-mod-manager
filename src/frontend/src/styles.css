@@ -76,6 +76,15 @@ button { color: inherit; }
 .search-box:focus-within { border-color: #2563eb; box-shadow: 0 0 0 2px #dbeafe; }
 .search-box input { width: 100%; border: 0; outline: 0; background: transparent; color: #172033; font-size: 12px; }
 .search-box select { border: 0; border-left: 1px solid #e2e8f0; outline: 0; background: transparent; color: #475569; font-size: 11px; padding: 0 2px 0 8px; cursor: pointer; }
+.mod-context-menu { position: fixed; z-index: 30; width: 230px; padding: 5px; border: 1px solid #d7e0ec; border-radius: 6px; background: #fff; box-shadow: 0 10px 28px rgba(15, 23, 42, .16); }
+.context-menu-title { overflow: hidden; padding: 7px 9px; color: #64748b; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.mod-context-menu button { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: #172033; font-size: 12px; text-align: left; cursor: pointer; }
+.mod-context-menu button:hover:not(:disabled) { background: #eff6ff; color: #1d4ed8; }
+.mod-context-menu button:disabled { color: #a8b2c1; cursor: default; }
+.mod-context-menu button svg:last-child { margin-left: auto; }
+.context-menu-group { position: relative; }
+.context-submenu { margin: 0 0 3px 18px; padding-left: 4px; border-left: 1px solid #dbeafe; }
+.context-submenu button { min-height: 27px; font-size: 11px; }
 .search-box input::placeholder, .preset-input::placeholder { color: #98a2b3; }
 .priority-row { gap: 5px; margin-top: 11px; min-height: 44px; padding: 7px 8px; border: 1px solid #d9e2ef; background: #f8fafc; }
 .priority-label { margin-right: 2px; color: #667085; font-size: 11px; font-weight: 700; text-transform: uppercase; }
