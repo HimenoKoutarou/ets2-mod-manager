@@ -130,10 +130,8 @@ function App() {
       setContextCategoryOpen(false);
     };
     window.addEventListener("click", close);
-    window.addEventListener("scroll", close, true);
     return () => {
       window.removeEventListener("click", close);
-      window.removeEventListener("scroll", close, true);
     };
   }, [contextMenu]);
   useEffect(() => {
@@ -411,7 +409,6 @@ function App() {
               if (event.target.value) void mutateCategory({ operation: "assign", name: event.target.value === "\0none" ? "" : event.target.value, modIds: batchIds });
             }}>
               <option value="" disabled>{categoryText.assign}</option>
-              <option value={"\0none"}>{categoryText.uncategorized}</option>
               {categoryState.folders.map((name) => <option value={name} key={name}>{name}</option>)}
             </select></label>
             <button className="icon-button" title={categoryText.clear} aria-label={categoryText.clear} disabled={!selectedModIds.length} onClick={() => selectMods([])}><X size={15} /></button>
@@ -485,7 +482,7 @@ function App() {
             </table>
             {filteredMods.length === 0 && <div className="empty-state">{text.noMods}</div>}
           </div>
-          {contextMenu && contextMod && <div className="mod-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()}>
+          {contextMenu && contextMod && <div className="mod-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onClick={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
             <div className="context-menu-title">{contextMod.displayName}</div>
             <div className="context-menu-group">
               <button onClick={() => { setContextMoveOpen((value) => !value); setContextCategoryOpen(false); }}><ArrowUp size={14} />{text.priority}<ChevronDown size={13} /></button>
@@ -503,7 +500,6 @@ function App() {
             <div className="context-menu-group">
               <button onClick={() => { setContextCategoryOpen((value) => !value); setContextMoveOpen(false); }}><FolderInput size={14} />{categoryText.assign}<ChevronDown size={13} /></button>
               {contextCategoryOpen && <div className="context-submenu">
-                <button onClick={() => { void mutateCategory({ operation: "assign", name: "", modIds: [contextMod.id] }); setContextMenu(null); }}>{categoryText.uncategorized}</button>
                 {categoryState.folders.map((name) => <button key={name} onClick={() => { void mutateCategory({ operation: "assign", name, modIds: [contextMod.id] }); setContextMenu(null); }}>{name}</button>)}
               </div>}
             </div>
