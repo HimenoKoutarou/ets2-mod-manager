@@ -2629,6 +2629,11 @@ fn is_definition_path(path: &str) -> bool {
         && has_path_segment(&normalized, "def")
 }
 
+fn is_localization_source_path(path: &str) -> bool {
+    let relative = path.rsplit_once("::").map(|(_, value)| value).unwrap_or(path);
+    is_localization_path(relative) || is_definition_path(relative)
+}
+
 fn category_for_path(path: &str) -> String {
     let value = path.to_ascii_lowercase();
     if value.contains("country") {
@@ -2961,6 +2966,9 @@ fn scan_localization_package(
         };
         let package_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
         let source_path = path.display().to_string();
+        if !is_localization_source_path(&source_path) {
+            return Vec::new();
+        }
         return if is_definition_path(&source_path) {
             parse_definition_text(&text, &source_path, package_name, &category_for_path(&source_path))
         } else {
@@ -3279,11 +3287,19 @@ fn localization_scan_impl(
             load_localization_snapshot(&connection, &package.path, &locale, &fingerprint)?
         {
             cached += 1;
-            all_entries.push(entries);
+            all_entries.push(
+                entries
+                    .into_iter()
+                    .filter(|entry| is_localization_source_path(&entry.source_path))
+                    .collect(),
+            );
             continue;
         }
         inspected += 1;
-        let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled);
+        let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled)
+            .into_iter()
+            .filter(|entry| is_localization_source_path(&entry.source_path))
+            .collect::<Vec<_>>();
         if cancelled.load(Ordering::Relaxed) {
             return Err("Localization scan cancelled.".into());
         }
