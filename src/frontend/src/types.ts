@@ -55,6 +55,13 @@ export interface UiCopy {
   profileFolder: string;
   profileStatus: string;
   profilePresetCount: (count: number) => string;
+  profileSwitch: string;
+  profileOpenManager: string;
+  profileOpenMods: string;
+  profileOpenSaves: string;
+  profileOpenLocalization: string;
+  profileOpenDiagnostics: string;
+  profileOpenFolder: string;
   scan: string;
   cancelScan: string;
   scanning: string;

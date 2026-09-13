@@ -196,6 +196,7 @@ export const fixtureBackend: ModBackend = {
   saveProfile: async () => undefined,
   launchGame: async () => undefined,
   openModLocation: async () => undefined,
+  openProfileLocation: async () => undefined,
   listPresets: async () => [],
   savePreset: async () => undefined,
   loadPreset: async () => [],
@@ -300,6 +301,7 @@ interface ModState {
   loadSelectedModMedia: () => Promise<void>;
   loadModMedia: (id: string) => Promise<void>;
   openModLocation: (id: string) => Promise<void>;
+  openProfileLocation: (id: string) => Promise<void>;
   moveMod: (id: string, targetIndex: number) => void;
   scan: () => Promise<void>;
   cancelScan: () => Promise<void>;
@@ -653,6 +655,10 @@ export const useModStore = create<ModState>((set, get) => ({
   openModLocation: async (id) => {
     const mod = get().mods.find((candidate) => candidate.id === id);
     if (mod) await backend.openModLocation(mod);
+  },
+  openProfileLocation: async (id) => {
+    const profile = get().profiles.find((candidate) => candidate.id === id);
+    if (profile) await backend.openProfileLocation(profile);
   },
   moveMod: (id, targetIndex) =>
     set((state) => {

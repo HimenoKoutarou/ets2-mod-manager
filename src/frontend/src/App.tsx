@@ -18,6 +18,7 @@ import {
   Save,
   Search,
   FolderInput,
+  ExternalLink,
   Sparkles,
   Wrench,
   X,
@@ -91,6 +92,7 @@ function App() {
     loadSelectedModMedia,
     loadModMedia,
     openModLocation,
+    openProfileLocation,
     scan,
     cancelScan,
     save,
@@ -113,6 +115,7 @@ function App() {
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
   const [contextMenu, setContextMenu] = useState<{ modId: string; x: number; y: number } | null>(null);
+  const [profileContextMenu, setProfileContextMenu] = useState<{ profileId: string; x: number; y: number } | null>(null);
   const [contextMoveOpen, setContextMoveOpen] = useState(false);
   const [contextCategoryOpen, setContextCategoryOpen] = useState(false);
   const [moveSteps, setMoveSteps] = useState(1);
@@ -136,6 +139,12 @@ function App() {
       window.removeEventListener("click", close);
     };
   }, [contextMenu]);
+  useEffect(() => {
+    if (!profileContextMenu) return;
+    const close = () => setProfileContextMenu(null);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [profileContextMenu]);
   useEffect(() => {
     if (windowLabel === "initializer") return;
     if (!isTauriRuntime()) {
@@ -212,6 +221,14 @@ function App() {
   }, [mods, query, searchMode, selectedCategory, view]);
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
   const contextMod = contextMenu ? mods.find((mod) => mod.id === contextMenu.modId) ?? null : null;
+  const contextProfile = profileContextMenu ? profiles.find((profile) => profile.id === profileContextMenu.profileId) ?? null : null;
+  async function openProfilePanel(profileId: string, panel: "saves" | "localization" | "diagnostics") {
+    await selectProfile(profileId);
+    setActivePage("mods");
+    setSecondaryPanel(panel);
+    if (panel === "localization") await scanLocalization();
+    if (panel === "diagnostics") await runDiagnostics();
+  }
   useEffect(() => {
     if (selectedMod) void loadSelectedModMedia();
   }, [selectedMod?.id, selectedMod?.iconUrl, selectedMod?.previewUrl, loadSelectedModMedia]);
@@ -443,6 +460,14 @@ function App() {
                   key={profile.id}
                   className={`profile-card ${profile.id === selectedProfileId ? "is-selected" : ""}`}
                   onClick={() => { void selectProfile(profile.id); }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setProfileContextMenu({
+                      profileId: profile.id,
+                      x: Math.min(event.clientX, window.innerWidth - 260),
+                      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 330)),
+                    });
+                  }}
                 >
                   <span className="profile-card-icon"><FolderOpen size={19} /></span>
                   <span className="profile-card-copy">
@@ -491,6 +516,14 @@ function App() {
                   key={profile.id}
                   className={`profile-item ${profile.id === selectedProfileId ? "is-selected" : ""}`}
                   onClick={() => { void selectProfile(profile.id); }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setProfileContextMenu({
+                      profileId: profile.id,
+                      x: Math.min(event.clientX, window.innerWidth - 260),
+                      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 330)),
+                    });
+                  }}
                 >
                   <span className="profile-icon"><FolderOpen size={15} /></span>
                   <span className="profile-copy">
@@ -806,6 +839,41 @@ function App() {
           )}
         </aside>
       </main>
+      )}
+      {profileContextMenu && contextProfile && (
+        <div
+          className="mod-context-menu profile-context-menu"
+          style={{ left: profileContextMenu.x, top: profileContextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="context-menu-title">{contextProfile.name}</div>
+          <button onClick={() => { void selectProfile(contextProfile.id); setProfileContextMenu(null); }}>
+            <Check size={14} />{text.profileSwitch}
+          </button>
+          <button onClick={() => { void selectProfile(contextProfile.id); setActivePage("profiles"); setProfileContextMenu(null); }}>
+            <FolderOpen size={14} />{text.profileOpenManager}
+          </button>
+          <button onClick={() => { void selectProfile(contextProfile.id); setActivePage("mods"); setProfileContextMenu(null); }}>
+            <LayoutGrid size={14} />{text.profileOpenMods}
+          </button>
+          <div className="context-menu-group">
+            <button onClick={() => { void openProfilePanel(contextProfile.id, "saves"); setProfileContextMenu(null); }}>
+              <FolderOpen size={14} />{text.profileOpenSaves}
+            </button>
+            <button onClick={() => { void openProfilePanel(contextProfile.id, "localization"); setProfileContextMenu(null); }}>
+              <Languages size={14} />{text.profileOpenLocalization}
+            </button>
+            <button onClick={() => { void openProfilePanel(contextProfile.id, "diagnostics"); setProfileContextMenu(null); }}>
+              <Wrench size={14} />{text.profileOpenDiagnostics}
+            </button>
+          </div>
+          <button
+            disabled={!contextProfile.folder}
+            onClick={() => { void openProfileLocation(contextProfile.id); setProfileContextMenu(null); }}
+          >
+            <ExternalLink size={14} />{text.profileOpenFolder}
+          </button>
+        </div>
       )}
       {directoryOpen && <ModDirectoryDialog onClose={() => setDirectoryOpen(false)} />}
     </div>

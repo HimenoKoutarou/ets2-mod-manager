@@ -4555,6 +4555,37 @@ fn mod_open_location(
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn profile_open_location(
+    profile_id: String,
+    state: State<'_, BackendState>,
+) -> Result<(), String> {
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    let profile = find_profile(&backend.paths, &profile_id).ok_or("Profile not found.")?;
+    let target = PathBuf::from(&profile.folder);
+    if !target.is_dir() {
+        return Err("Profile directory does not exist.".into());
+    }
+    #[cfg(windows)]
+    {
+        let mut command = std::process::Command::new("explorer.exe");
+        command.arg(&target);
+        hide_child_process(&mut command);
+        command
+            .status()
+            .map_err(|error| format!("open Profile directory failed: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        Err("Opening Profile directories is only supported on Windows.".into())
+    }
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn preset_list(
     profile_id: String,
     state: State<'_, BackendState>,
@@ -5624,6 +5655,7 @@ pub fn run() {
             mod_set_enabled,
             mod_move,
             mod_open_location,
+            profile_open_location,
             preset_list,
             preset_save,
             preset_load,
