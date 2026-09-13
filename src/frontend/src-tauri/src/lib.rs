@@ -21,7 +21,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, State};
@@ -1305,6 +1306,44 @@ fn hide_child_process(command: &mut std::process::Command) {
     }
 }
 
+const EXTRACTOR_TIMEOUT: Duration = Duration::from_secs(12);
+
+fn wait_child_output_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(_) => return child.wait_with_output().ok(),
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
+fn wait_child_success_with_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Option<bool> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) => return Some(status.success()),
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+}
+
 fn read_zip_entry_bytes(path: &Path, wanted: &str) -> Option<Vec<u8>> {
     let file = fs::File::open(path).ok()?;
     let mut archive = ZipArchive::new(file).ok()?;
@@ -1497,12 +1536,14 @@ fn external_archive_image(path: &Path, mod_id: &str) -> Option<String> {
     let extractor = extractor_path()?;
     let mut list_command = std::process::Command::new(&extractor);
     hide_child_process(&mut list_command);
-    let output = list_command
+    list_command
         .arg(path)
         .arg("--deep")
         .arg("--list")
-        .output()
-        .ok()?;
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let list_child = list_command.spawn().ok()?;
+    let output = wait_child_output_with_timeout(list_child, EXTRACTOR_TIMEOUT)?;
     if !output.status.success() {
         return None;
     }
@@ -1576,17 +1617,21 @@ fn external_archive_image(path: &Path, mod_id: &str) -> Option<String> {
         .join(",");
     let mut extract_command = std::process::Command::new(&extractor);
     hide_child_process(&mut extract_command);
-    let status = extract_command
+    extract_command
         .arg(path)
         .arg("--deep")
         .arg(format!("--partial={partial}"))
         .arg("-d")
         .arg(&temp)
         .arg("-s")
-        .status()
-        .ok();
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let status = extract_command
+        .spawn()
+        .ok()
+        .and_then(|child| wait_child_success_with_timeout(child, EXTRACTOR_TIMEOUT));
     let mut result = None;
-    if status.is_some_and(|value| value.success()) {
+    if status.is_some_and(|value| value) {
         let mut stack = vec![temp.clone()];
         while let Some(current) = stack.pop() {
             let Ok(entries) = fs::read_dir(&current) else {
