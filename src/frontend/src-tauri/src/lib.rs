@@ -1290,6 +1290,12 @@ fn hide_child_process(command: &mut std::process::Command) {
 }
 
 fn read_zip_entry_bytes(path: &Path, wanted: &str) -> Option<Vec<u8>> {
+    // Never probe non-ZIP SCS/HashFS packages with `ZipArchive::new`.
+    // HashFS packages can be several gigabytes and ZIP's central-directory
+    // search would otherwise scan the tail of the whole file during startup.
+    if !is_zip_archive(path) {
+        return None;
+    }
     let file = fs::File::open(path).ok()?;
     let mut archive = ZipArchive::new(file).ok()?;
     let wanted = wanted
@@ -1558,8 +1564,11 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
             let path = Path::new(&row.path);
             // Read only the ZIP manifest entry, not the entire archive.
             let manifest = if path.is_file() {
-                read_zip_entry_text(path, "manifest.sii")
-                    .or_else(|| external_archive_manifest(path))
+                if is_zip_archive(path) {
+                    read_zip_entry_text(path, "manifest.sii")
+                } else {
+                    external_archive_manifest(path)
+                }
             } else {
                 fs::read_to_string(path.join("manifest.sii")).ok()
             };
@@ -4308,6 +4317,19 @@ mod tests {
         encoded[52..56].copy_from_slice(&(plain.len() as u32 + 1).to_le_bytes());
         let error = decode_scsc_or_plain(&encoded).expect_err("size mismatch");
         assert!(error.contains("size mismatch"));
+    }
+
+    #[test]
+    fn non_zip_scs_is_rejected_before_zip_probe() {
+        let path = std::env::temp_dir().join(format!(
+            "ets2modmanager-hashfs-{}-{}.scs",
+            now_ms(),
+            std::process::id()
+        ));
+        fs::write(&path, b"SCS#\x01\0\0\0").expect("write hashfs header");
+        assert!(!is_zip_archive(&path));
+        assert!(read_zip_entry_bytes(&path, "manifest.sii").is_none());
+        let _ = fs::remove_file(path);
     }
 
     #[test]
