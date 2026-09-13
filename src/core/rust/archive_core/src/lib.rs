@@ -63,7 +63,7 @@ pub fn parse_manifest(text: &str) -> Manifest {
             continue;
         };
         let key = key.trim();
-        let value = raw.trim().trim_end_matches(',').trim();
+        let value = strip_inline_comment(raw).trim().trim_end_matches(',').trim();
         if key == "mod_package" {
             if manifest.package_name.is_empty() {
                 if let Some(name) = value.split_whitespace().next() {
@@ -92,6 +92,27 @@ pub fn parse_manifest(text: &str) -> Manifest {
         }
     }
     manifest
+}
+
+fn strip_inline_comment(value: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' && quoted {
+            escaped = true;
+            continue;
+        }
+        if character == '"' {
+            quoted = !quoted;
+        } else if character == '#' && !quoted {
+            return &value[..index];
+        }
+    }
+    value
 }
 
 fn is_placeholder_package_name(value: &str) -> bool {
@@ -234,5 +255,18 @@ mod tests {
             );
             assert_eq!(manifest.display_name, "Demo");
         }
+    }
+
+    #[test]
+    fn strips_manifest_comments_from_quoted_values() {
+        let manifest = parse_manifest(
+            "mod_package : .package_name {\n\
+             display_name: \"Project Russia\" # comment\n\
+             icon: \"project_russia.jpg\" # icon comment\n\
+             package_version: \"5.6.3a\"",
+        );
+        assert_eq!(manifest.display_name, "Project Russia");
+        assert_eq!(manifest.icon_filename, "project_russia.jpg");
+        assert_eq!(manifest.version, "5.6.3a");
     }
 }

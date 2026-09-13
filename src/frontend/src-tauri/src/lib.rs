@@ -2065,6 +2065,21 @@ fn metadata_needs_refresh(row: &ModDto) -> bool {
     if display.is_empty() || package.is_empty() {
         return true;
     }
+    if !is_workshop(row) {
+        let stem = Path::new(&row.path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let fallback = stem.replace('_', " ");
+        // Rows created before manifest fallback was available often still
+        // contain only the filename. Re-read those once so comments and icon
+        // fields from encrypted manifests can be persisted.
+        if !stem.is_empty()
+            && (display.eq_ignore_ascii_case(stem) || display.eq_ignore_ascii_case(&fallback))
+        {
+            return true;
+        }
+    }
     // Workshop rows discovered before title metadata was persisted can still
     // carry the numeric Workshop ID as their display name. Treat that as stale
     // while a human-readable title is available in the persistent cache.
