@@ -207,31 +207,6 @@ let saveSelectionRequest = 0;
 let localizationRequest = 0;
 const loadMedia = createMediaLoader(backend);
 
-async function hydrateMedia(mods: ModRecord[]): Promise<ModRecord[]> {
-  if (!mods.length || !backend.real) return mods;
-  const results = new Map<string, ModMedia>();
-  const chunks: ModRecord[][] = [];
-  for (let index = 0; index < mods.length; index += 8) chunks.push(mods.slice(index, index + 8));
-  // Media resolution persists its result in SQLite. Keep startup hydration
-  // sequential so batches cannot contend on the same write transaction and
-  // leave later rows without artwork. Each request is still batched to keep
-  // IPC overhead bounded.
-  for (const chunk of chunks) {
-    try {
-      const rows = await backend.loadModMedia(chunk);
-      rows.forEach((row) => results.set(row.modId, row));
-    } catch {
-      // Individual media failures must not block the Mod workspace.
-    }
-  }
-  return mods.map((mod) => {
-    const media = results.get(mod.id);
-    return media
-      ? { ...mod, iconUrl: media.iconUrl, previewUrl: media.previewUrl, mediaLoaded: true, mediaAttempts: 0 }
-      : mod;
-  });
-}
-
 interface PresetSnapshot {
   id: string;
   enabled: boolean;
@@ -517,26 +492,43 @@ export const useModStore = create<ModState>((set, get) => ({
       set({ profiles, selectedProfileId });
       // Load the persisted index first so the UI remains usable while the
       // incremental scanner checks additions/removals in the background.
+      // Keep SQLite reads serialized during startup. WAL makes concurrent
+      // readers safe, but each command also performs schema/import setup and
+      // can otherwise contend with the media/cache workers.
       const categoryState = await backend.listCategories();
-      const mods = applyCategories(selectedProfileId ? await backend.listMods(selectedProfileId) : [], categoryState);
-      const hydratedMods = await hydrateMedia(mods);
-      const saves = selectedProfileId ? await backend.listSaves(selectedProfileId) : [];
-      const presets = selectedProfileId ? await backend.listPresets(selectedProfileId) : [];
+      const rawMods = selectedProfileId ? await backend.listMods(selectedProfileId) : [];
+      const mods = applyCategories(rawMods, categoryState);
       set({
         selectedProfileId,
-        mods: hydratedMods,
+        mods,
         categoryState,
         selectedModIds: [],
-        saves,
+        saves: [],
         selectedSave: null,
         saveSnapshot: null,
-        selectedModId: hydratedMods[0]?.id ?? null,
-        presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, hydratedMods)])),
-        selectedPresetName: presets[0]?.name ?? "",
+        selectedModId: mods[0]?.id ?? null,
+        presets: {},
+        selectedPresetName: "",
         dirty: false,
         scanSummary: null,
       });
       set({ loading: false });
+      if (selectedProfileId) {
+        void (async () => {
+          try {
+            const saves = await backend.listSaves(selectedProfileId);
+            const presets = await backend.listPresets(selectedProfileId);
+            if (get().selectedProfileId !== selectedProfileId) return;
+            set({
+              saves,
+              presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, get().mods)])),
+              selectedPresetName: presets[0]?.name ?? "",
+            });
+          } catch {
+            // Optional startup data must not block the Mod workspace.
+          }
+        })();
+      }
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -557,26 +549,38 @@ export const useModStore = create<ModState>((set, get) => ({
     set({ selectedProfileId, loading: true, localizationScanning: false, error: "" });
     try {
       const categoryState = await backend.listCategories();
-      const mods = applyCategories(await backend.listMods(selectedProfileId), categoryState);
-      const hydratedMods = await hydrateMedia(mods);
-      const saves = await backend.listSaves(selectedProfileId);
-      const presets = await backend.listPresets(selectedProfileId);
+      const rawMods = await backend.listMods(selectedProfileId);
+      const mods = applyCategories(rawMods, categoryState);
       set({
-        mods: hydratedMods,
+        mods,
         categoryState,
         selectedModIds: [],
-        saves,
+        saves: [],
         selectedSave: null,
         saveSnapshot: null,
         secondaryPanel: "none",
         localization: null,
         diagnostics: null,
-        selectedModId: hydratedMods[0]?.id ?? null,
-        presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, hydratedMods)])),
-        selectedPresetName: presets[0]?.name ?? "",
+        selectedModId: mods[0]?.id ?? null,
+        presets: {},
+        selectedPresetName: "",
         dirty: false,
         scanWasCancelled: false,
       });
+      void (async () => {
+        try {
+          const saves = await backend.listSaves(selectedProfileId);
+          const presets = await backend.listPresets(selectedProfileId);
+          if (get().selectedProfileId !== selectedProfileId) return;
+          set({
+            saves,
+            presets: Object.fromEntries(presets.map((preset) => [preset.name, snapshotFromPreset(preset, get().mods)])),
+            selectedPresetName: presets[0]?.name ?? "",
+          });
+        } catch {
+          // Optional profile data must not block profile switching.
+        }
+      })();
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
