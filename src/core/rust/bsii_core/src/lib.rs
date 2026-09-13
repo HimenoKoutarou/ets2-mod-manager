@@ -256,6 +256,11 @@ pub fn parse_summary(bytes: &[u8]) -> Result<BsiiSummary, String> {
         let block = reader.u32()?;
         if block == 0 {
             let valid = reader.u8()? != 0;
+            // Invalid definition blocks contain only the validity marker.
+            // Do not consume an id/name/schema that is not present.
+            if !valid {
+                continue;
+            }
             let id = reader.u32()?;
             let _name = reader.string()?;
             let mut fields = Vec::new();
@@ -278,10 +283,8 @@ pub fn parse_summary(bytes: &[u8]) -> Result<BsiiSummary, String> {
             if id as usize >= definitions.len() {
                 definitions.resize(id as usize + 1, Vec::new());
             }
-            definitions[id as usize] = if valid { fields } else { Vec::new() };
-            if valid {
-                definition_count += 1;
-            }
+            definitions[id as usize] = fields;
+            definition_count += 1;
             continue;
         }
         let fields = definitions
@@ -315,6 +318,9 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
         let block = reader.u32()?;
         if block == 0 {
             let valid = reader.u8()? != 0;
+            if !valid {
+                continue;
+            }
             let id = reader.u32()?;
             let name = reader.string()?;
             let mut fields = Vec::new();
@@ -337,7 +343,7 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
             if id as usize >= definitions.len() {
                 definitions.resize(id as usize + 1, None);
             }
-            definitions[id as usize] = if valid { Some((name, fields)) } else { None };
+            definitions[id as usize] = Some((name, fields));
             continue;
         }
 
@@ -482,5 +488,29 @@ mod tests {
             &bytes[money.offset..money.offset + money.size],
             &1_253_729i64.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn skips_invalid_definition_blocks_without_cursor_drift() {
+        let mut bytes = b"BSII".to_vec();
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        // Invalid definitions are encoded as a block marker plus a false
+        // validity byte, followed immediately by the next block.
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        push_string(&mut bytes, "bank");
+        bytes.extend_from_slice(&0x31u32.to_le_bytes());
+        push_string(&mut bytes, "money_account");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        push_encoded_id(&mut bytes, &[1]);
+        bytes.extend_from_slice(&123i64.to_le_bytes());
+
+        let fields = find_numeric_fields(&bytes, &["money_account"]).expect("parse");
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].value, 123);
     }
 }
