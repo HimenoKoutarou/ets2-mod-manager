@@ -3135,7 +3135,7 @@ fn merge_localization_entries(
         for entry in entries {
             let merge_key = entry.key.to_ascii_lowercase();
             if let Some(index) = positions.get(&merge_key).copied() {
-                if result[index].value.is_empty() && !entry.value.is_empty() {
+                if !entry.value.is_empty() {
                     result[index] = entry;
                 }
             } else {
@@ -3235,7 +3235,11 @@ fn localization_scan_impl(
     let base_file = request
         .base_file
         .or_else(|| read_localization_base(&connection).ok().flatten());
-    let mut packages = Vec::new();
+    // Lowest to highest priority: game base/DLC, enabled mods in profile order,
+    // then the user base file. Later layers replace earlier values.
+    let mut packages = system_localization_packages(&paths);
+    let mut enabled_mods = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
+    packages.append(&mut enabled_mods);
     if let Some(path) = base_file.filter(|value| Path::new(value).is_file()) {
         packages.push(ModDto {
             id: "user-localization-base".into(),
@@ -3252,11 +3256,6 @@ fn localization_scan_impl(
             fingerprint: 0,
         });
     }
-    let mut enabled_mods = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
-    packages.append(&mut enabled_mods);
-    let mut system = system_localization_packages(&paths);
-    system.reverse();
-    packages.extend(system);
     let mut snapshots = Vec::new();
     let mut all_entries = Vec::new();
     let mut inspected = 0usize;
