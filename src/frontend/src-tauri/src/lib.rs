@@ -843,6 +843,11 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                scanned_at_ms INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS ix_mod_display_v2 ON mod_package_v2(display_name COLLATE NOCASE);
+             CREATE TABLE IF NOT EXISTS mod_metadata_state (
+               path TEXT PRIMARY KEY,
+               resolver_version INTEGER NOT NULL,
+               updated_at_ms INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS preset (
                profile_id TEXT NOT NULL,
                name TEXT NOT NULL,
@@ -1208,6 +1213,7 @@ fn read_directory_info_manifest(root: &Path) -> archive_core::Manifest {
 }
 
 const MAX_MEDIA_BYTES: u64 = 8 * 1024 * 1024;
+const METADATA_RESOLVER_VERSION: i64 = 1;
 // Bump when archive routing or manifest/icon extraction changes. This
 // invalidates old negative media cache rows once, then restores persistence.
 const MEDIA_RESOLVER_VERSION: i64 = 5;
@@ -2089,6 +2095,29 @@ fn metadata_needs_refresh(row: &ModDto) -> bool {
         && workshop_cached_title(&row.id).is_some()
 }
 
+fn load_metadata_state(connection: &Connection) -> Result<HashMap<String, i64>, String> {
+    let mut statement = connection
+        .prepare("SELECT path, resolver_version FROM mod_metadata_state")
+        .map_err(|e| format!("query metadata state failed: {e}"))?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(|e| format!("read metadata state failed: {e}"))?;
+    rows.map(|row| row.map_err(|e| format!("read metadata state row failed: {e}")))
+        .collect()
+}
+
+fn ensure_metadata_state_table(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS mod_metadata_state (
+               path TEXT PRIMARY KEY,
+               resolver_version INTEGER NOT NULL,
+               updated_at_ms INTEGER NOT NULL
+             );",
+        )
+        .map_err(|e| format!("ensure metadata state table failed: {e}"))
+}
+
 fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSummary, String> {
     sync_index_with_progress(connection, incoming, &mut |_, _, _, _, _| {})
 }
@@ -2105,7 +2134,9 @@ where
     let _write_lock = acquire_db_write_lock();
     ensure_header_state_table(connection)?;
     ensure_mod_index_state_table(connection)?;
+    ensure_metadata_state_table(connection)?;
     let cached = load_cached(connection)?;
+    let metadata_state = load_metadata_state(connection)?;
     let old: HashMap<String, (i64, u64, u64)> = cached
         .iter()
         .map(|m| (m.path.clone(), (m.modified_ms, m.size, m.fingerprint)))
@@ -2125,6 +2156,11 @@ where
             params![path],
         )
         .map_err(|e| format!("remove stale header state failed: {e}"))?;
+        tx.execute(
+            "DELETE FROM mod_metadata_state WHERE path = ?1",
+            params![path],
+        )
+        .map_err(|e| format!("remove stale metadata state failed: {e}"))?;
     }
     for (index, mod_row) in incoming.iter().enumerate() {
         let changed = old
@@ -2136,7 +2172,9 @@ where
             })
             .unwrap_or(true);
         let previous = cached.iter().find(|row| row.path == mod_row.path);
-        if !changed && !previous.is_some_and(metadata_needs_refresh) {
+        let metadata_refresh_needed = previous.is_some_and(metadata_needs_refresh)
+            && metadata_state.get(&mod_row.path).copied() != Some(METADATA_RESOLVER_VERSION);
+        if !changed && !metadata_refresh_needed {
             progress(
                 "cached",
                 index + 1,
@@ -2226,6 +2264,14 @@ where
             ],
         )
         .map_err(|e| format!("write mod index failed: {e}"))?;
+        tx.execute(
+            "INSERT INTO mod_metadata_state(path, resolver_version, updated_at_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET resolver_version=excluded.resolver_version,
+               updated_at_ms=excluded.updated_at_ms",
+            params![mod_row.path, METADATA_RESOLVER_VERSION, now_ms()],
+        )
+        .map_err(|e| format!("write metadata state failed: {e}"))?;
         // Persist exactly the same shallow signature used by startup
         // comparison. Directory rows use the info-file aggregate returned by
         // `directory_info_signature`, so game assets do not invalidate them.
