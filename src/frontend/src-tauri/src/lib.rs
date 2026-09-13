@@ -536,6 +536,31 @@ fn workshop_cached_preview_url(workshop_id: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn workshop_log_title(workshop_id: &str, paths: &Paths) -> Option<String> {
+    if workshop_id.is_empty() || !workshop_id.chars().all(|value| value.is_ascii_digit()) {
+        return None;
+    }
+    let pattern = Regex::new(
+        r"(?m)Active workshop mod ID\s+(\d+)\s+\(name:\s*(.*?),\s+version:",
+    )
+    .ok()?;
+    for log_name in ["editor.log.txt", "game.log.txt"] {
+        let path = paths.game_root.join(log_name);
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        for captures in pattern.captures_iter(&text) {
+            if captures.get(1).is_some_and(|value| value.as_str() == workshop_id) {
+                let title = captures.get(2)?.as_str().trim();
+                if !title.is_empty() {
+                    return Some(title.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn profile_sii(folder: &Path) -> PathBuf {
     folder.join("profile.sii")
 }
@@ -1125,6 +1150,15 @@ fn manifest_for(path: &Path) -> (String, String, String, String, String) {
                 manifest = archive_core::parse_manifest(&text);
             }
         }
+        if manifest.package_name.is_empty()
+            && manifest.display_name.is_empty()
+            && manifest.author.is_empty()
+            && manifest.version.is_empty()
+        {
+            if let Some(text) = external_archive_manifest(path) {
+                manifest = archive_core::parse_manifest(&text);
+            }
+        }
     }
     (
         manifest.package_name,
@@ -1421,6 +1455,31 @@ fn extractor_path() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+fn sxc_path() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.extend(exe.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        roots.extend(current.ancestors().map(Path::to_path_buf));
+    }
+    roots
+        .into_iter()
+        .map(|root| root.join("assets/tools/sxc64.exe"))
+        .find(|path| path.is_file())
+}
+
+fn archive_kind(path: &Path) -> archive_core::ArchiveKind {
+    let Ok(mut file) = fs::File::open(path) else {
+        return archive_core::ArchiveKind::Unknown;
+    };
+    let mut header = [0u8; 4];
+    if file.read_exact(&mut header).is_err() {
+        return archive_core::ArchiveKind::Unknown;
+    }
+    archive_core::detect_kind(&header)
+}
+
 fn is_zip_archive(path: &Path) -> bool {
     let Ok(mut file) = fs::File::open(path) else {
         return false;
@@ -1454,24 +1513,48 @@ fn external_tool_path(path: &Path) -> PathBuf {
 }
 
 fn external_archive_manifest(path: &Path) -> Option<String> {
-    if !path.is_file() || is_zip_archive(path) {
+    if !path.is_file() {
         return None;
     }
-    let extractor = extractor_path()?;
     let temp = extractor_temp_directory(path, "manifest")?;
-    let mut command = std::process::Command::new(&extractor);
+    let kind = archive_kind(path);
+    let (tool, args): (PathBuf, Vec<String>) = match kind {
+        archive_core::ArchiveKind::HashFs => {
+            let extractor = extractor_path()?;
+            (
+                extractor,
+                vec![
+                    external_tool_path(path).to_string_lossy().into_owned(),
+                    "--deep".into(),
+                    "--partial=/manifest.sii".into(),
+                    "-d".into(),
+                    temp.to_string_lossy().into_owned(),
+                    "-s".into(),
+                ],
+            )
+        }
+        archive_core::ArchiveKind::Aem | archive_core::ArchiveKind::Zip => {
+            let sxc = sxc_path()?;
+            (
+                sxc,
+                vec![
+                    external_tool_path(path).to_string_lossy().into_owned(),
+                    "-o".into(),
+                    temp.to_string_lossy().into_owned(),
+                    "-f".into(),
+                    "/manifest.sii".into(),
+                    "-q".into(),
+                ],
+            )
+        }
+        archive_core::ArchiveKind::Unknown => return None,
+    };
+    let mut command = std::process::Command::new(&tool);
     hide_child_process(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let status = command
-        .arg(external_tool_path(path))
-        .arg("--partial=/manifest.sii")
-        .arg("-d")
-        .arg(&temp)
-        .arg("-s")
-        .status()
-        .ok();
+    let status = command.args(args).status().ok();
     let manifest = if status.is_some_and(|value| value.success()) {
-        fs::read_to_string(temp.join("manifest.sii")).ok()
+        find_extracted_entry(&temp, "manifest.sii").and_then(|path| fs::read_to_string(path).ok())
     } else {
         None
     };
@@ -1481,23 +1564,47 @@ fn external_archive_manifest(path: &Path) -> Option<String> {
 
 fn external_archive_image(path: &Path, icon_filename: &str) -> Option<String> {
     let icon = manifest_icon_path(icon_filename)?;
-    if !path.is_file() || is_zip_archive(path) || extractor_path().is_none() {
+    if !path.is_file() {
         return None;
     }
-    let extractor = extractor_path()?;
     let temp = extractor_temp_directory(path, "image")?;
     let partial = format!("/{icon}");
-    let mut command = std::process::Command::new(&extractor);
+    let kind = archive_kind(path);
+    let (tool, args): (PathBuf, Vec<String>) = match kind {
+        archive_core::ArchiveKind::HashFs => {
+            let extractor = extractor_path()?;
+            (
+                extractor,
+                vec![
+                    external_tool_path(path).to_string_lossy().into_owned(),
+                    "--deep".into(),
+                    format!("--partial={partial}"),
+                    "-d".into(),
+                    temp.to_string_lossy().into_owned(),
+                    "-s".into(),
+                ],
+            )
+        }
+        archive_core::ArchiveKind::Aem | archive_core::ArchiveKind::Zip => {
+            let sxc = sxc_path()?;
+            (
+                sxc,
+                vec![
+                    external_tool_path(path).to_string_lossy().into_owned(),
+                    "-o".into(),
+                    temp.to_string_lossy().into_owned(),
+                    "-f".into(),
+                    partial,
+                    "-q".into(),
+                ],
+            )
+        }
+        archive_core::ArchiveKind::Unknown => return None,
+    };
+    let mut command = std::process::Command::new(&tool);
     hide_child_process(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let status = command
-        .arg(external_tool_path(path))
-        .arg(format!("--partial={partial}"))
-        .arg("-d")
-        .arg(&temp)
-        .arg("-s")
-        .status()
-        .ok();
+    let status = command.args(args).status().ok();
     let mut result = None;
     if status.is_some_and(|value| value.success()) {
         let mut stack = vec![temp.clone()];
@@ -1535,6 +1642,27 @@ fn external_archive_image(path: &Path, icon_filename: &str) -> Option<String> {
     result
 }
 
+fn find_extracted_entry(root: &Path, wanted: &str) -> Option<PathBuf> {
+    let wanted = wanted.replace('\\', "/").trim_start_matches('/').to_ascii_lowercase();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(&current).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+            if relative.to_ascii_lowercase() == wanted
+                || relative.rsplit('/').next().is_some_and(|name| name == wanted)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
     let workshop_id = row.id.trim().trim_end_matches("_workshop").to_string();
     let cached_preview = if is_workshop(row) {
@@ -1564,11 +1692,12 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
             let path = Path::new(&row.path);
             // Read only the ZIP manifest entry, not the entire archive.
             let manifest = if path.is_file() {
-                if is_zip_archive(path) {
+                let inline = if is_zip_archive(path) {
                     read_zip_entry_text(path, "manifest.sii")
                 } else {
-                    external_archive_manifest(path)
-                }
+                    None
+                };
+                inline.or_else(|| external_archive_manifest(path))
             } else {
                 fs::read_to_string(path.join("manifest.sii")).ok()
             };
@@ -1891,13 +2020,15 @@ fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
 fn refresh_cached_workshop_titles(
     connection: &mut Connection,
     mods: &mut [ModDto],
+    paths: &Paths,
 ) -> Result<(), String> {
     let mut updates = Vec::new();
     for row in mods.iter_mut() {
         if !is_workshop(row) {
             continue;
         }
-        let Some(title) = workshop_cached_title(&row.id) else {
+        let title = workshop_log_title(&row.id, paths).or_else(|| workshop_cached_title(&row.id));
+        let Some(title) = title else {
             continue;
         };
         if title == row.display_name {
@@ -3603,7 +3734,7 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
         .map_err(|_| "backend lock poisoned".to_string())?;
     let mut db = open_db(&backend.database_path)?;
     let mut mods = dedupe_mods(load_cached(&db)?);
-    refresh_cached_workshop_titles(&mut db, &mut mods)?;
+    refresh_cached_workshop_titles(&mut db, &mut mods, &backend.paths)?;
     if let Some(profile) = find_profile(&backend.paths, &profile_id) {
         let active = active_for_profile(&profile)?;
         apply_enabled(&mut mods, &active);
