@@ -529,6 +529,18 @@ fn workshop_cached_title(workshop_id: &str) -> Option<String> {
         .filter(|value| !value.is_empty() && !value.chars().all(|c| c.is_ascii_digit()))
 }
 
+fn workshop_id_from_value(value: &str) -> Option<String> {
+    let raw = value.split('|').next()?.trim();
+    let suffix = raw.strip_prefix("mod_workshop_package.")?;
+    if suffix.chars().all(|c| c.is_ascii_digit()) {
+        return Some(suffix.to_string());
+    }
+    if suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+        return u64::from_str_radix(suffix, 16).ok().map(|id| id.to_string());
+    }
+    None
+}
+
 fn workshop_cached_preview_url(workshop_id: &str) -> Option<String> {
     workshop_cache_entries()
         .get(workshop_id)
@@ -1672,7 +1684,9 @@ fn find_extracted_entry(root: &Path, wanted: &str) -> Option<PathBuf> {
 }
 
 fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
-    let workshop_id = row.id.trim().trim_end_matches("_workshop").to_string();
+    let workshop_id = workshop_id_from_value(&row.package_name)
+        .or_else(|| workshop_id_from_value(&row.id))
+        .unwrap_or_else(|| row.id.trim().trim_end_matches("_workshop").to_string());
     let cached_preview = if is_workshop(row) {
         cached_workshop_preview_url(&workshop_id)
             .or_else(|| workshop_cached_preview_url(&workshop_id))
@@ -2035,7 +2049,11 @@ fn refresh_cached_workshop_titles(
         if !is_workshop(row) {
             continue;
         }
-        let title = workshop_log_title(&row.id, paths).or_else(|| workshop_cached_title(&row.id));
+        let workshop_id = workshop_id_from_value(&row.package_name)
+            .or_else(|| workshop_id_from_value(&row.id))
+            .unwrap_or_else(|| row.id.clone());
+        let title = workshop_log_title(&workshop_id, paths)
+            .or_else(|| workshop_cached_title(&workshop_id));
         let Some(title) = title else {
             continue;
         };
@@ -3823,12 +3841,27 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
             if let Some(row) = by_key.remove(&key) {
                 ordered.push(row);
             } else {
+                let workshop_path = workshop_id_from_value(&package)
+                    .and_then(|id| backend.paths.workshop_roots.iter()
+                        .map(|root| root.join(&id))
+                        .find(|path| path.is_dir()));
+                let display_name = workshop_id_from_value(&package)
+                    .and_then(|id| workshop_log_title(&id, &backend.paths))
+                    .or_else(|| workshop_cached_title(&package))
+                    .unwrap_or_else(|| package.clone());
                 ordered.push(ModDto {
                     id: package.clone(),
                     package_name: package.clone(),
-                    path: String::new(),
-                    package_type: "unknown".into(),
-                    display_name: package.clone(),
+                    path: workshop_path
+                        .as_deref()
+                        .map(normalize_path)
+                        .unwrap_or_default(),
+                    package_type: if workshop_path.is_some() {
+                        "workshop".into()
+                    } else {
+                        "unknown".into()
+                    },
+                    display_name,
                     author: String::new(),
                     version: String::new(),
                     size: 0,
