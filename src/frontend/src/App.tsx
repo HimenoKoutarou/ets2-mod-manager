@@ -4,6 +4,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowDown,
   ArrowDownToLine,
+  ArrowLeft,
   ArrowUp,
   ArrowUpToLine,
   Check,
@@ -107,7 +108,7 @@ function App() {
     error,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
-  const [activePage, setActivePage] = useState<"mods" | "profiles">("mods");
+  const [activePage, setActivePage] = useState<"mods" | "profiles" | "save">("mods");
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
@@ -302,6 +303,12 @@ function App() {
     updateSaveDraft(key, "");
   }
 
+  function openSaveEditor(saveSlot: typeof selectedSave) {
+    if (!saveSlot) return;
+    setActivePage("save");
+    void selectSave(saveSlot);
+  }
+
   if (windowLabel === "initializer") return <InitializerWindow />;
 
   return (
@@ -343,7 +350,84 @@ function App() {
         </div>
       </header>
 
-      {activePage === "profiles" ? (
+      {activePage === "save" ? (
+        <main className="save-editor-page">
+          <section className="save-editor-main">
+            <div className="page-heading">
+              <div>
+                <div className="panel-title">{text.saves}</div>
+                <div className="panel-subtitle">{selectedProfile.name} · {text.saveCount(saves.length)}</div>
+              </div>
+              <button className="button" onClick={() => setActivePage("profiles")}><ArrowLeft size={16} />{text.profilePage}</button>
+            </div>
+            <div className="save-editor-layout">
+              <section className="save-browser-panel">
+                <div className="section-heading"><span>{text.saves}</span><span className="section-count">{saves.length}</span></div>
+                {saves.length === 0 ? (
+                  <div className="detail-empty compact"><FolderOpen size={24} /><span>{text.noSaves}</span></div>
+                ) : (
+                  <div className="save-list">
+                    {saves.map((saveSlot) => (
+                      <button
+                        className={`save-item ${selectedSave?.slotId === saveSlot.slotId ? "is-selected" : ""} ${saveSlot.slotId.toLowerCase().startsWith("autosave") ? "is-autosave" : ""}`}
+                        key={saveSlot.slotId}
+                        onClick={() => openSaveEditor(saveSlot)}
+                      >
+                        <div className="save-item-icon"><FolderOpen size={15} /></div>
+                        <div className="save-item-copy">
+                          <strong>{saveSlot.displayName}</strong>
+                          <small>{saveSlot.slotId.toLowerCase().startsWith("autosave") ? text.autosave : text.saveUpdated} · {formatSaveDate(saveSlot.lastModifiedMs)}</small>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+              <section className="save-workbench-panel">
+                {selectedSave ? (
+                  <>
+                    <div className="save-workbench-heading">
+                      <div>
+                        <div className="panel-title">{selectedSave.displayName}</div>
+                        <div className="panel-subtitle">{selectedSave.folder}</div>
+                      </div>
+                      <span className={`source source-${selectedSave.profileLocation}`}>{selectedSave.profileLocation === "local" ? text.sourceLocal : text.readOnly}</span>
+                    </div>
+                    <div className="save-form">
+                      <div className="save-form-heading"><strong>{text.saveSnapshot}</strong><span>{saveSnapshot ? `${text.saveSnapshot} · v${saveSnapshot.version}` : text.scanning}</span></div>
+                      {saveSnapshot?.fields.length ? (
+                        <>
+                          {(["money_account", "experience_points"] as const).map((fieldName) => {
+                            const field = saveSnapshot.fields.find((entry) => entry.fieldName === fieldName);
+                            if (!field) return null;
+                            const minimum = fieldName === "money_account" ? Number.MIN_SAFE_INTEGER : 0;
+                            const maximum = fieldName === "money_account" ? Number.MAX_SAFE_INTEGER : 0xFFFF_FFFF;
+                            const draft = saveValues[fieldName];
+                            return (
+                              <div className="save-form-row" key={fieldName}>
+                                <div><strong>{fieldName === "money_account" ? text.money : text.experience}</strong><small>{field.value.toLocaleString()}</small></div>
+                                <input type="number" value={draft} onChange={(event) => updateSaveDraft(fieldName, event.target.value)} placeholder={String(field.value)} disabled={selectedSave.profileLocation !== "local" || loading} />
+                                <button className="button button-primary button-small" disabled={selectedSave.profileLocation !== "local" || loading || !isValidSaveDraft(draft, minimum, maximum)} onClick={() => submitSaveDraft(fieldName, fieldName === "money_account" ? "set_money" : "set_experience", minimum, maximum)}>{text.apply}</button>
+                              </div>
+                            );
+                          })}
+                          <div className="save-form-row">
+                            <div><strong>{text.level}</strong><small>{levelFromExperience(saveSnapshot.fields.find((entry) => entry.fieldName === "experience_points")?.value ?? 0).toLocaleString()}</small></div>
+                            <input type="number" min="1" max="200" value={saveValues.level} onChange={(event) => updateSaveDraft("level", event.target.value)} placeholder="1-200" disabled={selectedSave.profileLocation !== "local" || loading} />
+                            <button className="button button-primary button-small" disabled={selectedSave.profileLocation !== "local" || loading || !isValidSaveDraft(saveValues.level, 1, 200)} onClick={() => submitSaveDraft("level", "set_level", 1, 200)}>{text.apply}</button>
+                          </div>
+                        </>
+                      ) : <div className="detail-empty compact"><FolderOpen size={24} /><span>{selectedSave.profileLocation === "local" ? text.noneFound : text.saveReadOnly}</span></div>}
+                    </div>
+                  </>
+                ) : (
+                  <div className="detail-empty"><FolderOpen size={25} /><strong>{text.noSelection}</strong><span>{text.saveSelectHint}</span></div>
+                )}
+              </section>
+            </div>
+          </section>
+        </main>
+      ) : activePage === "profiles" ? (
         <main className="profile-page">
           <section className="profile-page-main">
             <div className="page-heading">
@@ -599,8 +683,8 @@ function App() {
                       role="button"
                       tabIndex={0}
                       aria-pressed={selectedSave?.slotId === save.slotId}
-                      onClick={() => { void selectSave(save); }}
-                      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void selectSave(save); } }}
+                      onClick={() => openSaveEditor(save)}
+                      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSaveEditor(save); } }}
                     >
                       <div className="save-item-icon"><FolderOpen size={15} /></div>
                       <div className="save-item-copy">
