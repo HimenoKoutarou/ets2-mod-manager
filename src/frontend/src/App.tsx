@@ -424,8 +424,8 @@ function App() {
           <div className="preset-row">
             <input className="preset-input" value={presetName} onChange={(event) => setPresetName(event.target.value)} placeholder={text.presetPlaceholder} />
             <button className="button button-small" disabled={!presetName.trim() || selectedProfile.writable === false} onClick={() => { void savePreset(presetName); setPresetName(""); }}>{text.savePreset}</button>
-            <select className="preset-select" value={selectedPresetName} onChange={(event) => selectPreset(event.target.value)} aria-label={text.loadPreset} disabled={!selectedProfile.writable}>
-              <option value="">{text.loadPreset}</option>
+            <select className="preset-select" value={selectedPresetName} onChange={(event) => selectPreset(event.target.value)} aria-label={text.presetSelectPlaceholder} disabled={!selectedProfile.writable}>
+              <option value="">{text.presetSelectPlaceholder}</option>
               {Object.keys(presets).map((name) => <option value={name} key={name}>{name}</option>)}
             </select>
             <button className="button button-small" disabled={!selectedPresetName || !selectedProfile.writable} onClick={() => { void loadPreset(); }}>{text.loadPreset}</button>

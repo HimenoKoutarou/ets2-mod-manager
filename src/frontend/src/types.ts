@@ -69,6 +69,7 @@ export interface UiCopy {
   moveDown: string;
   moveBottom: string;
   presetPlaceholder: string;
+  presetSelectPlaceholder: string;
   savePreset: string;
   loadPreset: string;
   noSelection: string;
