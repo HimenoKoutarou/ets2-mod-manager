@@ -107,6 +107,7 @@ function App() {
     scanLocalization,
     loadLocalizationBase,
     pickLocalizationBase,
+    writeLocalizationBase,
     cancelLocalization,
     runDiagnostics,
     initialize,
@@ -130,6 +131,7 @@ function App() {
     experience_points: "",
     level: "",
   });
+  const [localizationDraft, setLocalizationDraft] = useState<Record<string, string>>({});
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => {
@@ -795,6 +797,10 @@ function App() {
               <button className="button button-small panel-action" onClick={() => { void (localizationScanning ? cancelLocalization() : scanLocalization()); }} disabled={scanning}>
                 {localizationScanning ? text.cancelScan : text.scan}
               </button>
+              <button className="button button-small panel-action" disabled={!localizationBase || !localization?.entries.length || localizationScanning} onClick={() => {
+                if (!localization) return;
+                void writeLocalizationBase(localization.entries.map((entry) => ({ ...entry, value: localizationDraft[entry.key] ?? entry.value })));
+              }}>{text.apply}</button>
               <div className="localization-base-control">
                 <div className="detail-package" title={localizationBase ?? ""}>
                   {text.localizationBase}: {localizationBase ? localizationBase.split(/[\\/]/).pop() : text.noneFound}
@@ -807,7 +813,8 @@ function App() {
                 <div className="support-list">
                   {localization.entries.slice(0, 80).map((entry) => (
                     <div className="support-row" key={`${entry.packageName}:${entry.key}`}>
-                      <strong>{entry.key}</strong><span>{entry.value || "—"}</span>
+                      <strong>{entry.key}</strong>
+                      <input value={localizationDraft[entry.key] ?? entry.value} placeholder={entry.value || "—"} onChange={(event) => setLocalizationDraft((current) => ({ ...current, [entry.key]: event.target.value }))} />
                     </div>
                   ))}
                 </div>

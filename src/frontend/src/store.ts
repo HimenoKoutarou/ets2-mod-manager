@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
+import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
 import { ALL_CATEGORIES, batchEnabled, moveBatch, type BatchAction, type MoveDirection } from "./modBatch";
 import { getCopy } from "./i18n";
 import { createMediaLoader, mediaKey } from "./modMedia";
@@ -195,6 +195,7 @@ export const fixtureBackend: ModBackend = {
   cancelLocalization: async () => undefined,
   getLocalizationBase: async () => null,
   pickLocalizationBase: async () => null,
+  writeLocalizationBase: async () => undefined,
   saveProfile: async () => undefined,
   launchGame: async () => undefined,
   openModLocation: async () => undefined,
@@ -289,6 +290,7 @@ interface ModState {
   scanLocalization: () => Promise<void>;
   loadLocalizationBase: () => Promise<void>;
   pickLocalizationBase: () => Promise<void>;
+  writeLocalizationBase: (entries: LocalizationEntry[]) => Promise<void>;
   cancelLocalization: () => Promise<void>;
   runDiagnostics: () => Promise<void>;
   selectSave: (slot: SaveSlot | null) => Promise<void>;
@@ -441,6 +443,16 @@ export const useModStore = create<ModState>((set, get) => ({
     try {
       const selected = await backend.pickLocalizationBase();
       if (selected !== null) set({ localizationBase: selected });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+  writeLocalizationBase: async (entries) => {
+    const base = get().localizationBase;
+    if (!base) { set({ error: "请先选择汉化基底文件。" }); return; }
+    try {
+      await backend.writeLocalizationBase(base, entries);
+      set({ error: "" });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     }

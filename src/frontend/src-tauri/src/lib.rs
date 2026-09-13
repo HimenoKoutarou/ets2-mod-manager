@@ -227,6 +227,13 @@ struct LocalizationScanRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LocalizationWriteRequest {
+    base_file: String,
+    entries: Vec<LocalizationEntryDto>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CrashPrecheckRequest {
     profile_id: String,
 }
@@ -3377,6 +3384,38 @@ fn localization_base_pick(state: State<'_, BackendState>) -> Result<Option<Strin
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn localization_write_base(request: LocalizationWriteRequest) -> Result<(), String> {
+    let path = PathBuf::from(&request.base_file);
+    let extension = path.extension().and_then(|v| v.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if extension != "sii" && extension != "sui" {
+        return Err("当前仅支持将文本 .sii/.sui 基底文件直接写回；请先选择文本基底文件。".into());
+    }
+    let original = fs::read_to_string(&path).map_err(|e| format!("read localization base failed: {e}"))?;
+    let mut output = original.clone();
+    for entry in request.entries {
+        let value = escape_sii(&entry.value);
+        let pattern = Regex::new(&format!(
+            r#"(?m)(\b{}\s*:\s*")((?:\\.|[^"\\])*)(")"#,
+            regex::escape(&entry.locale_key)
+        )).map_err(|e| format!("build localization replacement failed: {e}"))?;
+        if pattern.is_match(&output) {
+            output = pattern.replace_all(&output, |caps: &regex::Captures| {
+                format!("{}{}{}", &caps[1], value, &caps[3])
+            }).into_owned();
+        } else {
+            output.push_str(&format!("\n{}: \"{}\"\n", entry.locale_key, value));
+        }
+    }
+    let temp = path.with_extension("ets2mm.tmp");
+    fs::write(&temp, output.as_bytes()).map_err(|e| format!("write localization base failed: {e}"))?;
+    fs::rename(&temp, &path).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        format!("replace localization base failed: {e}")
+    })?;
+    Ok(())
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 async fn localization_scan(
     request: LocalizationScanRequest,
     state: State<'_, BackendState>,
@@ -5792,6 +5831,7 @@ pub fn run() {
             save_list_local,
             game_launch,
             localization_scan,
+            localization_write_base,
             localization_cancel,
             localization_base_get,
             localization_base_pick,
