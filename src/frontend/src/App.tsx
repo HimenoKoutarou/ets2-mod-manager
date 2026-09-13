@@ -798,16 +798,16 @@ function App() {
                 <Sparkles size={18} />
               </div>
               <button className="button button-primary panel-action" onClick={() => { void (localizationScanning ? cancelLocalization() : scanLocalization()); }} disabled={scanning || (!localizationScanning && !localizationBase)}>
-                <Sparkles size={14} />{localizationScanning ? text.cancelScan : text.startLocalization}
+                <Sparkles size={14} />{localizationScanning ? text.cancelScan : text.scanLocalization}
               </button>
               <div className={`localization-progress ${localizationScanning ? "is-active" : ""}`}>
                 <div className="localization-progress-track"><span /></div>
-                <span>{localizationScanning ? text.scanning : localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
+                <span>{localizationScanning ? `${text.scanning} · ${text.scanLocalization}` : localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
               </div>
               <button className="button button-small panel-action" disabled={!localizationBase || !localization?.entries.length || localizationScanning} onClick={() => {
                 if (!localization) return;
                 void writeLocalizationBase(localization.entries.map((entry) => ({ ...entry, value: localizationDraft[entry.key] ?? entry.value })));
-              }}>{text.apply}</button>
+              }}>{text.startLocalization}</button>
               <div className="localization-base-control">
                 <div className="detail-package" title={localizationBase ?? ""}>
                   {text.localizationBase}: {localizationBase ? localizationBase.split(/[\\/]/).pop() : text.noneFound}
