@@ -1468,6 +1468,157 @@ fn cached_workshop_preview_url(mod_id: &str) -> Option<String> {
     None
 }
 
+fn workshop_preview_failure_marker(mod_id: &str) -> Option<PathBuf> {
+    Some(cache_directory()?.join("workshop_previews").join(format!("{mod_id}.failed")))
+}
+
+fn workshop_preview_download_suppressed(mod_id: &str) -> bool {
+    let Some(marker) = workshop_preview_failure_marker(mod_id) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(marker) else {
+        return false;
+    };
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.elapsed().ok())
+        .map(|elapsed| elapsed.as_secs() < 24 * 60 * 60)
+        .unwrap_or(false)
+}
+
+fn mark_workshop_preview_failure(mod_id: &str) {
+    let Some(marker) = workshop_preview_failure_marker(mod_id) else {
+        return;
+    };
+    if let Some(parent) = marker.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(marker, now_ms().to_string());
+}
+
+fn clear_workshop_preview_failure(mod_id: &str) {
+    if let Some(marker) = workshop_preview_failure_marker(mod_id) {
+        let _ = fs::remove_file(marker);
+    }
+}
+
+fn download_workshop_preview(mod_id: &str) -> Option<String> {
+    if mod_id.is_empty()
+        || !mod_id.chars().all(|value| value.is_ascii_digit())
+        || workshop_preview_download_suppressed(mod_id)
+    {
+        return None;
+    }
+    if let Some(cached) = cached_workshop_preview_url(mod_id) {
+        return Some(cached);
+    }
+    let directory = media_cache_directory()?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("ETS2ModManager/1.0")
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .ok()?;
+    let response = client
+        .post("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/")
+        .form(&[("itemcount", "1"), ("publishedfileids[0]", mod_id)])
+        .send()
+        .ok()?;
+    if !response.status().is_success() {
+        mark_workshop_preview_failure(mod_id);
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_str(&response.text().ok()?).ok()?;
+    let api_preview_url = payload
+        .get("response")
+        .and_then(|value| value.get("publishedfiledetails"))
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("preview_url"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let preview_url = if let Some(value) = api_preview_url {
+        value
+    } else {
+        // Some Workshop items return result=9 from the API while the public
+        // Workshop page still exposes its og:image preview. Keep this as a
+        // fallback for legacy/package IDs that Steam no longer indexes.
+        let page = client
+            .get(format!(
+                "https://steamcommunity.com/sharedfiles/filedetails/?id={mod_id}"
+            ))
+            .send()
+            .ok()
+            .and_then(|value| value.text().ok());
+        let Some(page) = page else {
+            mark_workshop_preview_failure(mod_id);
+            return None;
+        };
+        let pattern = Regex::new(
+            r#"(?is)<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']"#,
+        )
+        .ok();
+        let Some(value) = pattern
+            .and_then(|regex| regex.captures(&page))
+            .and_then(|captures| captures.get(1))
+            .map(|value| value.as_str().trim().to_string())
+            .filter(|value| !value.is_empty())
+        else {
+            mark_workshop_preview_failure(mod_id);
+            return None;
+        };
+        value
+    };
+
+    let image = client.get(&preview_url).send().ok()?;
+    if !image.status().is_success() {
+        mark_workshop_preview_failure(mod_id);
+        return None;
+    }
+    let content_type = image
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let extension = match content_type.as_str() {
+        "image/jpeg" => "jpg".to_string(),
+        "image/png" => "png".to_string(),
+        "image/webp" => "webp".to_string(),
+        "image/gif" => "gif".to_string(),
+        "image/bmp" => "bmp".to_string(),
+        _ => Path::new(&preview_url)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .filter(|value| ["jpg", "jpeg", "png", "webp", "gif", "bmp"].contains(&value.as_str()))
+            .unwrap_or_else(|| "jpg".to_string()),
+    };
+    let bytes = image.bytes().ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_MEDIA_BYTES {
+        mark_workshop_preview_failure(mod_id);
+        return None;
+    }
+    let target = directory.join(format!("{mod_id}.{extension}"));
+    let temporary = directory.join(format!("{mod_id}.{extension}.tmp-{}", std::process::id()));
+    if fs::write(&temporary, &bytes).is_err() {
+        mark_workshop_preview_failure(mod_id);
+        return None;
+    }
+    if fs::rename(&temporary, &target).is_err() {
+        let _ = fs::remove_file(&temporary);
+        mark_workshop_preview_failure(mod_id);
+        return None;
+    }
+    clear_workshop_preview_failure(mod_id);
+    cached_workshop_preview_url(mod_id)
+}
+
 fn extractor_path() -> Option<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -1699,6 +1850,7 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
     let cached_preview = if is_workshop(row) {
         cached_workshop_preview_url(&workshop_id)
             .or_else(|| workshop_cached_preview_url(&workshop_id))
+            .or_else(|| download_workshop_preview(&workshop_id))
     } else {
         None
     };

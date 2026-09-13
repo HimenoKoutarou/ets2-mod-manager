@@ -26,6 +26,7 @@ bsii_core = { path = "../../core/rust/bsii_core" }
 getrandom = "0.3"
 zip = "2"
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
