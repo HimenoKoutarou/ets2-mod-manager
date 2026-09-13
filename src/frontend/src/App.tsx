@@ -114,7 +114,7 @@ function App() {
     error,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
-  const [activePage, setActivePage] = useState<"mods" | "profiles" | "save">("mods");
+  const [activePage, setActivePage] = useState<"mods" | "profiles" | "save" | "localization">("mods");
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
@@ -335,7 +335,7 @@ function App() {
   if (windowLabel === "initializer") return <InitializerWindow />;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${activePage === "localization" ? "localization-page" : ""}`}>
       <header className="app-header">
         <div className="brand-block">
           <div className="brand-mark"><Sparkles size={17} /></div>
@@ -350,6 +350,9 @@ function App() {
           </button>
           <button className={activePage === "profiles" ? "is-active" : ""} onClick={() => setActivePage("profiles")}>
             <FolderOpen size={15} />{text.profilePage}
+          </button>
+          <button className={activePage === "localization" ? "is-active" : ""} onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); void scanLocalization(); }}>
+            <Sparkles size={15} />{text.localization}
           </button>
         </nav>
         <div className="header-actions">
@@ -502,7 +505,7 @@ function App() {
                 <div className="section-heading"><span>{text.profileActions}</span></div>
                 <div className="profile-action-list">
                   <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("saves"); }}><FolderOpen size={15} />{text.saves}</button>
-                  <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("localization"); void scanLocalization(); }}><Sparkles size={15} />{text.localization}</button>
+                  <button className="button" onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); void scanLocalization(); }}><Sparkles size={15} />{text.localization}</button>
                   <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("diagnostics"); void runDiagnostics(); }}><LayoutGrid size={15} />{text.diagnostics}</button>
                 </div>
                 <div className="profile-stat-line"><span>{text.saves}</span><strong>{saves.length}</strong></div>
