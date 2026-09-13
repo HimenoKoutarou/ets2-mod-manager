@@ -1210,7 +1210,7 @@ fn read_directory_info_manifest(root: &Path) -> archive_core::Manifest {
 const MAX_MEDIA_BYTES: u64 = 8 * 1024 * 1024;
 // Bump when archive routing or manifest/icon extraction changes. This
 // invalidates old negative media cache rows once, then restores persistence.
-const MEDIA_RESOLVER_VERSION: i64 = 4;
+const MEDIA_RESOLVER_VERSION: i64 = 5;
 
 fn media_extension(path: &str) -> Option<&'static str> {
     let extension = Path::new(path)
