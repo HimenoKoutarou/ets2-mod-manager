@@ -541,6 +541,15 @@ fn workshop_id_from_value(value: &str) -> Option<String> {
     None
 }
 
+fn workshop_label_from_value(value: &str) -> Option<String> {
+    let label = value.split_once('|')?.1.trim();
+    if label.is_empty() || label.chars().all(|c| c.is_ascii_hexdigit()) {
+        None
+    } else {
+        Some(label.to_string())
+    }
+}
+
 fn workshop_cached_preview_url(workshop_id: &str) -> Option<String> {
     workshop_cache_entries()
         .get(workshop_id)
@@ -3839,6 +3848,16 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
                 .cloned()
                 .unwrap_or_else(|| canonical_package(&package));
             if let Some(row) = by_key.remove(&key) {
+                let mut row = row;
+                if let Some(label) = workshop_label_from_value(&package) {
+                    let current = row.display_name.trim();
+                    if current.is_empty()
+                        || current == row.id.trim()
+                        || current.chars().all(|value| value.is_ascii_digit())
+                    {
+                        row.display_name = label;
+                    }
+                }
                 ordered.push(row);
             } else {
                 let workshop_path = workshop_id_from_value(&package)
@@ -3848,6 +3867,7 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
                 let display_name = workshop_id_from_value(&package)
                     .and_then(|id| workshop_log_title(&id, &backend.paths))
                     .or_else(|| workshop_cached_title(&package))
+                    .or_else(|| workshop_label_from_value(&package))
                     .unwrap_or_else(|| package.clone());
                 ordered.push(ModDto {
                     id: package.clone(),
