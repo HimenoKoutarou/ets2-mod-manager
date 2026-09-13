@@ -2074,7 +2074,8 @@ fn metadata_needs_refresh(row: &ModDto) -> bool {
         // Rows created before manifest fallback was available often still
         // contain only the filename. Re-read those once so comments and icon
         // fields from encrypted manifests can be persisted.
-        if !stem.is_empty()
+        if Path::new(&row.path).is_file()
+            && !stem.is_empty()
             && (display.eq_ignore_ascii_case(stem) || display.eq_ignore_ascii_case(&fallback))
         {
             return true;
