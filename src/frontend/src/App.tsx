@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow, Window } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import {
   ArrowDown,
   ArrowDownToLine,
@@ -132,6 +133,15 @@ function App() {
     level: "",
   });
   const [localizationDraft, setLocalizationDraft] = useState<Record<string, string>>({});
+  const [localizationProgress, setLocalizationProgress] = useState<{ packageName: string; processed: number; total: number } | null>(null);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let stop: UnlistenFn | undefined;
+    void listen<{ packageName: string; processed: number; total: number }>("localization-progress", (event) => {
+      setLocalizationProgress(event.payload);
+    }).then((unlisten) => { stop = unlisten; });
+    return () => stop?.();
+  }, []);
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => {
@@ -802,7 +812,9 @@ function App() {
               </button>
               <div className={`localization-progress ${localizationScanning ? "is-active" : ""}`}>
                 <div className="localization-progress-track"><span /></div>
-                <span>{localizationScanning ? `${text.scanning} · ${text.scanLocalization}` : localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
+                <span>{localizationScanning
+                  ? `${text.scanning} · ${localizationProgress?.packageName ?? ""} (${localizationProgress?.processed ?? 0}/${localizationProgress?.total ?? 0})`
+                  : localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
               </div>
               <button className="button button-small panel-action" disabled={!localizationBase || !localization?.entries.length || localizationScanning} onClick={() => {
                 if (!localization) return;

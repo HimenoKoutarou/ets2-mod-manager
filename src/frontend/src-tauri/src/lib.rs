@@ -3210,6 +3210,7 @@ fn localization_scan_impl(
     paths: Paths,
     database_path: PathBuf,
     cancelled: Arc<AtomicBool>,
+    #[cfg(feature = "desktop")] app: Option<AppHandle>,
 ) -> Result<LocalizationScanDto, String> {
     let _directory_lock = mod_directory::read_lock(&paths.mod_root)?;
     let started = std::time::Instant::now();
@@ -3265,6 +3266,15 @@ fn localization_scan_impl(
             return Err("Localization scan cancelled.".into());
         }
         let fingerprint = package_fingerprint(Path::new(&package.path));
+        #[cfg(feature = "desktop")]
+        if let Some(app) = &app {
+            let _ = app.emit("localization-progress", serde_json::json!({
+                "packageName": package.display_name,
+                "path": package.path,
+                "processed": inspected + cached,
+                "total": packages.len()
+            }));
+        }
         if let Some(entries) =
             load_localization_snapshot(&connection, &package.path, &locale, &fingerprint)?
         {
@@ -3418,6 +3428,7 @@ fn localization_write_base(request: LocalizationWriteRequest) -> Result<(), Stri
 async fn localization_scan(
     request: LocalizationScanRequest,
     state: State<'_, BackendState>,
+    #[cfg(feature = "desktop")] app: AppHandle,
 ) -> Result<LocalizationScanDto, String> {
     let (paths, database_path, cancelled) = localization_scan_inputs(&state)?;
     cancelled.store(false, Ordering::Relaxed);
@@ -3425,7 +3436,7 @@ async fn localization_scan(
     #[cfg(feature = "desktop")]
     {
         return tauri::async_runtime::spawn_blocking(move || {
-            localization_scan_impl(request, paths, database_path, cancelled)
+            localization_scan_impl(request, paths, database_path, cancelled, Some(app))
         })
         .await
         .map_err(|error| format!("localization scan worker failed: {error}"))?;
