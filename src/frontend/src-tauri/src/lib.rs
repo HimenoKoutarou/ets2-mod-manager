@@ -2944,6 +2944,22 @@ fn scan_localization_package(
             cancelled,
         );
     }
+    if path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("sii") || value.eq_ignore_ascii_case("sui"))
+    {
+        let Ok(text) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let package_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+        let source_path = path.display().to_string();
+        return if is_definition_path(&source_path) {
+            parse_definition_text(&text, &source_path, package_name, &category_for_path(&source_path))
+        } else {
+            parse_localization_text(&text, &source_path, package_name, &category_for_path(&source_path))
+        };
+    }
     scan_localization_archive(path, locale, cancelled)
 }
 
