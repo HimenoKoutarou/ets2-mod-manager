@@ -1088,6 +1088,22 @@ fn backfill_mod_header_state(connection: &Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("backfill mod header state failed: {e}"))?;
+    // Repair rows written by older versions. Workshop packages are physical
+    // directories even though their logical package type is "workshop"; use
+    // the filesystem as the source of truth so they can hit the cache on the
+    // next startup instead of being re-read forever.
+    connection
+        .execute(
+            "UPDATE mod_package_header_state
+             SET is_directory=1
+             WHERE is_directory=0
+               AND path IN (
+                 SELECT path FROM mod_package_v2
+                 WHERE package_type IN ('directory','workshop')
+               )",
+            [],
+        )
+        .map_err(|e| format!("repair mod header state failed: {e}"))?;
     Ok(())
 }
 
@@ -1913,11 +1929,7 @@ fn refresh_cached_workshop_titles(
 fn metadata_needs_refresh(row: &ModDto) -> bool {
     let display = row.display_name.trim();
     let package = row.package_name.trim();
-    display.is_empty()
-        || display == row.id.trim()
-        || display.chars().all(|value| value.is_ascii_digit())
-        || package.is_empty()
-        || package.starts_with('.')
+    display.is_empty() || package.is_empty()
 }
 
 fn sync_index(connection: &mut Connection, incoming: &[ModDto]) -> Result<ScanSummary, String> {
@@ -2062,7 +2074,11 @@ where
         // `directory_info_signature`, so game assets do not invalidate them.
         let header_size = enriched.size;
         let header_modified_ms = enriched.modified_ms;
-        let header_is_directory = enriched.package_type == "directory";
+        // Workshop packages are directories too, but use the "workshop"
+        // package type. Persist the physical type rather than inferring it
+        // from the display classification, otherwise every Workshop item is
+        // treated as changed on the next startup.
+        let header_is_directory = Path::new(&enriched.path).is_dir();
         tx.execute(
             "INSERT INTO mod_package_header_state(path,size,modified_ms,is_directory)
              VALUES (?1,?2,?3,?4)
@@ -3828,6 +3844,46 @@ where
         .collect();
     let cached_by_path: HashMap<String, ModDto> =
         cached.into_iter().map(|m| (m.path.clone(), m)).collect();
+    let candidate_paths = candidates
+        .iter()
+        .map(|candidate| normalize_path(&candidate.path))
+        .collect::<HashSet<_>>();
+    let all_cached = candidate_paths.len() == cached_by_path.len()
+        && candidate_paths
+            .iter()
+            .all(|path| cached_by_path.contains_key(path))
+        && candidates.iter().all(|candidate| {
+            let path = normalize_path(&candidate.path);
+            headers
+                .get(&path)
+                .map(|(size, modified, is_dir)| {
+                    *size == candidate.size
+                        && *modified == candidate.modified_ms
+                        && *is_dir == candidate.is_directory
+                })
+                .unwrap_or(false)
+                && cached_by_path
+                    .get(&path)
+                    .map(|row| !metadata_needs_refresh(row))
+                    .unwrap_or(false)
+        });
+    if all_cached {
+        progress(
+            "cached",
+            candidates.len(),
+            candidates.len(),
+            "",
+            &database_path,
+        );
+        return Ok(ScanSummary {
+            total: candidates.len(),
+            added: 0,
+            updated: 0,
+            removed: 0,
+            inspected: 0,
+            elapsed_ms: 0,
+        });
+    }
     let mut discovered = Vec::with_capacity(candidates.len());
     let mut inspected = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
