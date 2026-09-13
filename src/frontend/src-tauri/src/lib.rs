@@ -2180,11 +2180,22 @@ fn load_cached(connection: &Connection) -> Result<Vec<ModDto>, String> {
         .map_err(|e| format!("query mod index failed: {e}"))?;
     let rows = statement
         .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let package_name: String = row.get(1)?;
             Ok(ModDto {
-                id: row.get(0)?,
-                package_name: row.get(1)?,
+                id: id.clone(),
+                package_name: package_name.clone(),
                 path: row.get(2)?,
-                package_type: row.get(3)?,
+                package_type: {
+                    let stored: String = row.get(3)?;
+                    if workshop_id_from_value(&package_name).is_some()
+                        || workshop_id_from_value(&id).is_some()
+                    {
+                        "workshop".into()
+                    } else {
+                        stored
+                    }
+                },
                 display_name: row.get(4)?,
                 author: row.get(5)?,
                 version: row.get(6)?,
@@ -4028,7 +4039,9 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
                         .as_deref()
                         .map(normalize_path)
                         .unwrap_or_default(),
-                    package_type: if workshop_path.is_some() {
+                    package_type: if workshop_path.is_some()
+                        || workshop_id_from_value(&package).is_some()
+                    {
                         "workshop".into()
                     } else {
                         "unknown".into()
@@ -4154,6 +4167,8 @@ where
 fn is_workshop(row: &ModDto) -> bool {
     row.package_type.eq_ignore_ascii_case("workshop")
         || row.path.to_ascii_lowercase().contains("workshop")
+        || workshop_id_from_value(&row.package_name).is_some()
+        || workshop_id_from_value(&row.id).is_some()
 }
 
 fn dedupe_mods(mods: Vec<ModDto>) -> Vec<ModDto> {
@@ -4161,9 +4176,12 @@ fn dedupe_mods(mods: Vec<ModDto>) -> Vec<ModDto> {
     for row in mods {
         let key = canonical_package(&row.package_name);
         match by_key.get(&key) {
-            Some(existing) if !is_workshop(existing) && is_workshop(&row) => {}
-            Some(existing) if is_workshop(existing) && !is_workshop(&row) => {
+            Some(existing) if !is_workshop(existing) && is_workshop(&row) => {
                 by_key.insert(key, row);
+            }
+            Some(existing) if is_workshop(existing) && !is_workshop(&row) => {
+                // Keep the Workshop record when a duplicate local filename
+                // happens to normalize to the same package key.
             }
             None => {
                 by_key.insert(key, row);
@@ -4740,6 +4758,26 @@ mod tests {
             profile_order_to_ui(&parse_active_mods(text)),
             ["low", "high"]
         );
+    }
+
+    #[test]
+    fn workshop_package_names_are_classified_as_workshop_without_local_path() {
+        let row = ModDto {
+            id: "mod_workshop_package.00000000B59F7017".into(),
+            package_name: "mod_workshop_package.00000000B59F7017|Real traffic lights".into(),
+            path: String::new(),
+            package_type: "unknown".into(),
+            display_name: "Real traffic lights".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 0,
+            modified_ms: 0,
+            enabled: true,
+            category: "unknown".into(),
+            fingerprint: 0,
+        };
+        assert!(is_workshop(&row));
+        assert_eq!(workshop_id_from_value(&row.package_name).as_deref(), Some("3047125015"));
     }
 
     #[test]
