@@ -463,7 +463,7 @@ function App() {
                       setContextMenu({
                         modId: mod.id,
                         x: Math.min(event.clientX, window.innerWidth - 250),
-                        y: Math.min(event.clientY, window.innerHeight - 300),
+                        y: Math.max(8, Math.min(event.clientY, window.innerHeight - 360)),
                       });
                     }}
                   >
