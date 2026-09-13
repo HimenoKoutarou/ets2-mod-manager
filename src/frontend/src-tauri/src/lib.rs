@@ -21,8 +21,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, OnceLock,
     },
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Emitter, State};
@@ -1306,44 +1305,6 @@ fn hide_child_process(command: &mut std::process::Command) {
     }
 }
 
-const EXTRACTOR_TIMEOUT: Duration = Duration::from_secs(12);
-
-fn wait_child_output_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Option<std::process::Output> {
-    let started = Instant::now();
-    loop {
-        match child.try_wait().ok()? {
-            Some(_) => return child.wait_with_output().ok(),
-            None if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            None => thread::sleep(Duration::from_millis(50)),
-        }
-    }
-}
-
-fn wait_child_success_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> Option<bool> {
-    let started = Instant::now();
-    loop {
-        match child.try_wait().ok()? {
-            Some(status) => return Some(status.success()),
-            None if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            None => thread::sleep(Duration::from_millis(50)),
-        }
-    }
-}
-
 fn read_zip_entry_bytes(path: &Path, wanted: &str) -> Option<Vec<u8>> {
     let file = fs::File::open(path).ok()?;
     let mut archive = ZipArchive::new(file).ok()?;
@@ -1529,81 +1490,80 @@ fn extractor_path() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn external_archive_image(path: &Path, mod_id: &str) -> Option<String> {
-    if !path.is_file() || extractor_path().is_none() {
+fn is_zip_archive(path: &Path) -> bool {
+    fs::File::open(path)
+        .ok()
+        .and_then(|file| ZipArchive::new(file).ok())
+        .is_some()
+}
+
+fn extractor_temp_directory(path: &Path, suffix: &str) -> Option<PathBuf> {
+    let mut hasher = Sha1::new();
+    hasher.update(normalize_path(path).as_bytes());
+    hasher.update(suffix.as_bytes());
+    let key = format!("{:x}", hasher.finalize());
+    let temp = std::env::temp_dir().join(format!("ets2mm-preview-{}-{key}", std::process::id()));
+    fs::create_dir_all(&temp).ok()?;
+    Some(temp)
+}
+
+fn external_archive_manifest(path: &Path) -> Option<String> {
+    if !path.is_file() || is_zip_archive(path) {
         return None;
     }
     let extractor = extractor_path()?;
-    let mut list_command = std::process::Command::new(&extractor);
-    hide_child_process(&mut list_command);
-    list_command
+    let temp = extractor_temp_directory(path, "manifest")?;
+    let mut command = std::process::Command::new(&extractor);
+    hide_child_process(&mut command);
+    let status = command
         .arg(path)
-        .arg("--deep")
-        .arg("--list")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let list_child = list_command.spawn().ok()?;
-    let output = wait_child_output_with_timeout(list_child, EXTRACTOR_TIMEOUT)?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut names = Vec::new();
-    for line in text.lines() {
-        let name = line
-            .split_whitespace()
-            .find(|value| {
-                let lower = value.to_ascii_lowercase();
-                lower.ends_with(".jpg")
-                    || lower.ends_with(".jpeg")
-                    || lower.ends_with(".png")
-                    || lower.ends_with(".webp")
-                    || lower.ends_with(".gif")
-                    || lower.ends_with(".bmp")
-            })
-            .unwrap_or_default()
-            .trim_matches(|value| value == '"' || value == '\'')
-            .replace('\\', "/");
-        let lower = name.to_ascii_lowercase();
-        if !lower.ends_with(".jpg")
-            && !lower.ends_with(".jpeg")
-            && !lower.ends_with(".png")
-            && !lower.ends_with(".webp")
-            && !lower.ends_with(".gif")
-            && !lower.ends_with(".bmp")
-        {
-            continue;
-        }
-        if !names.iter().any(|value| value == &name) {
-            names.push(name);
-        }
-    }
-    let priority = ["icon", "preview", "thumb", "cover", "logo", "banner"];
-    names.sort_by_key(|name| {
-        (
-            if priority
-                .iter()
-                .any(|part| name.to_ascii_lowercase().contains(part))
-            {
-                0
-            } else {
-                1
-            },
-            name.len(),
-            name.to_ascii_lowercase(),
-        )
-    });
-    names.truncate(24);
-    if names.is_empty() {
-        return None;
-    }
-    let mut temp_hasher = Sha1::new();
-    temp_hasher.update(normalize_path(path).as_bytes());
-    let temp_key = format!("{:x}", temp_hasher.finalize());
-    let temp =
-        std::env::temp_dir().join(format!("ets2mm-preview-{}-{temp_key}", std::process::id()));
+        .arg("--partial=/manifest.sii")
+        .arg("-d")
+        .arg(&temp)
+        .arg("-s")
+        .status()
+        .ok();
+    let manifest = if status.is_some_and(|value| value.success()) {
+        fs::read_to_string(temp.join("manifest.sii")).ok()
+    } else {
+        None
+    };
     let _ = fs::remove_dir_all(&temp);
-    fs::create_dir_all(&temp).ok()?;
+    manifest
+}
+
+fn external_archive_image(path: &Path, icon_filename: &str) -> Option<String> {
+    if !path.is_file() || is_zip_archive(path) || extractor_path().is_none() {
+        return None;
+    }
+    let extractor = extractor_path()?;
+    let mut names = Vec::new();
+    if !icon_filename.trim().is_empty() {
+        names.push(icon_filename.replace('\\', "/"));
+    }
+    names.extend(
+        [
+            "mod_icon.jpg",
+            "icon.jpg",
+            "preview.jpg",
+            "thumbnail.jpg",
+            "mod_icon.png",
+            "icon.png",
+            "preview.png",
+            "thumbnail.png",
+            "cover.jpg",
+            "cover.png",
+            "logo.jpg",
+            "logo.png",
+            "banner.jpg",
+            "banner.png",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    names.sort();
+    names.dedup();
+    let temp = extractor_temp_directory(path, "image")?;
     let partial = names
         .iter()
         .map(|name| {
@@ -1615,23 +1575,18 @@ fn external_archive_image(path: &Path, mod_id: &str) -> Option<String> {
         })
         .collect::<Vec<_>>()
         .join(",");
-    let mut extract_command = std::process::Command::new(&extractor);
-    hide_child_process(&mut extract_command);
-    extract_command
+    let mut command = std::process::Command::new(&extractor);
+    hide_child_process(&mut command);
+    let status = command
         .arg(path)
-        .arg("--deep")
         .arg(format!("--partial={partial}"))
         .arg("-d")
         .arg(&temp)
         .arg("-s")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let status = extract_command
-        .spawn()
-        .ok()
-        .and_then(|child| wait_child_success_with_timeout(child, EXTRACTOR_TIMEOUT));
+        .status()
+        .ok();
     let mut result = None;
-    if status.is_some_and(|value| value) {
+    if status.is_some_and(|value| value.success()) {
         let mut stack = vec![temp.clone()];
         while let Some(current) = stack.pop() {
             let Ok(entries) = fs::read_dir(&current) else {
@@ -1664,7 +1619,6 @@ fn external_archive_image(path: &Path, mod_id: &str) -> Option<String> {
         }
     }
     let _ = fs::remove_dir_all(&temp);
-    let _ = mod_id;
     result
 }
 
@@ -1704,6 +1658,7 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
             // Read only the ZIP manifest entry, not the entire archive.
             let manifest = if path.is_file() {
                 read_zip_entry_text(path, "manifest.sii")
+                    .or_else(|| external_archive_manifest(path))
             } else {
                 fs::read_to_string(path.join("manifest.sii")).ok()
             };
@@ -1711,7 +1666,7 @@ fn resolve_mod_media(row: &ModDto) -> ModMediaDto {
                 .map(|text| archive_core::parse_manifest(&text).icon_filename)
                 .unwrap_or_default();
             package_media_url(path, &row.id, &icon_filename)
-                .or_else(|| external_archive_image(path, &row.id))
+                .or_else(|| external_archive_image(path, &icon_filename))
         });
         ModMediaDto {
             mod_id: row.id.clone(),
