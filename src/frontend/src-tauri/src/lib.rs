@@ -3350,7 +3350,12 @@ fn localization_base_get(state: State<'_, BackendState>) -> Result<Option<String
 fn localization_base_pick(state: State<'_, BackendState>) -> Result<Option<String>, String> {
     #[cfg(windows)]
     {
+        let default_directory = {
+            let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+            backend.paths.mod_root.clone()
+        };
         let Some(path) = rfd::FileDialog::new()
+            .set_directory(&default_directory)
             .add_filter("Localization files", &["scs", "zip", "sii", "sui"])
             .pick_file() else { return Ok(None); };
         let value = normalize_path(&path);
