@@ -1120,8 +1120,10 @@ fn manifest_for(path: &Path) -> (String, String, String, String, String) {
         && manifest.version.is_empty()
         && path.is_file()
     {
-        if let Some(text) = read_zip_entry_text(path, "manifest.sii") {
-            manifest = archive_core::parse_manifest(&text);
+        if is_zip_archive(path) {
+            if let Some(text) = read_zip_entry_text(path, "manifest.sii") {
+                manifest = archive_core::parse_manifest(&text);
+            }
         }
     }
     (
@@ -1414,10 +1416,14 @@ fn extractor_path() -> Option<PathBuf> {
 }
 
 fn is_zip_archive(path: &Path) -> bool {
-    fs::File::open(path)
-        .ok()
-        .and_then(|file| ZipArchive::new(file).ok())
-        .is_some()
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 4];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    matches!(&header, b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08")
 }
 
 fn extractor_temp_directory(path: &Path, suffix: &str) -> Option<PathBuf> {
