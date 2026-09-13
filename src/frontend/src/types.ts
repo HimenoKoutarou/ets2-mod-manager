@@ -1,5 +1,6 @@
 export type Language = "zh_CN" | "en_US" | "ru_RU";
 export type ModView = "all" | "active";
+export type SearchMode = "fuzzy" | "exact";
 
 export interface ModRecord {
   id: string;
@@ -58,6 +59,8 @@ export interface UiCopy {
   allMods: string;
   activeMods: string;
   searchPlaceholder: string;
+  searchFuzzy: string;
+  searchExact: string;
   enableAll: string;
   disableAll: string;
   invert: string;

@@ -75,6 +75,7 @@ button { color: inherit; }
 .search-box { min-width: 300px; display: flex; align-items: center; gap: 8px; padding: 0 10px; height: 34px; border: 1px solid #d9e2ef; border-radius: 5px; background: #ffffff; color: #98a2b3; }
 .search-box:focus-within { border-color: #2563eb; box-shadow: 0 0 0 2px #dbeafe; }
 .search-box input { width: 100%; border: 0; outline: 0; background: transparent; color: #172033; font-size: 12px; }
+.search-box select { border: 0; border-left: 1px solid #e2e8f0; outline: 0; background: transparent; color: #475569; font-size: 11px; padding: 0 2px 0 8px; cursor: pointer; }
 .search-box input::placeholder, .preset-input::placeholder { color: #98a2b3; }
 .priority-row { gap: 5px; margin-top: 11px; min-height: 44px; padding: 7px 8px; border: 1px solid #d9e2ef; background: #f8fafc; }
 .priority-label { margin-right: 2px; color: #667085; font-size: 11px; font-weight: 700; text-transform: uppercase; }

@@ -30,6 +30,7 @@ import ModDirectoryDialog, { directoryCopy } from "./ModDirectoryDialog";
 import CategorySidebar, { TriCheckbox, readDraggedMods } from "./CategorySidebar";
 import { ALL_CATEGORIES } from "./modBatch";
 import { categoryCopy, categoryError } from "./categoryI18n";
+import type { SearchMode } from "./types";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
 
@@ -107,6 +108,7 @@ function App() {
   const [presetName, setPresetName] = useState("");
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
+  const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
   const [moveSteps, setMoveSteps] = useState(1);
   const selectionAnchor = useRef<string | null>(null);
   const tableWrapRef = useRef<HTMLDivElement>(null);
@@ -183,11 +185,13 @@ function App() {
       if (!matchesView) return false;
       if (!matchesCategory) return false;
       if (!needle) return true;
-      return [mod.displayName, mod.author, mod.packageName, mod.category].some((value) =>
-        value.toLocaleLowerCase().includes(needle),
-      );
+      const values = [mod.displayName, mod.author, mod.packageName, mod.category, mod.id]
+        .map((value) => value.trim().toLocaleLowerCase());
+      return searchMode === "exact"
+        ? values.some((value) => value === needle)
+        : values.some((value) => value.includes(needle));
     });
-  }, [mods, query, selectedCategory, view]);
+  }, [mods, query, searchMode, selectedCategory, view]);
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
   useEffect(() => {
     if (selectedMod) void loadSelectedModMedia();
@@ -364,7 +368,14 @@ function App() {
               <button className={view === "all" ? "is-active" : ""} onClick={() => { setView("all"); setBatchScope("filtered"); }}>{text.allMods}</button>
               <button className={view === "active" ? "is-active" : ""} onClick={() => { setView("active"); setBatchScope("filtered"); }}>{text.activeMods}</button>
             </div>
-            <div className="search-box"><Search size={16} /><input value={query} onChange={(event) => { setQuery(event.target.value); setBatchScope("filtered"); }} placeholder={text.searchPlaceholder} /></div>
+            <div className="search-box">
+              <Search size={16} />
+              <input value={query} onChange={(event) => { setQuery(event.target.value); setBatchScope("filtered"); }} placeholder={text.searchPlaceholder} />
+              <select aria-label={searchMode === "exact" ? text.searchExact : text.searchFuzzy} value={searchMode} onChange={(event) => setSearchMode(event.target.value as SearchMode)}>
+                <option value="fuzzy">{text.searchFuzzy}</option>
+                <option value="exact">{text.searchExact}</option>
+              </select>
+            </div>
           </div>
 
           <div className="batch-toolbar">
