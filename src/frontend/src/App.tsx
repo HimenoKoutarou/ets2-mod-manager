@@ -87,6 +87,7 @@ function App() {
     setQuery,
     toggleMod,
     loadSelectedModMedia,
+    loadModMedia,
     scan,
     cancelScan,
     save,
@@ -108,6 +109,7 @@ function App() {
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
   const [moveSteps, setMoveSteps] = useState(1);
   const selectionAnchor = useRef<string | null>(null);
+  const tableWrapRef = useRef<HTMLDivElement>(null);
   const startupLoad = useRef<Promise<void> | null>(null);
   const [saveValues, setSaveValues] = useState<Record<SaveDraftKey, string>>({
     money_account: "",
@@ -190,6 +192,34 @@ function App() {
   useEffect(() => {
     if (selectedMod) void loadSelectedModMedia();
   }, [selectedMod?.id, selectedMod?.iconUrl, selectedMod?.previewUrl, loadSelectedModMedia]);
+  useEffect(() => {
+    const root = tableWrapRef.current;
+    if (!root || !mods.length) return;
+    let scheduled = false;
+    const requestVisibleMedia = () => {
+      scheduled = false;
+      const rootRect = root.getBoundingClientRect();
+      const minTop = rootRect.top - 320;
+      const maxBottom = rootRect.bottom + 320;
+      root.querySelectorAll<HTMLElement>("tr[data-mod-id]").forEach((row) => {
+        const rect = row.getBoundingClientRect();
+        if (rect.bottom < minTop || rect.top > maxBottom) return;
+        const id = row.dataset.modId;
+        const mod = id ? mods.find((candidate) => candidate.id === id) : undefined;
+        if (mod && !mod.mediaLoaded && (mod.mediaAttempts ?? 0) < 3) {
+          void loadModMedia(mod.id);
+        }
+      });
+    };
+    const onScroll = () => {
+      if (scheduled) return;
+      scheduled = true;
+      window.requestAnimationFrame(requestVisibleMedia);
+    };
+    requestVisibleMedia();
+    root.addEventListener("scroll", onScroll, { passive: true });
+    return () => root.removeEventListener("scroll", onScroll);
+  }, [filteredMods, mods, loadModMedia]);
   const activeCount = mods.filter((mod) => mod.enabled).length;
   const selectedIds = new Set(selectedModIds);
   const visibleIds = filteredMods.map((mod) => mod.id);
@@ -374,7 +404,7 @@ function App() {
             <button className="button button-small" disabled={!selectedPresetName || !selectedProfile.writable} onClick={() => { void loadPreset(); }}>{text.loadPreset}</button>
           </div>
 
-          <div className="table-wrap">
+          <div className="table-wrap" ref={tableWrapRef}>
             <table className="mod-table">
               <colgroup><col className="selection-column" /><col className="enabled-column" /><col /><col className="category-column" /><col className="source-column" /><col className="package-column" /></colgroup>
               <thead><tr><th className="selection-column"><TriCheckbox checked={visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id))}
