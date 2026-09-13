@@ -12,7 +12,8 @@
 - 🖼️ **预览图 + 描述**：直接读取 manifest.sii 中的图标和详细说明
 - ✅ **批量启用/禁用**：一键全选 / 反选 / 按分类批量切换
 - 🎯 **拖拽优先级**：拖拽表格行调整顺序，顺序即游戏加载优先级（越靠上优先级越高）
-- 📁 **多 Profile 切换**：本地存档 / Steam Cloud 存档均可编辑 active_mods[]
+- 📁 **多 Profile 切换**：发现并切换本地 Profile；只读来源不会进入可写 Profile 选择器
+- 🖱️ **Profile 右键菜单**：切换 Profile、打开模组/存档/汉化/诊断页面，或在资源管理器中打开 Profile 目录
 - 🗂️ **自定义文件夹**：将 Mod 拖入自定义文件夹，按文件夹批量启用、禁用和调整优先级
 - 💾 **预设方案**：保存「长途跑图」「短途卡车客运」等多套模组启用组合，一键切换
 - 🔗 **Mod 目录跨盘迁移**：一键把 `C:\...\mod` 搬到 F/D 盘，Junction 目录联接，游戏完全透明
@@ -30,9 +31,12 @@
 
 ## 🧱 技术栈
 
-当前发布路线是 `Tauri 2 + React/TypeScript + Rust + SQLite`。
+当前生产发布路线是 `Tauri 2 + React/TypeScript + Rust + SQLite`。
 Python/PySide6 和旧 `.NET/WPF` 客户端保留为迁移期兼容实现与回归参考，
 不属于生产启动路径，详见 `docs/MIGRATION_STATUS_2026-09-09.md`。
+
+Profile 右键菜单只调用已有的 Profile、Mod、存档、汉化和诊断服务；
+删除、复制、重命名等需要额外事务和回滚保证的操作暂不暴露。
 
 | 层 | 技术 |
 |---|---|
@@ -47,7 +51,7 @@ Python/PySide6 和旧 `.NET/WPF` 客户端保留为迁移期兼容实现与回�
 
 ```
 src/
-├── core/                               # 纯逻辑层，无 UI 依赖
+├── core/                               # 迁移期 Python 纯逻辑层（兼容/回归参考）
 │   ├── models.py                        # Mod / ModManifest / Profile / ModIcon 等 dataclass
 │   ├── sii_parser.py                    # SiiNunit 格式解析器（mods_info / manifest / profile.sii）
 │   ├── scs_archive.py                    # .scs/.zip/目录 统一读取（ScsArchiveReader）
@@ -57,7 +61,7 @@ src/
 │   │                                     #   _build_mod_from_package + _try_nested_scs/_try_nested_subdir 共享兜底
 │   └── game_data.py                     # 游戏静态数据（城市/国家/港口/提示文本汉化数据）
 │
-├── services/                            # 业务服务层
+├── services/                            # 迁移期 Python 业务服务层（兼容/回归参考）
 │   ├── profile_service.py               # Profile 读写（解密读取，写回 ETS2 可读 SII）
 │   ├── priority_service.py              # 排序 / 批量启用 / 预设方案
 │   ├── backup_service.py                # 自动备份（最多 10 份）
@@ -74,7 +78,7 @@ src/
 │   ├── save_editor_service.py           # 存档编辑
 │   └── external_extractor_service.py    # 外部解包、临时扫描与加密包缓存（Extractor / SXC）
 │
-├── ui/                                  # Qt UI 层
+├── ui/                                  # 迁移期 Qt UI 层（非生产入口）
 │   ├── main_window.py                   # MainWindow（Mixin 组合入口）
 │   │                                     #   class MainWindow(QMainWindow, _SignalMixin,
 │   │                                     #       _TableDataMixin, _ToolbarMixin, _DialogMixin)
@@ -97,6 +101,16 @@ src/
 │   └── symlink_manager.py               # Mod 目录跨盘迁移（Junction + Symlink 双实现）
 │
 └── version.py                            # 版本号（当前 v1.2.2）
+```
+
+生产客户端位于 `src/frontend/`：
+
+```
+src/frontend/
+├── src/                                  # React + TypeScript UI、状态和 Tauri 调用封装
+├── src-tauri/src/lib.rs                  # Rust/Tauri commands、扫描、Profile/存档服务
+├── src-tauri/target/release/             # 本地构建输出（不提交到 Git）
+└── dist/                                 # Vite 静态资源（构建时生成）
 ```
 
 ### 线程模型
@@ -142,7 +156,7 @@ src/
 ## 🚀 快速开始
 
 ```bash
-# 构建并启动 Tauri 客户端
+# 构建 Tauri 客户端（默认不生成安装包）
 build-tauri.bat
 start.bat
 
@@ -153,6 +167,13 @@ test-tauri.bat
 `start.bat` 只启动 `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`。
 Python/PySide6 与旧 `.NET/WPF` 客户端仍可用于兼容回归，但不再作为生产启动入口。
 
+前端类型检查和静态构建也可以单独执行：
+
+```bash
+cd src/frontend
+npm run build
+```
+
 ## 📦 打包发布
 
 ```bash
@@ -162,7 +183,8 @@ python build.py
 build.bat
 ```
 
-生产构建由 Tauri 完成：
+生产构建由 Tauri 完成。`build-tauri.bat` 会先结束旧的
+`ets2-mod-manager.exe` 并删除旧可执行文件，再执行 release 构建：
 
 - `src/frontend/src-tauri/target/release/ets2-mod-manager.exe`：Tauri Windows 客户端
 - `src/frontend/src-tauri/target/release/bundle/`：NSIS 安装包
