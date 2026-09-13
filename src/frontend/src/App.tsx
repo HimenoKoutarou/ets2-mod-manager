@@ -350,7 +350,9 @@ function App() {
                     <strong>{profile.name}</strong>
                     <small>{profile.company}</small>
                   </span>
-                  <span className="profile-count">{profile.modCount}</span>
+                  <span className="profile-count">
+                    {profile.id === selectedProfileId ? mods.filter((mod) => mod.enabled).length : profile.modCount}
+                  </span>
                 </button>
               ))}
             </div>
