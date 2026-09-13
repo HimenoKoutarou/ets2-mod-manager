@@ -5174,6 +5174,9 @@ mod tests {
         assert!(is_localization_path("locale/en_us/localization.sii"));
         assert!(!is_definition_path("city/world/city.sii"));
         assert!(!is_localization_path("localization/custom.sii"));
+        assert!(is_localization_source_path("mod.scs::def/world/city.sii"));
+        assert!(is_localization_source_path("mod.scs::locale/en_us/localization.sii"));
+        assert!(!is_localization_source_path("mod.scs::material/ui/icon.mat"));
     }
 
     #[test]
