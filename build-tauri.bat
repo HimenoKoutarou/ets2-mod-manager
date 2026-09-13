@@ -5,6 +5,27 @@ cd /d "%~dp0"
 
 echo Building ETS2 Mod Manager Tauri release...
 
+set "RELEASE_DIR=%~dp0src\frontend\src-tauri\target\release"
+set "RELEASE_EXE=%RELEASE_DIR%\ets2-mod-manager.exe"
+
+rem Always remove the previous executable before starting a new build.
+rem This prevents stale binaries from being mistaken for the new build.
+taskkill /f /im ets2-mod-manager.exe >nul 2>nul
+if exist "%RELEASE_EXE%" (
+  del /f /q "%RELEASE_EXE%"
+  if exist "%RELEASE_EXE%" (
+    echo Failed to remove the previous release executable.
+    exit /b 1
+  )
+)
+if exist "%RELEASE_DIR%\bundle" (
+  rmdir /s /q "%RELEASE_DIR%\bundle"
+  if exist "%RELEASE_DIR%\bundle" (
+    echo Failed to remove the previous release bundle.
+    exit /b 1
+  )
+)
+
 set "TOOLCHAIN_ROOT=%TEMP%\ets2modmanager-toolchain"
 set "RUSTUP_EXE=%TOOLCHAIN_ROOT%\cargo\bin\rustup.exe"
 set "CARGO_EXE=%TOOLCHAIN_ROOT%\cargo\bin\cargo.exe"
