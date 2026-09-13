@@ -351,7 +351,7 @@ function App() {
           <button className={activePage === "profiles" ? "is-active" : ""} onClick={() => setActivePage("profiles")}>
             <FolderOpen size={15} />{text.profilePage}
           </button>
-          <button className={activePage === "localization" ? "is-active" : ""} onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); void scanLocalization(); }}>
+          <button className={activePage === "localization" ? "is-active" : ""} onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); }}>
             <Sparkles size={15} />{text.localization}
           </button>
         </nav>
@@ -505,7 +505,7 @@ function App() {
                 <div className="section-heading"><span>{text.profileActions}</span></div>
                 <div className="profile-action-list">
                   <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("saves"); }}><FolderOpen size={15} />{text.saves}</button>
-                  <button className="button" onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); void scanLocalization(); }}><Sparkles size={15} />{text.localization}</button>
+                  <button className="button" onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); }}><Sparkles size={15} />{text.localization}</button>
                   <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("diagnostics"); void runDiagnostics(); }}><LayoutGrid size={15} />{text.diagnostics}</button>
                 </div>
                 <div className="profile-stat-line"><span>{text.saves}</span><strong>{saves.length}</strong></div>
@@ -549,7 +549,7 @@ function App() {
           <CategorySidebar onCategory={chooseCategory} />
           <section className="sidebar-secondary">
             <div className="section-heading"><span>{text.secondary}</span></div>
-            <button className={`secondary-item ${secondaryPanel === "localization" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("localization"); void scanLocalization(); }}>
+            <button className={`secondary-item ${secondaryPanel === "localization" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("localization"); }}>
               <Sparkles size={15} />{text.localization}<span className="secondary-count">{localization?.entries.length ?? 0}</span>
             </button>
             <button className={`secondary-item ${secondaryPanel === "diagnostics" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("diagnostics"); void runDiagnostics(); }}>
