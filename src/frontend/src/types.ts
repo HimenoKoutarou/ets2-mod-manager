@@ -46,6 +46,15 @@ export interface SaveSlot {
 export interface UiCopy {
   appTitle: string;
   modWorkspace: string;
+  modPage: string;
+  profilePage: string;
+  profileOverview: string;
+  profileDetails: string;
+  profileActions: string;
+  openModPage: string;
+  profileFolder: string;
+  profileStatus: string;
+  profilePresetCount: (count: number) => string;
   scan: string;
   cancelScan: string;
   scanning: string;

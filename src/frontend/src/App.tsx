@@ -107,6 +107,7 @@ function App() {
     error,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
+  const [activePage, setActivePage] = useState<"mods" | "profiles">("mods");
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [batchScope, setBatchScope] = useState<"selection" | "filtered" | "category">("filtered");
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
@@ -313,6 +314,14 @@ function App() {
             <div className="brand-context">{selectedProfile.name} · {text.modWorkspace}</div>
           </div>
         </div>
+        <nav className="page-nav" aria-label="Primary navigation">
+          <button className={activePage === "mods" ? "is-active" : ""} onClick={() => setActivePage("mods")}>
+            <LayoutGrid size={15} />{text.modPage}
+          </button>
+          <button className={activePage === "profiles" ? "is-active" : ""} onClick={() => setActivePage("profiles")}>
+            <FolderOpen size={15} />{text.profilePage}
+          </button>
+        </nav>
         <div className="header-actions">
           <button className="button button-quiet" disabled={loading || scanning || localizationScanning || !isTauriRuntime()} onClick={() => setDirectoryOpen(true)}>
             <FolderOpen size={16} />{directoryCopy[language].title}
@@ -334,6 +343,60 @@ function App() {
         </div>
       </header>
 
+      {activePage === "profiles" ? (
+        <main className="profile-page">
+          <section className="profile-page-main">
+            <div className="page-heading">
+              <div>
+                <div className="panel-title">{text.profileOverview}</div>
+                <div className="panel-subtitle">{text.profiles} · {profiles.length}</div>
+              </div>
+              <button className="button button-primary" onClick={() => setActivePage("mods")}><LayoutGrid size={16} />{text.openModPage}</button>
+            </div>
+            <div className="profile-card-grid">
+              {profiles.map((profile) => (
+                <button
+                  key={profile.id}
+                  className={`profile-card ${profile.id === selectedProfileId ? "is-selected" : ""}`}
+                  onClick={() => { void selectProfile(profile.id); }}
+                >
+                  <span className="profile-card-icon"><FolderOpen size={19} /></span>
+                  <span className="profile-card-copy">
+                    <strong>{profile.name}</strong>
+                    <small>{profile.company || profile.location}</small>
+                  </span>
+                  <span className="profile-card-meta">
+                    <b>{profile.id === selectedProfileId ? activeCount : profile.modCount}</b>
+                    <small>{text.activeMods}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div className="profile-detail-grid">
+              <section className="profile-info-panel">
+                <div className="section-heading"><span>{text.profileDetails}</span></div>
+                <dl className="detail-meta profile-meta">
+                  <div><dt>{text.name}</dt><dd>{selectedProfile.name}</dd></div>
+                  <div><dt>{text.author}</dt><dd>{selectedProfile.company || "—"}</dd></div>
+                  <div><dt>{text.profileStatus}</dt><dd>{selectedProfile.writable === false ? text.readOnly : text.localProfile}</dd></div>
+                  <div><dt>{text.profileFolder}</dt><dd title={selectedProfile.folder || ""}>{selectedProfile.folder || "—"}</dd></div>
+                  <div><dt>{text.activeMods}</dt><dd>{text.statusCount(activeCount, mods.length)}</dd></div>
+                </dl>
+              </section>
+              <section className="profile-info-panel">
+                <div className="section-heading"><span>{text.profileActions}</span></div>
+                <div className="profile-action-list">
+                  <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("saves"); }}><FolderOpen size={15} />{text.saves}</button>
+                  <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("localization"); void scanLocalization(); }}><Sparkles size={15} />{text.localization}</button>
+                  <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("diagnostics"); void runDiagnostics(); }}><LayoutGrid size={15} />{text.diagnostics}</button>
+                </div>
+                <div className="profile-stat-line"><span>{text.saves}</span><strong>{saves.length}</strong></div>
+                <div className="profile-stat-line"><span>{text.presetPlaceholder}</span><strong>{text.profilePresetCount(Object.keys(presets).length)}</strong></div>
+              </section>
+            </div>
+          </section>
+        </main>
+      ) : (
       <main className="workspace">
         <aside className="sidebar">
           <section className="sidebar-section">
@@ -659,6 +722,7 @@ function App() {
           )}
         </aside>
       </main>
+      )}
       {directoryOpen && <ModDirectoryDialog onClose={() => setDirectoryOpen(false)} />}
     </div>
   );

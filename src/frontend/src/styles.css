@@ -20,6 +20,10 @@ button { color: inherit; }
 .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; color: #ffffff; background: #2563eb; }
 .brand-title { font-size: 16px; font-weight: 700; letter-spacing: 0; }
 .brand-context { margin-top: 4px; color: #667085; font-size: 12px; }
+.page-nav { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; margin-right: 22px; padding: 3px; border: 1px solid #d9e2ef; border-radius: 6px; background: #f8fafc; }
+.page-nav button { display: inline-flex; align-items: center; gap: 6px; min-height: 29px; padding: 0 10px; border: 0; border-radius: 4px; background: transparent; color: #667085; cursor: pointer; font-size: 12px; }
+.page-nav button:hover { color: #1d4ed8; background: #eff6ff; }
+.page-nav button.is-active { color: #ffffff; background: #2563eb; }
 .header-actions { gap: 8px; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 32px; padding: 0 12px; border: 1px solid #cbd5e1; border-radius: 5px; background: #ffffff; color: #344054; cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
 .button:hover:not(:disabled), .icon-button:hover { background: #f1f5f9; border-color: #94a3b8; }
@@ -34,6 +38,29 @@ button { color: inherit; }
 .language-picker select { max-width: 84px; border: 0; outline: 0; color: #344054; background: transparent; appearance: none; cursor: pointer; }
 .language-picker option { color: #172033; background: #ffffff; }
 .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 248px minmax(560px, 1fr) 286px; gap: 1px; overflow: hidden; background: #d9e2ef; }
+.profile-page { flex: 1; min-height: 0; overflow: auto; background: #f5f8fc; padding: 28px; }
+.profile-page-main { max-width: 1180px; margin: 0 auto; }
+.page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
+.profile-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.profile-card { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 15px; border: 1px solid #d9e2ef; border-radius: 7px; background: #ffffff; color: #172033; text-align: left; cursor: pointer; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
+.profile-card:hover { border-color: #93c5fd; background: #f8fbff; }
+.profile-card.is-selected { border-color: #2563eb; background: #eff6ff; box-shadow: 0 0 0 2px #dbeafe; }
+.profile-card-icon { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 38px; border-radius: 6px; color: #2563eb; background: #dbeafe; }
+.profile-card-copy { min-width: 0; display: grid; gap: 4px; flex: 1; }
+.profile-card-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.profile-card-copy small { overflow: hidden; color: #667085; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.profile-card-meta { display: grid; justify-items: end; gap: 2px; color: #2563eb; }
+.profile-card-meta b { font-size: 16px; }
+.profile-card-meta small { color: #667085; font-size: 10px; }
+.profile-detail-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(280px, .85fr); gap: 14px; margin-top: 18px; }
+.profile-info-panel { min-width: 0; padding: 18px; border: 1px solid #d9e2ef; background: #ffffff; }
+.profile-info-panel .section-heading { margin-left: 0; margin-right: 0; }
+.profile-meta { margin-top: 8px; }
+.profile-meta dd { max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-action-list { display: grid; gap: 8px; margin-top: 12px; }
+.profile-action-list .button { justify-content: flex-start; }
+.profile-stat-line { display: flex; justify-content: space-between; gap: 12px; padding-top: 12px; margin-top: 12px; border-top: 1px solid #eef2f6; color: #667085; font-size: 11px; }
+.profile-stat-line strong { color: #172033; }
 .sidebar, .mod-panel, .details-panel { min-width: 0; min-height: 0; background: #ffffff; }
 .sidebar { padding: 24px 16px; overflow: auto; }
 .sidebar-section { padding-bottom: 20px; margin-bottom: 20px; border-bottom: 1px solid #e7edf5; }
@@ -283,4 +310,6 @@ img.mod-badge { object-fit: cover; }
   .workspace { grid-template-columns: 218px minmax(500px, 1fr); }
   .details-panel { display: none; }
   .app-header { padding: 0 18px; }
+  .page-nav { margin-right: 10px; }
+  .profile-page { padding: 20px; }
 }
