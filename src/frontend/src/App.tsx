@@ -133,14 +133,19 @@ function App() {
     level: "",
   });
   const [localizationDraft, setLocalizationDraft] = useState<Record<string, string>>({});
-  const [localizationProgress, setLocalizationProgress] = useState<{ packageName: string; processed: number; total: number } | null>(null);
+  const [localizationProgress, setLocalizationProgress] = useState<{ packageName: string; path?: string; processed: number; total: number } | null>(null);
+  const [localizationFileProgress, setLocalizationFileProgress] = useState<{ packageName: string; file: string } | null>(null);
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let stop: UnlistenFn | undefined;
-    void listen<{ packageName: string; processed: number; total: number }>("localization-progress", (event) => {
+    let stopFile: UnlistenFn | undefined;
+    void listen<{ packageName: string; path?: string; processed: number; total: number }>("localization-progress", (event) => {
       setLocalizationProgress(event.payload);
     }).then((unlisten) => { stop = unlisten; });
-    return () => stop?.();
+    void listen<{ packageName: string; file: string }>("localization-file-progress", (event) => {
+      setLocalizationFileProgress(event.payload);
+    }).then((unlisten) => { stopFile = unlisten; });
+    return () => { stop?.(); stopFile?.(); };
   }, []);
   useEffect(() => {
     if (!contextMenu) return;
@@ -812,9 +817,21 @@ function App() {
               </button>
               <div className={`localization-progress ${localizationScanning ? "is-active" : ""}`}>
                 <div className="localization-progress-track"><span /></div>
-                <span>{localizationScanning
-                  ? `${text.scanning} · ${localizationProgress?.packageName ?? ""} (${localizationProgress?.processed ?? 0}/${localizationProgress?.total ?? 0})`
-                  : localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
+                {localizationScanning ? (
+                  <div className="localization-progress-copy">
+                    <span className="localization-progress-mod" title={localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? ""}>
+                      {text.scanning}: {localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? text.noSelection}
+                    </span>
+                    <span className="localization-progress-file" title={localizationFileProgress?.file ?? localizationProgress?.path ?? ""}>
+                      {localizationFileProgress?.file ?? localizationProgress?.path ?? text.noSelection}
+                    </span>
+                    <span className="localization-progress-count">
+                      {localizationProgress?.processed ?? 0} / {localizationProgress?.total ?? 0}
+                    </span>
+                  </div>
+                ) : (
+                  <span>{localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
+                )}
               </div>
               <button className="button button-small panel-action" disabled={!localizationBase || !localization?.entries.length || localizationScanning} onClick={() => {
                 if (!localization) return;

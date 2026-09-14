@@ -2819,6 +2819,7 @@ fn scan_localization_directory(
     root: &Path,
     package_name: &str,
     cancelled: &AtomicBool,
+    #[cfg(feature = "desktop")] app: Option<&AppHandle>,
 ) -> Vec<LocalizationEntryDto> {
     let mut output = Vec::new();
     let Ok(files) = fs::read_dir(root) else {
@@ -2863,6 +2864,10 @@ fn scan_localization_directory(
             continue;
         };
         let source_path = format!("{}::{}", root.display(), relative);
+        #[cfg(feature = "desktop")]
+        if let Some(app) = app {
+            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": source_path}));
+        }
         if is_definition_path(&relative) {
             output.extend(parse_definition_text(
                 &text,
@@ -2886,6 +2891,7 @@ fn scan_localization_archive(
     path: &Path,
     locale: &str,
     cancelled: &AtomicBool,
+    #[cfg(feature = "desktop")] app: Option<&AppHandle>,
 ) -> Vec<LocalizationEntryDto> {
     let mut output = Vec::new();
     let Ok(file) = fs::File::open(path) else {
@@ -2923,6 +2929,10 @@ fn scan_localization_archive(
         }
         let text = String::from_utf8_lossy(&bytes);
         let source_path = format!("{}::{}", path.display(), normalized);
+        #[cfg(feature = "desktop")]
+        if let Some(app) = app {
+            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": source_path}));
+        }
         if is_definition_path(&normalized) {
             output.extend(parse_definition_text(
                 &text,
@@ -2946,6 +2956,7 @@ fn scan_localization_package(
     path: &Path,
     locale: &str,
     cancelled: &AtomicBool,
+    #[cfg(feature = "desktop")] app: Option<&AppHandle>,
 ) -> Vec<LocalizationEntryDto> {
     if path.is_dir() {
         return scan_localization_directory(
@@ -2954,6 +2965,7 @@ fn scan_localization_package(
                 .and_then(|value| value.to_str())
                 .unwrap_or_default(),
             cancelled,
+            #[cfg(feature = "desktop")] app,
         );
     }
     if path
@@ -2969,13 +2981,17 @@ fn scan_localization_package(
         if !is_localization_source_path(&source_path) {
             return Vec::new();
         }
+        #[cfg(feature = "desktop")]
+        if let Some(app) = app {
+            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": source_path}));
+        }
         return if is_definition_path(&source_path) {
             parse_definition_text(&text, &source_path, package_name, &category_for_path(&source_path))
         } else {
             parse_localization_text(&text, &source_path, package_name, &category_for_path(&source_path))
         };
     }
-    scan_localization_archive(path, locale, cancelled)
+    scan_localization_archive(path, locale, cancelled, #[cfg(feature = "desktop")] app)
 }
 
 fn load_localization_snapshot(
@@ -3296,7 +3312,7 @@ fn localization_scan_impl(
             continue;
         }
         inspected += 1;
-        let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled)
+        let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled, #[cfg(feature = "desktop")] app.as_ref())
             .into_iter()
             .filter(|entry| is_localization_source_path(&entry.source_path))
             .collect::<Vec<_>>();
