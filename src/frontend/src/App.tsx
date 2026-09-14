@@ -249,9 +249,8 @@ function App() {
   const contextProfile = profileContextMenu ? profiles.find((profile) => profile.id === profileContextMenu.profileId) ?? null : null;
   async function openProfilePanel(profileId: string, panel: "saves" | "localization" | "diagnostics") {
     await selectProfile(profileId);
-    setActivePage("mods");
+    setActivePage(panel === "localization" ? "localization" : "mods");
     setSecondaryPanel(panel);
-    if (panel === "localization") await scanLocalization();
     if (panel === "diagnostics") await runDiagnostics();
   }
   useEffect(() => {
@@ -395,7 +394,112 @@ function App() {
         </div>
       </header>
 
-      {activePage === "save" ? (
+      {activePage === "localization" ? (
+        <main className="localization-page-main">
+          <section className="localization-page-inner">
+            <div className="page-heading localization-heading">
+              <div>
+                <div className="panel-title">{text.localization}</div>
+                <div className="panel-subtitle">{selectedProfile.name} · {text.localizationBase}</div>
+              </div>
+              <button className="button" onClick={() => setActivePage("mods")}><ArrowLeft size={16} />{text.modPage}</button>
+            </div>
+
+            <div className="localization-toolbar">
+              <label className="localization-select">
+                <span>{text.saves}</span>
+                <select
+                  value={selectedSave?.slotId ?? ""}
+                  onChange={(event) => {
+                    const next = saves.find((save) => save.slotId === event.target.value);
+                    if (next) void selectSave(next);
+                  }}
+                >
+                  <option value="">{text.noSelection}</option>
+                  {saves.map((save) => <option key={save.slotId} value={save.slotId}>{save.displayName}</option>)}
+                </select>
+              </label>
+              <label className="localization-select">
+                <span>{categoryText.category}</span>
+                <select value={selectedCategory} onChange={(event) => chooseCategory(event.target.value)}>
+                  <option value={ALL_CATEGORIES}>{text.allMods}</option>
+                  {categoryState.folders.filter((name) => name !== categoryText.uncategorized).map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </label>
+              <div className="localization-toolbar-spacer" />
+              <button className="button" onClick={() => { void pickLocalizationBase(); }}>
+                <FolderOpen size={14} />{text.chooseLocalizationBase}
+              </button>
+            </div>
+
+            <section className="localization-control-panel">
+              <div className="localization-base-summary">
+                <span className="localization-base-label">{text.localizationBase}</span>
+                <strong title={localizationBase ?? ""}>{localizationBase ? localizationBase.split(/[\\/]/).pop() : text.noneFound}</strong>
+              </div>
+              <button
+                className="button button-primary"
+                onClick={() => { void (localizationScanning ? cancelLocalization() : scanLocalization()); }}
+                disabled={scanning || (!localizationScanning && !localizationBase)}
+              >
+                <Sparkles size={14} />{localizationScanning ? text.cancelScan : text.scanLocalization}
+              </button>
+              <button
+                className="button"
+                disabled={!localizationBase || !localization?.entries.length || localizationScanning}
+                onClick={() => {
+                  if (!localization) return;
+                  void writeLocalizationBase(localization.entries.map((entry) => ({ ...entry, value: localizationDraft[entry.key] ?? entry.value })));
+                }}
+              >
+                <Save size={14} />{text.startLocalization}
+              </button>
+            </section>
+
+            <section className={`localization-progress-card ${localizationScanning ? "is-active" : ""}`}>
+              <div className="localization-progress-topline">
+                <strong>{localizationScanning ? text.scanning : text.localization}</strong>
+                <span>{localizationProgress?.processed ?? 0} / {localizationProgress?.total ?? 0}</span>
+              </div>
+              <div className="localization-progress-track"><span /></div>
+              <div className="localization-progress-details">
+                <span title={localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? ""}>
+                  {localizationFileProgress?.packageName || localizationProgress?.packageName || text.noSelection}
+                </span>
+                <code title={localizationFileProgress?.file ?? ""}>{localizationFileProgress?.file || text.localizationFile}</code>
+              </div>
+            </section>
+
+            <section className="localization-results-panel">
+              <div className="section-heading">
+                <span>{text.localization}</span>
+                <span className="section-count">{localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
+              </div>
+              {localization?.entries.length ? (
+                <div className="localization-results">
+                  {localization.entries.map((entry) => (
+                    <div className="localization-result-row" key={`${entry.packageName}:${entry.key}`}>
+                      <span className="localization-result-kind">{entry.category}</span>
+                      <div className="localization-result-key">
+                        <strong>{entry.key}</strong>
+                        <small>{entry.packageName}</small>
+                      </div>
+                      <code title={entry.sourcePath}>{entry.sourcePath}</code>
+                      <input
+                        value={localizationDraft[entry.key] ?? entry.value}
+                        placeholder={entry.value || "—"}
+                        onChange={(event) => setLocalizationDraft((current) => ({ ...current, [entry.key]: event.target.value }))}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="detail-empty localization-empty"><Sparkles size={28} /><strong>{text.noSelection}</strong><span>{text.scanLocalization}</span></div>
+              )}
+            </section>
+          </section>
+        </main>
+      ) : activePage === "save" ? (
         <main className="save-editor-page">
           <section className="save-editor-main">
             <div className="page-heading">

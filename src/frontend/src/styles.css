@@ -44,6 +44,37 @@ button { color: inherit; }
 .localization-page .mod-panel { display: none; }
 .localization-page .details-panel { padding: 28px 34px 0; overflow: auto; }
 .localization-page .sidebar-secondary { display: none; }
+.localization-page-main { flex: 1; min-height: 0; overflow: auto; padding: 28px 30px 34px; background: #f5f8fc; }
+.localization-page-inner { max-width: 1280px; margin: 0 auto; }
+.localization-heading { margin-bottom: 16px; }
+.localization-toolbar { display: flex; align-items: center; gap: 10px; min-height: 42px; margin-bottom: 12px; }
+.localization-select { display: inline-flex; align-items: center; gap: 8px; min-width: 245px; height: 36px; padding: 0 10px; border: 1px solid #d9e2ef; border-radius: 5px; background: #ffffff; color: #667085; font-size: 11px; }
+.localization-select span { flex: 0 0 auto; font-weight: 700; }
+.localization-select select { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: #172033; font-size: 12px; cursor: pointer; }
+.localization-toolbar-spacer { flex: 1; }
+.localization-control-panel { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid #d9e2ef; background: #ffffff; }
+.localization-base-summary { display: grid; min-width: 0; flex: 1; gap: 4px; }
+.localization-base-label { color: #667085; font-size: 11px; }
+.localization-base-summary strong { overflow: hidden; color: #172033; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.localization-progress-card { margin-top: 12px; padding: 13px 14px; border: 1px solid #d9e2ef; background: #ffffff; }
+.localization-progress-topline { display: flex; justify-content: space-between; gap: 12px; color: #172033; font-size: 12px; }
+.localization-progress-topline span { color: #2563eb; font-variant-numeric: tabular-nums; }
+.localization-progress-card .localization-progress-track { width: 100%; margin-top: 9px; }
+.localization-progress-details { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(0, 1.3fr); gap: 14px; margin-top: 9px; color: #344054; font-size: 12px; }
+.localization-progress-details span, .localization-progress-details code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.localization-progress-details code { color: #667085; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.localization-results-panel { margin-top: 12px; padding: 16px 14px 14px; border: 1px solid #d9e2ef; background: #ffffff; }
+.localization-results-panel .section-heading { margin-left: 0; margin-right: 0; }
+.localization-results { display: grid; gap: 6px; max-height: calc(100vh - 340px); overflow: auto; padding-right: 3px; }
+.localization-result-row { display: grid; grid-template-columns: 82px minmax(210px, 1fr) minmax(220px, 1.1fr) minmax(230px, 1.2fr); gap: 10px; align-items: center; min-height: 52px; padding: 8px 10px; border: 1px solid #e7edf5; background: #fbfdff; }
+.localization-result-kind { align-self: start; padding-top: 3px; color: #2563eb; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.localization-result-key { display: grid; min-width: 0; gap: 4px; }
+.localization-result-key strong { overflow: hidden; color: #172033; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.localization-result-key small { overflow: hidden; color: #667085; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.localization-result-row code { overflow: hidden; color: #667085; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.localization-result-row input { width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid #cbd5e1; border-radius: 4px; outline: 0; background: #ffffff; color: #172033; font-size: 12px; }
+.localization-result-row input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px #dbeafe; }
+.localization-empty { min-height: 220px; }
 .profile-page { flex: 1; min-height: 0; overflow: auto; background: #f5f8fc; padding: 28px; }
 .profile-page-main { max-width: 1180px; margin: 0 auto; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
