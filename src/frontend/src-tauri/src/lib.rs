@@ -3450,7 +3450,6 @@ fn localization_scan_impl(
             fingerprint: 0,
         });
     }
-    let mut snapshots = Vec::new();
     let mut all_entries = Vec::new();
     let mut inspected = 0usize;
     let mut cached = 0usize;
@@ -3488,7 +3487,15 @@ fn localization_scan_impl(
         if cancelled.load(Ordering::Relaxed) {
             return Err("Localization scan cancelled.".into());
         }
-        snapshots.push((package.path.clone(), fingerprint, entries.clone()));
+        // Persist each completed package immediately. This keeps progress
+        // durable even if a later archive is slow, cancelled, or fails.
+        let snapshot = (package.path.clone(), fingerprint, entries.clone());
+        save_localization_snapshots(
+            &mut connection,
+            &locale,
+            std::slice::from_ref(&package.path),
+            std::slice::from_ref(&snapshot),
+        )?;
         all_entries.push(entries);
     }
     if cancelled.load(Ordering::Relaxed) {
@@ -3498,7 +3505,9 @@ fn localization_scan_impl(
         .iter()
         .map(|package| package.path.clone())
         .collect::<Vec<_>>();
-    save_localization_snapshots(&mut connection, &locale, &current_paths, &snapshots)?;
+    // A final empty write performs stale-package cleanup without rewriting
+    // snapshots that were already persisted incrementally above.
+    save_localization_snapshots(&mut connection, &locale, &current_paths, &[])?;
     let entries = merge_localization_entries(all_entries);
     Ok(LocalizationScanDto {
         packages: packages.len(),
@@ -5851,6 +5860,43 @@ mod tests {
         assert_eq!(entries[0].value, "First");
         assert_eq!(entries[1].key, "city.second");
         assert_eq!(entries[1].value, "Second");
+    }
+
+    #[test]
+    fn localization_snapshot_survives_reload() {
+        let database = std::env::temp_dir().join(format!("ets2-l10n-cache-{}.db", now_ms()));
+        let package_path = "base.scs".to_string();
+        let fingerprint = ("scs-l10n-v3".to_string(), 123, 456);
+        let entry = LocalizationEntryDto {
+            key: "city.demo".into(),
+            value: "示例城市".into(),
+            source_path: "base.scs::locale/zh_cn/city.sii".into(),
+            package_name: "base.scs".into(),
+            category: "city".into(),
+            status: "native".into(),
+            locale_key_present: true,
+            def_locale_key_present: true,
+            unit_name: String::new(),
+            locale_key: "city.demo".into(),
+        };
+        {
+            let mut connection = open_db(&database).expect("open cache db");
+            save_localization_snapshots(
+                &mut connection,
+                "zh_cn",
+                std::slice::from_ref(&package_path),
+                &[(package_path.clone(), fingerprint.clone(), vec![entry.clone()])],
+            )
+            .expect("persist localization snapshot");
+        }
+        let connection = open_db(&database).expect("reopen cache db");
+        let loaded = load_localization_snapshot(&connection, &package_path, "zh_cn", &fingerprint)
+            .expect("load localization snapshot")
+            .expect("snapshot exists");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].key, entry.key);
+        assert_eq!(loaded[0].value, entry.value);
+        let _ = fs::remove_file(database);
     }
 
     #[test]
