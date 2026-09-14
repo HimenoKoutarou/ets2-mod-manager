@@ -69,6 +69,7 @@ export interface UiCopy {
   scan: string;
   cancelScan: string;
   scanning: string;
+  localizationFile: string;
   scanCancelled: string;
   scanSummary: (added: number, updated: number, removed: number, inspected: number) => string;
   unsavedConfirm: string;

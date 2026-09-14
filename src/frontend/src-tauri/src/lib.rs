@@ -2866,7 +2866,7 @@ fn scan_localization_directory(
         let source_path = format!("{}::{}", root.display(), relative);
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
-            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": source_path}));
+            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": relative}));
         }
         if is_definition_path(&relative) {
             output.extend(parse_definition_text(
@@ -2931,7 +2931,7 @@ fn scan_localization_archive(
         let source_path = format!("{}::{}", path.display(), normalized);
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
-            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": source_path}));
+            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": normalized}));
         }
         if is_definition_path(&normalized) {
             output.extend(parse_definition_text(
@@ -2983,7 +2983,8 @@ fn scan_localization_package(
         }
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
-            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": source_path}));
+            let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": file_name}));
         }
         return if is_definition_path(&source_path) {
             parse_definition_text(&text, &source_path, package_name, &category_for_path(&source_path))

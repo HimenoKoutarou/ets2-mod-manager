@@ -822,8 +822,8 @@ function App() {
                     <span className="localization-progress-mod" title={localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? ""}>
                       {text.scanning}: {localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? text.noSelection}
                     </span>
-                    <span className="localization-progress-file" title={localizationFileProgress?.file ?? localizationProgress?.path ?? ""}>
-                      {localizationFileProgress?.file ?? localizationProgress?.path ?? text.noSelection}
+                    <span className="localization-progress-file" title={localizationFileProgress?.file ?? ""}>
+                      {text.localizationFile}: {localizationFileProgress?.file ?? text.noSelection}
                     </span>
                     <span className="localization-progress-count">
                       {localizationProgress?.processed ?? 0} / {localizationProgress?.total ?? 0}
