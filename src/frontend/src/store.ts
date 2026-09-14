@@ -132,6 +132,7 @@ export const fixtureBackend: ModBackend = {
       {
         key: "city.demo",
         value: "示例城市",
+        sourceName: "Demo City",
         sourcePath: "",
         packageName: "fixture",
         category: "city",

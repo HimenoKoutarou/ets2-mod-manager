@@ -44,6 +44,7 @@ export interface PresetRecord {
 export interface LocalizationEntry {
   key: string;
   value: string;
+  sourceName: string;
   sourcePath: string;
   packageName: string;
   category: string;

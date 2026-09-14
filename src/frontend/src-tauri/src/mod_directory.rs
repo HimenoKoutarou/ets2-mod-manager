@@ -815,7 +815,14 @@ mod tests {
             [&old],
         )
         .unwrap();
-        db.execute("INSERT INTO localization_entry_v2 VALUES (?1,'zh_cn',0,'city.foo','foo',?1,'sample','city','native',1,1,'foo','foo')", [&old]).unwrap();
+        db.execute(
+            "INSERT INTO localization_entry_v2
+             (package_path,target_locale,entry_order,key,value,source_name,source_path,
+              package_name,category,status,locale_key_present,def_locale_key_present,
+              unit_name,locale_key)
+             VALUES (?1,'zh_cn',0,'city.foo','foo','Foo',?1,'sample','city','native',1,1,'foo','foo')",
+            [&old],
+        ).unwrap();
         drop(db);
         f.run(&target, "relocate").unwrap();
         let next = super::super::normalize_path(&target.join("sample.scs"));

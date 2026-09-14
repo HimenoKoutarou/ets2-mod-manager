@@ -197,6 +197,7 @@ struct SaveSlotDto {
 struct LocalizationEntryDto {
     key: String,
     value: String,
+    source_name: String,
     source_path: String,
     package_name: String,
     category: String,
@@ -898,6 +899,7 @@ fn open_db(path: &Path) -> Result<Connection, String> {
                entry_order INTEGER NOT NULL,
                key TEXT NOT NULL,
                value TEXT NOT NULL,
+               source_name TEXT NOT NULL DEFAULT '',
                source_path TEXT NOT NULL,
                package_name TEXT NOT NULL,
                category TEXT NOT NULL,
@@ -931,6 +933,7 @@ fn open_db(path: &Path) -> Result<Connection, String> {
     ensure_header_state_table(&connection)?;
     ensure_mod_index_state_table(&connection)?;
     ensure_media_cache_table(&connection)?;
+    ensure_localization_source_name_column(&connection)?;
     Ok(connection)
 }
 
@@ -1167,6 +1170,25 @@ fn ensure_mod_fingerprint_column(connection: &Connection) -> Result<(), String> 
                 [],
             )
             .map_err(|e| format!("upgrade mod index schema failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn ensure_localization_source_name_column(connection: &Connection) -> Result<(), String> {
+    let has_column = connection
+        .prepare("PRAGMA table_info(localization_entry_v2)")
+        .map_err(|e| format!("inspect localization schema failed: {e}"))?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("inspect localization schema failed: {e}"))?
+        .filter_map(Result::ok)
+        .any(|name| name == "source_name");
+    if !has_column {
+        connection
+            .execute(
+                "ALTER TABLE localization_entry_v2 ADD COLUMN source_name TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|e| format!("upgrade localization schema failed: {e}"))?;
     }
     Ok(())
 }
@@ -2643,7 +2665,7 @@ fn package_fingerprint(path: &Path) -> (String, i64, i64) {
         .to_ascii_lowercase();
     // Bump the persisted localization snapshot fingerprint whenever the
     // parser contract changes, so old incomplete locale indexes are rebuilt.
-    (format!("{kind}-l10n-v3"), size, modified)
+    (format!("{kind}-l10n-v4"), size, modified)
 }
 
 fn has_path_segment(path: &str, segment: &str) -> bool {
@@ -2699,6 +2721,24 @@ fn category_for_path(path: &str) -> String {
     }
 }
 
+fn category_for_localization_key(key: &str, fallback: &str) -> String {
+    let normalized = key.trim().to_ascii_lowercase();
+    if normalized.starts_with("city.") || normalized.starts_with("city_") {
+        "city".into()
+    } else if normalized.starts_with("country.") || normalized.starts_with("country_") {
+        "country".into()
+    } else if normalized.starts_with("ferry.") || normalized.starts_with("ferry_") {
+        "ferry".into()
+    } else if normalized.starts_with("tip.")
+        || normalized.starts_with("tips.")
+        || normalized.starts_with("hint.")
+    {
+        "tips".into()
+    } else {
+        fallback.to_string()
+    }
+}
+
 fn quoted_value(value: &str) -> String {
     let trimmed = value.trim().trim_end_matches(',');
     let Some(start) = trimmed.find('"') else {
@@ -2725,23 +2765,28 @@ fn parse_localization_text(
         // SII accepts key[], key[0], and other indexed array spellings.
         // Pair arrays inside each localization_db unit so entries from
         // separate units can never be accidentally cross-matched.
-        let mut keys = Vec::new();
-        let mut values = Vec::new();
+        let mut keys: Vec<(Option<usize>, String)> = Vec::new();
+        let mut values: Vec<(Option<usize>, String)> = Vec::new();
         let mut scalar = Vec::new();
         let array = Regex::new(
-            r#"(?i)\b(key|val)\s*(?:\[\s*\]|\[\s*\d+\s*\])\s*:\s*"((?:\\.|[^"\\])*)""#,
+            r#"(?i)\b(key|val)\s*\[\s*(\d*)\s*\]\s*:\s*"((?:\\.|[^"\\])*)""#,
         )
         .expect("localization array regex");
         for capture in array.captures_iter(unit_text) {
             let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
-            let value = capture
+            let index = capture
                 .get(2)
+                .map(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<usize>().ok());
+            let value = capture
+                .get(3)
                 .map(|value| unescape_sii(value.as_str()))
                 .unwrap_or_default();
             if name.eq_ignore_ascii_case("key") {
-                keys.push(value);
+                keys.push((index, value));
             } else {
-                values.push(value);
+                values.push((index, value));
             }
         }
         for line in unit_text.lines() {
@@ -2766,21 +2811,31 @@ fn parse_localization_text(
         }
 
         let mut output = Vec::new();
-        for (index, key) in keys.into_iter().enumerate() {
-            let value = values.get(index).cloned().unwrap_or_default();
+        for (position, (key_index, key)) in keys.into_iter().enumerate() {
+            let value = key_index
+                .and_then(|index| {
+                    values
+                        .iter()
+                        .find(|(value_index, _)| *value_index == Some(index))
+                        .map(|(_, value)| value.clone())
+                })
+                .or_else(|| values.get(position).map(|(_, value)| value.clone()))
+                .unwrap_or_default();
+            let entry_category = category_for_localization_key(&key, category);
             output.push(LocalizationEntryDto {
                 key: key.clone(),
                 value: value.clone(),
+                source_name: String::new(),
                 source_path: source_path.to_string(),
                 package_name: package_name.to_string(),
-                category: category.to_string(),
+                category: entry_category,
                 status: if value.is_empty() {
                     "missing_value".into()
                 } else {
                     "native".into()
                 },
                 locale_key_present: true,
-                def_locale_key_present: true,
+                def_locale_key_present: false,
                 unit_name: String::new(),
                 locale_key: key,
             });
@@ -2793,19 +2848,21 @@ fn parse_localization_text(
             {
                 continue;
             }
+            let entry_category = category_for_localization_key(&key, category);
             output.push(LocalizationEntryDto {
                 key: key.clone(),
                 value: value.clone(),
+                source_name: String::new(),
                 source_path: source_path.to_string(),
                 package_name: package_name.to_string(),
-                category: category.to_string(),
+                category: entry_category,
                 status: if value.is_empty() {
                     "missing_value".into()
                 } else {
                     "native".into()
                 },
                 locale_key_present: true,
-                def_locale_key_present: true,
+                def_locale_key_present: false,
                 unit_name: String::new(),
                 locale_key: key,
             });
@@ -2897,6 +2954,7 @@ fn parse_definition_text(
         output.push(LocalizationEntryDto {
             key: key.clone(),
             value: value.clone(),
+            source_name: source.clone(),
             source_path: source_path.to_string(),
             package_name: package_name.to_string(),
             category: category.to_string(),
@@ -3193,7 +3251,7 @@ fn load_localization_snapshot(
     }
     let mut statement = connection
         .prepare(
-            "SELECT key, value, source_path, package_name, category, status,
+            "SELECT key, value, source_name, source_path, package_name, category, status,
                     locale_key_present, def_locale_key_present, unit_name, locale_key
              FROM localization_entry_v2
              WHERE package_path = ?1 AND target_locale = ?2
@@ -3205,14 +3263,15 @@ fn load_localization_snapshot(
             Ok(LocalizationEntryDto {
                 key: row.get(0)?,
                 value: row.get(1)?,
-                source_path: row.get(2)?,
-                package_name: row.get(3)?,
-                category: row.get(4)?,
-                status: row.get(5)?,
-                locale_key_present: row.get::<_, i64>(6)? != 0,
-                def_locale_key_present: row.get::<_, i64>(7)? != 0,
-                unit_name: row.get(8)?,
-                locale_key: row.get(9)?,
+                source_name: row.get(2)?,
+                source_path: row.get(3)?,
+                package_name: row.get(4)?,
+                category: row.get(5)?,
+                status: row.get(6)?,
+                locale_key_present: row.get::<_, i64>(7)? != 0,
+                def_locale_key_present: row.get::<_, i64>(8)? != 0,
+                unit_name: row.get(9)?,
+                locale_key: row.get(10)?,
             })
         })
         .map_err(|error| format!("read localization snapshot failed: {error}"))?;
@@ -3260,16 +3319,17 @@ fn save_localization_snapshots(
             transaction
                 .execute(
                     "INSERT INTO localization_entry_v2
-                     (package_path, target_locale, entry_order, key, value, source_path,
+                     (package_path, target_locale, entry_order, key, value, source_name, source_path,
                       package_name, category, status, locale_key_present,
                       def_locale_key_present, unit_name, locale_key)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     params![
                         path,
                         locale,
                         index as i64,
                         entry.key,
                         entry.value,
+                        entry.source_name,
                         entry.source_path,
                         entry.package_name,
                         entry.category,
@@ -3332,6 +3392,36 @@ fn merge_localization_entries(
         for entry in entries {
             let merge_key = entry.key.to_ascii_lowercase();
             if let Some(index) = positions.get(&merge_key).copied() {
+                if result[index].package_name == entry.package_name {
+                    // Definitions and locale files from one package form a
+                    // single layer. Keep the definition's display name while
+                    // pairing it with the locale value regardless of archive
+                    // traversal order.
+                    let current = &mut result[index];
+                    if entry.def_locale_key_present {
+                        if !entry.source_name.trim().is_empty() {
+                            current.source_name = entry.source_name.clone();
+                        }
+                        current.source_path = entry.source_path.clone();
+                        current.category = entry.category.clone();
+                        current.unit_name = entry.unit_name.clone();
+                        current.def_locale_key_present = true;
+                        if !entry.value.is_empty() || !current.locale_key_present {
+                            current.value = entry.value.clone();
+                            current.status = entry.status.clone();
+                        }
+                    }
+                    if entry.locale_key_present {
+                        current.value = entry.value.clone();
+                        current.status = entry.status.clone();
+                        current.locale_key_present = true;
+                        current.locale_key = entry.locale_key.clone();
+                        if current.source_name.trim().is_empty() && !entry.source_name.trim().is_empty() {
+                            current.source_name = entry.source_name.clone();
+                        }
+                    }
+                    continue;
+                }
                 // Packages arrive from lowest to highest priority. The later
                 // entry is authoritative even when its locale value is empty:
                 // a high-priority definition must not inherit a translation
@@ -5842,6 +5932,44 @@ mod tests {
         );
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].key, "country.demo");
+        assert_eq!(definitions[0].source_name, "Demo");
+    }
+
+    #[test]
+    fn promods_definition_and_locale_are_joined_by_key() {
+        let definition = parse_definition_text(
+            r#"SiiNunit {
+                city_data : city.promods_demo {
+                    city_name: "Promods Demo"
+                    city_name_localized: "@@city.promods_demo@@"
+                }
+            }"#,
+            "promods.scs::def/world/city.sii",
+            "promods.scs",
+            "city",
+        );
+        let locale = parse_localization_text(
+            r#"SiiNunit {
+                localization_db : .promods {
+                    key[0]: "city.promods_demo"
+                    key[1]: "city.promods_indexed"
+                    val[1]: "Indexed City"
+                    val[0]: "Promods 示例城市"
+                }
+            }"#,
+            "promods.scs::locale/zh_cn/city.sii",
+            "promods.scs",
+            "unknown",
+        );
+        let merged = merge_localization_entries(vec![locale, definition]);
+        assert_eq!(merged.len(), 2);
+        let demo = merged.iter().find(|entry| entry.key == "city.promods_demo").unwrap();
+        assert_eq!(demo.source_name, "Promods Demo");
+        assert_eq!(demo.value, "Promods 示例城市");
+        assert_eq!(demo.category, "city");
+        let indexed = merged.iter().find(|entry| entry.key == "city.promods_indexed").unwrap();
+        assert_eq!(indexed.value, "Indexed City");
+        assert_eq!(indexed.category, "city");
     }
 
     #[test]
@@ -5881,10 +6009,11 @@ mod tests {
     fn localization_snapshot_survives_reload() {
         let database = std::env::temp_dir().join(format!("ets2-l10n-cache-{}.db", now_ms()));
         let package_path = "base.scs".to_string();
-        let fingerprint = ("scs-l10n-v3".to_string(), 123, 456);
+        let fingerprint = ("scs-l10n-v4".to_string(), 123, 456);
         let entry = LocalizationEntryDto {
             key: "city.demo".into(),
             value: "示例城市".into(),
+            source_name: "Demo City".into(),
             source_path: "base.scs::locale/zh_cn/city.sii".into(),
             package_name: "base.scs".into(),
             category: "city".into(),
@@ -5911,6 +6040,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].key, entry.key);
         assert_eq!(loaded[0].value, entry.value);
+        assert_eq!(loaded[0].source_name, entry.source_name);
         let _ = fs::remove_file(database);
     }
 
@@ -5919,6 +6049,7 @@ mod tests {
         let high = LocalizationEntryDto {
             key: "city.demo".into(),
             value: String::new(),
+            source_name: "High City".into(),
             source_path: "high".into(),
             package_name: "high".into(),
             category: "city".into(),
@@ -5931,6 +6062,7 @@ mod tests {
         let low = LocalizationEntryDto {
             key: "city.demo".into(),
             value: "低优先级翻译".into(),
+            source_name: "Low City".into(),
             source_path: "low".into(),
             package_name: "low".into(),
             category: "city".into(),
@@ -6101,6 +6233,7 @@ fn open_db_schema(connection: &Connection) -> Result<(), String> {
                entry_order INTEGER NOT NULL,
                key TEXT NOT NULL,
                value TEXT NOT NULL,
+               source_name TEXT NOT NULL DEFAULT '',
                source_path TEXT NOT NULL,
                package_name TEXT NOT NULL,
                category TEXT NOT NULL,
@@ -6116,6 +6249,7 @@ fn open_db_schema(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("initialize database failed: {e}"))?;
     ensure_media_cache_table(connection)
+        .and_then(|_| ensure_localization_source_name_column(connection))
 }
 
 #[cfg(feature = "desktop")]

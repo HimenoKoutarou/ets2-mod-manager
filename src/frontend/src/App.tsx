@@ -32,7 +32,7 @@ import { ModImage, ModThumbnail } from "./ModImage";
 import ModDirectoryDialog, { directoryCopy } from "./ModDirectoryDialog";
 import CategorySidebar, { TriCheckbox, readDraggedMods } from "./CategorySidebar";
 import { ALL_CATEGORIES } from "./modBatch";
-import { categoryCopy, categoryError } from "./categoryI18n";
+import { categoryCopy, categoryError, localizationCategory } from "./categoryI18n";
 import type { SearchMode } from "./types";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
@@ -479,9 +479,10 @@ function App() {
                 <div className="localization-results">
                   {localization.entries.map((entry) => (
                     <div className="localization-result-row" key={`${entry.packageName}:${entry.key}`}>
-                      <span className="localization-result-kind">{entry.category}</span>
+                      <span className="localization-result-kind">{localizationCategory(entry.category, language)}</span>
                       <div className="localization-result-key">
-                        <strong>{entry.key}</strong>
+                        <strong title={entry.sourceName || entry.key}>{entry.sourceName || entry.key}</strong>
+                        <code title={entry.key}>@@{entry.key}@@</code>
                         <small>{entry.packageName}</small>
                       </div>
                       <code title={entry.sourcePath}>{entry.sourcePath}</code>
@@ -957,7 +958,11 @@ function App() {
                 <div className="support-list">
                   {localization.entries.slice(0, 80).map((entry) => (
                     <div className="support-row" key={`${entry.packageName}:${entry.key}`}>
-                      <strong>{entry.key}</strong>
+                      <span className="support-kind">{localizationCategory(entry.category, language)}</span>
+                      <div className="support-key">
+                        <strong>{entry.sourceName || entry.key}</strong>
+                        <code>@@{entry.key}@@</code>
+                      </div>
                       <input value={localizationDraft[entry.key] ?? entry.value} placeholder={entry.value || "—"} onChange={(event) => setLocalizationDraft((current) => ({ ...current, [entry.key]: event.target.value }))} />
                     </div>
                   ))}

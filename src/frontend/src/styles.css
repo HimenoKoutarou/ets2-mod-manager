@@ -70,10 +70,16 @@ button { color: inherit; }
 .localization-result-kind { align-self: start; padding-top: 3px; color: #2563eb; font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .localization-result-key { display: grid; min-width: 0; gap: 4px; }
 .localization-result-key strong { overflow: hidden; color: #172033; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.localization-result-key code { overflow: hidden; color: #2563eb; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .localization-result-key small { overflow: hidden; color: #667085; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .localization-result-row code { overflow: hidden; color: #667085; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .localization-result-row input { width: 100%; min-width: 0; height: 32px; padding: 0 8px; border: 1px solid #cbd5e1; border-radius: 4px; outline: 0; background: #ffffff; color: #172033; font-size: 12px; }
 .localization-result-row input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px #dbeafe; }
+.support-row { display: grid; grid-template-columns: 54px minmax(0, 1fr) minmax(120px, 1fr); gap: 8px; align-items: center; }
+.support-kind { color: #2563eb; font-size: 10px; font-weight: 700; }
+.support-key { display: grid; min-width: 0; gap: 2px; }
+.support-key strong, .support-key code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.support-key code { color: #667085; font-size: 10px; }
 .localization-empty { min-height: 220px; }
 .profile-page { flex: 1; min-height: 0; overflow: auto; background: #f5f8fc; padding: 28px; }
 .profile-page-main { max-width: 1180px; margin: 0 auto; }

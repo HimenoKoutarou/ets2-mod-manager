@@ -46,3 +46,13 @@ export function categoryError(error: string, language: Language): string {
   const copy = categoryCopy[language];
   return error in copy ? copy[error as keyof typeof copy] : error;
 }
+
+const localizationCategoryCopy: Record<Language, Record<string, string>> = {
+  zh_CN: { city: "城市", country: "国家", ferry: "轮渡", tips: "提示", unknown: "其他", base: "基底" },
+  en_US: { city: "City", country: "Country", ferry: "Ferry", tips: "Tips", unknown: "Other", base: "Base" },
+  ru_RU: { city: "Город", country: "Страна", ferry: "Паром", tips: "Подсказки", unknown: "Другое", base: "База" },
+};
+
+export function localizationCategory(category: string, language: Language): string {
+  return localizationCategoryCopy[language][category.toLowerCase()] ?? category;
+}
