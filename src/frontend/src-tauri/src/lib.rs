@@ -2692,6 +2692,8 @@ fn category_for_path(path: &str) -> String {
         "ferry".into()
     } else if value.contains("city") {
         "city".into()
+    } else if value.contains("tips") || value.contains("tip") || value.contains("hint") {
+        "tips".into()
     } else {
         "unknown".into()
     }
@@ -2838,7 +2840,7 @@ fn parse_definition_text(
     category: &str,
 ) -> Vec<LocalizationEntryDto> {
     let block =
-        Regex::new(r"(?is)(city_data|country_data|ferry_data)\s*:\s*([A-Za-z0-9_.-]+)\s*\{(.*?)\}")
+        Regex::new(r"(?is)(city_data|country_data|ferry_data|tip_data|tips_data|hint_data)\s*:\s*([A-Za-z0-9_.-]+)\s*\{(.*?)\}")
             .expect("definition regex");
     let field = Regex::new(
         r#"(?m)(city_name|city_name_localized|country_name|country_name_localized|name|name_localized|ferry_name|ferry_name_localized)\s*:\s*"((?:\\.|[^"\\])*)""#,
@@ -2865,12 +2867,14 @@ fn parse_definition_text(
             "city_data" => "city_name",
             "country_data" => "country_name",
             "ferry_data" => "ferry_name",
+            "tip_data" | "tips_data" | "hint_data" => "name",
             _ => "name",
         };
         let localized_field = match type_name.to_ascii_lowercase().as_str() {
             "city_data" => "city_name_localized",
             "country_data" => "country_name_localized",
             "ferry_data" => "ferry_name_localized",
+            "tip_data" | "tips_data" | "hint_data" => "name_localized",
             _ => "name_localized",
         };
         let source = fields
@@ -5838,6 +5842,15 @@ mod tests {
         );
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].key, "country.demo");
+    }
+
+    #[test]
+    fn localization_categories_include_tips() {
+        assert_eq!(category_for_path("locale/zh_cn/tips.sii"), "tips");
+        assert_eq!(category_for_path("locale/zh_cn/hints.sui"), "tips");
+        assert_eq!(category_for_path("def/world/city.sii"), "city");
+        assert_eq!(category_for_path("def/world/country.sii"), "country");
+        assert_eq!(category_for_path("def/world/ferry.sii"), "ferry");
     }
 
     #[test]
