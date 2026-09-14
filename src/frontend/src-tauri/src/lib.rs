@@ -1143,12 +1143,24 @@ fn backfill_mod_header_state(connection: &Connection) -> Result<(), String> {
     connection
         .execute(
             "UPDATE mod_package_header_state
-             SET is_directory=1
-             WHERE is_directory=0
-               AND path IN (
-                 SELECT path FROM mod_package_v2
-                 WHERE package_type IN ('directory','workshop')
-               )",
+             SET size = COALESCE(
+                     (SELECT m.size FROM mod_package_v2 m
+                      WHERE m.path = mod_package_header_state.path), size
+                 ),
+                 modified_ms = COALESCE(
+                     (SELECT m.modified_ms FROM mod_package_v2 m
+                      WHERE m.path = mod_package_header_state.path), modified_ms
+                 ),
+                 is_directory = CASE
+                     WHEN EXISTS (
+                         SELECT 1 FROM mod_package_v2 m
+                         WHERE m.path = mod_package_header_state.path
+                           AND (m.package_type IN ('directory','workshop')
+                                OR m.path LIKE '%\\workshop\\%')
+                     ) THEN 1
+                     ELSE is_directory
+                 END
+             WHERE path IN (SELECT path FROM mod_package_v2)",
             [],
         )
         .map_err(|e| format!("repair mod header state failed: {e}"))?;
@@ -2031,6 +2043,30 @@ where
         )
         .map_err(|e| format!("persist media cache metadata failed: {e}"))?;
     Ok(media)
+}
+
+fn media_cache_hit(connection: &Connection, row: &ModDto) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM mod_media_cache c
+                LEFT JOIN mod_media_cache_meta m ON m.path = c.path
+                WHERE c.path=?1 AND c.size=?2 AND c.modified_ms=?3 AND c.fingerprint=?4
+                  AND COALESCE(m.resolver_version, 1)=?5
+                  AND (c.icon_url IS NOT NULL OR c.preview_url IS NOT NULL OR c.cached_at_ms>0)
+            )",
+            params![
+                row.path,
+                row.size as i64,
+                row.modified_ms,
+                row.fingerprint as i64,
+                MEDIA_RESOLVER_VERSION
+            ],
+            |value| value.get::<_, i64>(0),
+        )
+        .map(|value| value != 0)
+        .map_err(|e| format!("read media cache state failed: {e}"))
 }
 
 fn directory_info_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u64) {
@@ -3286,6 +3322,28 @@ fn save_localization_snapshots(
     current_paths: &[String],
     snapshots: &[(String, (String, i64, i64), Vec<LocalizationEntryDto>)],
 ) -> Result<(), String> {
+    save_localization_snapshots_inner(connection, locale, current_paths, snapshots, true)
+}
+
+fn save_localization_snapshot(
+    connection: &mut Connection,
+    locale: &str,
+    snapshot: &(String, (String, i64, i64), Vec<LocalizationEntryDto>),
+) -> Result<(), String> {
+    // Incremental package commits must not run stale cleanup. During a scan,
+    // the current package is only one member of the complete package set; if
+    // cleanup ran here it would delete snapshots already persisted for the
+    // preceding packages.
+    save_localization_snapshots_inner(connection, locale, &[], std::slice::from_ref(snapshot), false)
+}
+
+fn save_localization_snapshots_inner(
+    connection: &mut Connection,
+    locale: &str,
+    current_paths: &[String],
+    snapshots: &[(String, (String, i64, i64), Vec<LocalizationEntryDto>)],
+    cleanup_stale: bool,
+) -> Result<(), String> {
     let _write_lock = acquire_db_write_lock();
     let transaction = connection
         .transaction()
@@ -3343,39 +3401,41 @@ fn save_localization_snapshots(
                 .map_err(|error| format!("write localization entry snapshot failed: {error}"))?;
         }
     }
-    let current_paths: HashSet<&str> = current_paths.iter().map(String::as_str).collect();
-    let mut stale = Vec::new();
-    {
-        let mut statement = transaction
-            .prepare(
-                "SELECT package_path FROM localization_package_v2
-                 WHERE target_locale = ?1",
-            )
-            .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
-        let rows = statement
-            .query_map(params![locale], |row| row.get::<_, String>(0))
-            .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
-        for row in rows {
-            let path =
-                row.map_err(|error| format!("read stale localization snapshot failed: {error}"))?;
-            if !current_paths.contains(path.as_str()) {
-                stale.push(path);
+    if cleanup_stale {
+        let current_paths: HashSet<&str> = current_paths.iter().map(String::as_str).collect();
+        let mut stale = Vec::new();
+        {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT package_path FROM localization_package_v2
+                     WHERE target_locale = ?1",
+                )
+                .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
+            let rows = statement
+                .query_map(params![locale], |row| row.get::<_, String>(0))
+                .map_err(|error| format!("read stale localization snapshots failed: {error}"))?;
+            for row in rows {
+                let path = row
+                    .map_err(|error| format!("read stale localization snapshot failed: {error}"))?;
+                if !current_paths.contains(path.as_str()) {
+                    stale.push(path);
+                }
             }
         }
-    }
-    for path in stale {
-        transaction
-            .execute(
-                "DELETE FROM localization_entry_v2 WHERE package_path = ?1 AND target_locale = ?2",
-                params![path, locale],
-            )
-            .map_err(|error| format!("remove stale localization entries failed: {error}"))?;
-        transaction
-            .execute(
-                "DELETE FROM localization_package_v2 WHERE package_path = ?1 AND target_locale = ?2",
-                params![path, locale],
-            )
-            .map_err(|error| format!("remove stale localization snapshot failed: {error}"))?;
+        for path in stale {
+            transaction
+                .execute(
+                    "DELETE FROM localization_entry_v2 WHERE package_path = ?1 AND target_locale = ?2",
+                    params![path, locale],
+                )
+                .map_err(|error| format!("remove stale localization entries failed: {error}"))?;
+            transaction
+                .execute(
+                    "DELETE FROM localization_package_v2 WHERE package_path = ?1 AND target_locale = ?2",
+                    params![path, locale],
+                )
+                .map_err(|error| format!("remove stale localization snapshot failed: {error}"))?;
+        }
     }
     transaction
         .commit()
@@ -3586,12 +3646,7 @@ fn localization_scan_impl(
         // Persist each completed package immediately. This keeps progress
         // durable even if a later archive is slow, cancelled, or fails.
         let snapshot = (package.path.clone(), fingerprint, entries.clone());
-        save_localization_snapshots(
-            &mut connection,
-            &locale,
-            std::slice::from_ref(&package.path),
-            std::slice::from_ref(&snapshot),
-        )?;
+        save_localization_snapshot(&mut connection, &locale, &snapshot)?;
         all_entries.push(entries);
     }
     if cancelled.load(Ordering::Relaxed) {
@@ -4633,18 +4688,37 @@ where
     let connection = open_db(database)?;
     let catalog = load_cached(&connection)?;
     let total = catalog.len();
-    progress("media", 0, total, "", database);
-    for (index, row) in catalog.iter().enumerate() {
+    let mut misses = Vec::new();
+    for row in &catalog {
+        if !media_cache_hit(&connection, row)? {
+            misses.push(row);
+        }
+    }
+    // A fully persisted media index should make startup effectively a DB read.
+    // Do not replay one progress event per package when there is no work.
+    if misses.is_empty() {
+        progress("media-cached", total, total, "", database);
+        return Ok(());
+    }
+    let miss_count = misses.len();
+    progress("media", 0, miss_count, "", database);
+    for (index, row) in misses.into_iter().enumerate() {
         if cancelled.load(Ordering::Relaxed) {
             return Err("Scan cancelled.".into());
         }
-        progress("media", index, total, &row.display_name, Path::new(&row.path));
+        progress(
+            "media",
+            index,
+            miss_count,
+            &row.display_name,
+            Path::new(&row.path),
+        );
         // cached_mod_media performs the fingerprint/resolver-version lookup
         // first, so initialized packages never reopen their archive or invoke
         // the extractor again.
         cached_mod_media(&connection, row, resolve_mod_media)?;
     }
-    progress("media", total, total, "", database);
+    progress("media", miss_count, miss_count, "", database);
     Ok(())
 }
 
@@ -4763,21 +4837,6 @@ where
     for root in &paths.workshop_roots {
         candidates.extend(shallow_package_candidates(Some(root), true, &cancelled));
     }
-    let headers: HashMap<String, (u64, i64, bool)> = db
-        .prepare("SELECT path,size,modified_ms,is_directory FROM mod_package_header_state")
-        .map_err(|e| format!("query mod headers failed: {e}"))?
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get::<_, i64>(1)?.max(0) as u64,
-                row.get(2)?,
-                row.get::<_, i64>(3)? != 0,
-            ))
-        })
-        .map_err(|e| format!("query mod headers failed: {e}"))?
-        .filter_map(Result::ok)
-        .map(|(path, size, modified, is_dir)| (path, (size, modified, is_dir)))
-        .collect();
     let cached_by_path: HashMap<String, ModDto> =
         cached.into_iter().map(|m| (m.path.clone(), m)).collect();
     let candidate_paths = candidates
@@ -4790,18 +4849,22 @@ where
             .all(|path| cached_by_path.contains_key(path))
         && candidates.iter().all(|candidate| {
             let path = normalize_path(&candidate.path);
-            headers
+            // Compare against the persisted package signature itself. The
+            // header table was introduced after older indexes and may contain
+            // directory metadata rather than the bounded info-file signature;
+            // using it as the source of truth would force a full re-scan on
+            // every restart. The package row is written from the same
+            // `ShallowCandidate` values during sync and is therefore the
+            // durable compatibility point.
+            cached_by_path
                 .get(&path)
-                .map(|(size, modified, is_dir)| {
-                    *size == candidate.size
-                        && *modified == candidate.modified_ms
-                        && *is_dir == candidate.is_directory
+                .map(|row| {
+                    row.size == candidate.size
+                        && row.modified_ms == candidate.modified_ms
+                        && Path::new(&row.path).is_dir() == candidate.is_directory
+                        && !metadata_needs_refresh(row)
                 })
                 .unwrap_or(false)
-                && cached_by_path
-                    .get(&path)
-                    .map(|row| !metadata_needs_refresh(row))
-                    .unwrap_or(false)
         });
     if all_cached {
         progress(
@@ -4824,14 +4887,11 @@ where
     let mut inspected = 0usize;
     for (index, candidate) in candidates.iter().enumerate() {
         let path = normalize_path(&candidate.path);
-        let unchanged = headers
-            .get(&path)
-            .map(|(size, modified, is_dir)| {
-                *size == candidate.size
-                    && *modified == candidate.modified_ms
-                    && *is_dir == candidate.is_directory
-            })
-            .unwrap_or(false);
+        let unchanged = cached_by_path.get(&path).is_some_and(|row| {
+            row.size == candidate.size
+                && row.modified_ms == candidate.modified_ms
+                && Path::new(&row.path).is_dir() == candidate.is_directory
+        });
         if unchanged {
             if let Some(row) = cached_by_path.get(&path) {
                 progress(
@@ -5815,6 +5875,68 @@ mod tests {
     }
 
     #[test]
+    fn startup_ignores_legacy_directory_header_signature() {
+        let root = std::env::temp_dir().join(format!("ets2-legacy-header-{}", now_ms()));
+        let package = root.join("mod/demo_mod");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("manifest.sii"),
+            "SiiNunit\n{\nmod_package : .demo {\n display_name: \"Demo Mod\"\n}\n}\n",
+        )
+        .unwrap();
+        let paths = Paths {
+            game_root: root.clone(),
+            mod_root: root.join("mod"),
+            profiles_root: root.join("profiles"),
+            steam_profiles_root: None,
+            cloud_profiles_root: None,
+            workshop_roots: Vec::new(),
+            game_executable: None,
+        };
+        let database = root.join("index.db");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        scan_mod_inputs_with_progress(
+            paths.clone(),
+            database.clone(),
+            Arc::clone(&cancelled),
+            &mut |_, _, _, _, _| {},
+        )
+        .unwrap();
+        {
+            let connection = open_db(&database).unwrap();
+            connection
+                .execute(
+                    "UPDATE mod_package_header_state
+                     SET size = 0, modified_ms = 1, is_directory = 1",
+                    [],
+                )
+                .unwrap();
+        }
+        let mut events = Vec::new();
+        let summary = startup_incremental_scan(
+            paths,
+            database.clone(),
+            cancelled,
+            &mut |phase, current, total, name, path| {
+                events.push((
+                    phase.to_string(),
+                    current,
+                    total,
+                    name.to_string(),
+                    path.to_path_buf(),
+                ));
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.inspected, 0);
+        assert_eq!(summary.added, 0);
+        assert_eq!(summary.updated, 0);
+        assert!(!events.iter().any(|event| event.0 == "metadata"));
+        assert!(events.iter().any(|event| event.0 == "cached"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn header_state_backfill_uses_persisted_mod_signature() {
         let connection = Connection::open_in_memory().unwrap();
         open_db_schema(&connection).unwrap();
@@ -6041,6 +6163,73 @@ mod tests {
         assert_eq!(loaded[0].key, entry.key);
         assert_eq!(loaded[0].value, entry.value);
         assert_eq!(loaded[0].source_name, entry.source_name);
+        let _ = fs::remove_file(database);
+    }
+
+    #[test]
+    fn localization_incremental_commits_keep_previous_packages() {
+        let database = std::env::temp_dir().join(format!("ets2-l10n-incremental-{}.db", now_ms()));
+        let first_path = "base.scs".to_string();
+        let second_path = "dlc_east.scs".to_string();
+        let entry = |package: &str, key: &str| LocalizationEntryDto {
+            key: key.into(),
+            value: format!("value-{key}"),
+            source_name: key.into(),
+            source_path: format!("{package}::locale/zh_cn/city.sii"),
+            package_name: package.into(),
+            category: "city".into(),
+            status: "native".into(),
+            locale_key_present: true,
+            def_locale_key_present: true,
+            unit_name: String::new(),
+            locale_key: key.into(),
+        };
+        {
+            let mut connection = open_db(&database).expect("open cache db");
+            let first = (
+                first_path.clone(),
+                ("scs-l10n-v4".into(), 1, 11),
+                vec![entry("base.scs", "city.first")],
+            );
+            let second = (
+                second_path.clone(),
+                ("scs-l10n-v4".into(), 2, 22),
+                vec![entry("dlc_east.scs", "city.second")],
+            );
+            save_localization_snapshot(&mut connection, "zh_cn", &first)
+                .expect("persist first package");
+            save_localization_snapshot(&mut connection, "zh_cn", &second)
+                .expect("persist second package");
+            let count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM localization_package_v2 WHERE target_locale = 'zh_cn'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count snapshots");
+            assert_eq!(count, 2);
+        }
+        let connection = open_db(&database).expect("reopen cache db");
+        assert!(
+            load_localization_snapshot(
+                &connection,
+                &first_path,
+                "zh_cn",
+                &("scs-l10n-v4".into(), 1, 11),
+            )
+            .expect("load first package")
+            .is_some()
+        );
+        assert!(
+            load_localization_snapshot(
+                &connection,
+                &second_path,
+                "zh_cn",
+                &("scs-l10n-v4".into(), 2, 22),
+            )
+            .expect("load second package")
+            .is_some()
+        );
         let _ = fs::remove_file(database);
     }
 
