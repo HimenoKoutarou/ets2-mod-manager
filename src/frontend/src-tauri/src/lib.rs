@@ -2641,7 +2641,9 @@ fn package_fingerprint(path: &Path) -> (String, i64, i64) {
         .and_then(|value| value.to_str())
         .unwrap_or("file")
         .to_ascii_lowercase();
-    (kind, size, modified)
+    // Bump the persisted localization snapshot fingerprint whenever the
+    // parser contract changes, so old incomplete locale indexes are rebuilt.
+    (format!("{kind}-l10n-v3"), size, modified)
 }
 
 fn has_path_segment(path: &str, segment: &str) -> bool {
@@ -2712,9 +2714,28 @@ fn parse_localization_text(
     package_name: &str,
     category: &str,
 ) -> Vec<LocalizationEntryDto> {
+    // SII accepts key[], key[0], and other indexed array spellings.  Keep
+    // the key/value arrays independent and pair them by ordinal, because
+    // official and community locale files commonly omit values at the end.
     let mut keys = Vec::new();
     let mut values = Vec::new();
     let mut scalar = Vec::new();
+    let array = Regex::new(
+        r#"(?i)\b(key|val)\s*(?:\[\s*\]|\[\s*\d+\s*\])\s*:\s*"((?:\\.|[^"\\])*)""#,
+    )
+    .expect("localization array regex");
+    for capture in array.captures_iter(text) {
+        let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
+        let value = capture
+            .get(2)
+            .map(|value| unescape_sii(value.as_str()))
+            .unwrap_or_default();
+        if name.eq_ignore_ascii_case("key") {
+            keys.push(value);
+        } else {
+            values.push(value);
+        }
+    }
     for line in text.lines() {
         let trimmed = line.trim();
         let Some((raw_key, raw_value)) = trimmed.split_once(':') else {
@@ -2722,12 +2743,10 @@ fn parse_localization_text(
         };
         let key = raw_key.trim();
         let value = quoted_value(raw_value);
-        if key.eq_ignore_ascii_case("key[]") {
-            if !value.is_empty() {
-                keys.push(value);
-            }
-        } else if key.eq_ignore_ascii_case("val[]") {
-            values.push(value);
+        if key.to_ascii_lowercase().starts_with("key[")
+            || key.to_ascii_lowercase().starts_with("val[")
+        {
+            continue;
         } else if !key.contains("[]")
             && !key.contains(' ')
             && !key.eq_ignore_ascii_case("active_mods")
@@ -2796,7 +2815,7 @@ fn parse_definition_text(
         Regex::new(r"(?is)(city_data|country_data|ferry_data)\s*:\s*([A-Za-z0-9_.-]+)\s*\{(.*?)\}")
             .expect("definition regex");
     let field = Regex::new(
-        r#"(?m)(city_name|city_name_localized|name|name_localized|ferry_name|ferry_name_localized)\s*:\s*"((?:\\.|[^"\\])*)""#,
+        r#"(?m)(city_name|city_name_localized|country_name|country_name_localized|name|name_localized|ferry_name|ferry_name_localized)\s*:\s*"((?:\\.|[^"\\])*)""#,
     )
     .expect("definition field regex");
     let mut output = Vec::new();
@@ -2818,11 +2837,13 @@ fn parse_definition_text(
         }
         let source_field = match type_name.to_ascii_lowercase().as_str() {
             "city_data" => "city_name",
+            "country_data" => "country_name",
             "ferry_data" => "ferry_name",
             _ => "name",
         };
         let localized_field = match type_name.to_ascii_lowercase().as_str() {
             "city_data" => "city_name_localized",
+            "country_data" => "country_name_localized",
             "ferry_data" => "ferry_name_localized",
             _ => "name_localized",
         };
@@ -5756,6 +5777,30 @@ mod tests {
         assert_eq!(entries[0].key, "city.demo");
         assert_eq!(entries[0].value, "Demo City");
         assert_eq!(entries[0].status, "native");
+    }
+
+    #[test]
+    fn localization_parser_reads_indexed_arrays_and_country_definitions() {
+        let entries = parse_localization_text(
+            "SiiNunit { localization_db : .x { key[0]: \"country.demo\" key[1]: \"country.empty\" val[0]: \"Demo Country\" } }",
+            "base.scs::locale/zh_cn/localization.sii",
+            "base.scs",
+            "country",
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "country.demo");
+        assert_eq!(entries[0].value, "Demo Country");
+        assert_eq!(entries[1].key, "country.empty");
+        assert!(entries[1].value.is_empty());
+
+        let definitions = parse_definition_text(
+            "SiiNunit { country_data : country.demo { country_name: \"Demo\" country_name_localized: \"@@country.demo@@\" } }",
+            "base.scs::def/world/country.sii",
+            "base.scs",
+            "country",
+        );
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].key, "country.demo");
     }
 
     #[test]
