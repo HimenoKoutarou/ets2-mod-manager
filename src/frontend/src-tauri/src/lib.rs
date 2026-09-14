@@ -2965,6 +2965,70 @@ fn scan_localization_archive(
     output
 }
 
+fn scan_external_localization_archive(
+    path: &Path,
+    locale: &str,
+    cancelled: &AtomicBool,
+    #[cfg(feature = "desktop")] app: Option<&AppHandle>,
+) -> Vec<LocalizationEntryDto> {
+    let Some(temp) = extractor_temp_directory(path, &format!("localization-{locale}")) else {
+        return Vec::new();
+    };
+    let partial = format!("/def,/locale/{locale}");
+    let (tool, args): (PathBuf, Vec<String>) = match archive_kind(path) {
+        archive_core::ArchiveKind::HashFs => {
+            let Some(extractor) = extractor_path() else {
+                let _ = fs::remove_dir_all(&temp);
+                return Vec::new();
+            };
+            (
+                extractor,
+                vec![
+                    external_tool_path(path).to_string_lossy().into_owned(),
+                    "--deep".into(),
+                    format!("--partial={partial}"),
+                    "-d".into(),
+                    temp.to_string_lossy().into_owned(),
+                    "-s".into(),
+                ],
+            )
+        }
+        archive_core::ArchiveKind::Aem => {
+            let Some(sxc) = sxc_path() else {
+                let _ = fs::remove_dir_all(&temp);
+                return Vec::new();
+            };
+            (
+                sxc,
+                vec![
+                    external_tool_path(path).to_string_lossy().into_owned(),
+                    "-o".into(),
+                    temp.to_string_lossy().into_owned(),
+                    "-f".into(),
+                    partial,
+                    "-q".into(),
+                ],
+            )
+        }
+        _ => {
+            let _ = fs::remove_dir_all(&temp);
+            return Vec::new();
+        }
+    };
+    let mut command = std::process::Command::new(&tool);
+    hide_child_process(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let status = command.args(args).status();
+    if cancelled.load(Ordering::Relaxed) || !status.is_ok_and(|value| value.success()) {
+        let _ = fs::remove_dir_all(&temp);
+        return Vec::new();
+    }
+    let package_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+    let result = scan_localization_directory(&temp, package_name, locale, cancelled, #[cfg(feature = "desktop")] app);
+    let _ = fs::remove_dir_all(&temp);
+    result
+}
+
 fn scan_localization_package(
     path: &Path,
     locale: &str,
@@ -3006,7 +3070,13 @@ fn scan_localization_package(
             parse_localization_text(&text, &source_path, package_name, &category_for_path(&source_path))
         };
     }
-    scan_localization_archive(path, locale, cancelled, #[cfg(feature = "desktop")] app)
+    match archive_kind(path) {
+        archive_core::ArchiveKind::Zip => scan_localization_archive(path, locale, cancelled, #[cfg(feature = "desktop")] app),
+        archive_core::ArchiveKind::HashFs | archive_core::ArchiveKind::Aem => {
+            scan_external_localization_archive(path, locale, cancelled, #[cfg(feature = "desktop")] app)
+        }
+        archive_core::ArchiveKind::Unknown => Vec::new(),
+    }
 }
 
 fn load_localization_snapshot(
