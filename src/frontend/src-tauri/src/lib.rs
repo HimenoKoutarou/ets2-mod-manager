@@ -1364,6 +1364,38 @@ fn hide_child_process(command: &mut std::process::Command) {
     }
 }
 
+fn run_external_command_cancellable(
+    tool: &Path,
+    args: &[String],
+    cancelled: &AtomicBool,
+) -> bool {
+    let mut command = std::process::Command::new(tool);
+    hide_child_process(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.args(args).spawn() else {
+        return false;
+    };
+    loop {
+        if cancelled.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(40)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 fn read_zip_entry_bytes(path: &Path, wanted: &str) -> Option<Vec<u8>> {
     // Never probe non-ZIP SCS/HashFS packages with `ZipArchive::new`.
     // HashFS packages can be several gigabytes and ZIP's central-directory
@@ -2985,7 +3017,6 @@ fn scan_external_localization_archive(
                 extractor,
                 vec![
                     external_tool_path(path).to_string_lossy().into_owned(),
-                    "--deep".into(),
                     format!("--partial={partial}"),
                     "-d".into(),
                     temp.to_string_lossy().into_owned(),
@@ -3015,11 +3046,17 @@ fn scan_external_localization_archive(
             return Vec::new();
         }
     };
-    let mut command = std::process::Command::new(&tool);
-    hide_child_process(&mut command);
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let status = command.args(args).status();
-    if cancelled.load(Ordering::Relaxed) || !status.is_ok_and(|value| value.success()) {
+    #[cfg(feature = "desktop")]
+    if let Some(app) = app {
+        let _ = app.emit(
+            "localization-file-progress",
+            serde_json::json!({
+                "packageName": path.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
+                "file": format!("定位 def/locale/{locale}"),
+            }),
+        );
+    }
+    if !run_external_command_cancellable(&tool, &args, cancelled) {
         let _ = fs::remove_dir_all(&temp);
         return Vec::new();
     }
