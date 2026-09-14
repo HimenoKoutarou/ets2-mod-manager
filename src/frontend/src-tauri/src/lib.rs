@@ -2634,6 +2634,22 @@ fn is_localization_source_path(path: &str) -> bool {
     is_localization_path(relative) || is_definition_path(relative)
 }
 
+fn is_localization_source_path_for_locale(path: &str, locale: &str) -> bool {
+    let relative = path.rsplit_once("::").map(|(_, value)| value).unwrap_or(path);
+    if is_definition_path(relative) {
+        return true;
+    }
+    let normalized = relative.replace('\\', "/");
+    let parts = normalized.split('/').collect::<Vec<_>>();
+    let locale_lower = locale.to_ascii_lowercase();
+    parts.windows(2).any(|window| {
+        window[0].eq_ignore_ascii_case("locale")
+            && window[1].eq_ignore_ascii_case(&locale_lower)
+            && (normalized.to_ascii_lowercase().ends_with(".sii")
+                || normalized.to_ascii_lowercase().ends_with(".sui"))
+    })
+}
+
 fn category_for_path(path: &str) -> String {
     let value = path.to_ascii_lowercase();
     if value.contains("country") {
@@ -2818,6 +2834,7 @@ fn parse_definition_text(
 fn scan_localization_directory(
     root: &Path,
     package_name: &str,
+    locale: &str,
     cancelled: &AtomicBool,
     #[cfg(feature = "desktop")] app: Option<&AppHandle>,
 ) -> Vec<LocalizationEntryDto> {
@@ -2825,25 +2842,26 @@ fn scan_localization_directory(
     let Ok(files) = fs::read_dir(root) else {
         return output;
     };
-    let mut stack: Vec<PathBuf> = files
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                || path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|name| {
-                        name.eq_ignore_ascii_case("def") || name.eq_ignore_ascii_case("locale")
-                    })
-        })
-        .collect();
+    let mut stack: Vec<PathBuf> = files.flatten().map(|entry| entry.path()).collect();
     stack.sort_by(|left, right| right.cmp(left));
     while let Some(path) = stack.pop() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
         if path.is_dir() {
+            let relative_dir = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let segments = relative_dir.split('/').filter(|value| !value.is_empty()).collect::<Vec<_>>();
+            let allowed = segments.is_empty()
+                || segments[0].eq_ignore_ascii_case("def")
+                || (segments[0].eq_ignore_ascii_case("locale")
+                    && (segments.len() == 1 || segments[1].eq_ignore_ascii_case(locale)));
+            if !allowed {
+                continue;
+            }
             if let Ok(entries) = fs::read_dir(&path) {
                 let mut children: Vec<PathBuf> =
                     entries.flatten().map(|entry| entry.path()).collect();
@@ -2857,7 +2875,7 @@ fn scan_localization_directory(
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
-        if !is_localization_path(&relative) && !is_definition_path(&relative) {
+        if !is_localization_source_path_for_locale(&relative, locale) {
             continue;
         }
         let Ok(text) = fs::read_to_string(&path) else {
@@ -2915,12 +2933,7 @@ fn scan_localization_archive(
             continue;
         }
         let normalized = entry.name().replace('\\', "/");
-        let locale_match = normalized
-            .to_ascii_lowercase()
-            .contains(&format!("locale/{}/", locale.to_ascii_lowercase()));
-        if (!locale_match && !is_definition_path(&normalized))
-            || (!is_localization_path(&normalized) && !is_definition_path(&normalized))
-        {
+        if !is_localization_source_path_for_locale(&normalized, locale) {
             continue;
         }
         let mut bytes = Vec::new();
@@ -2964,6 +2977,7 @@ fn scan_localization_package(
             path.file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or_default(),
+            locale,
             cancelled,
             #[cfg(feature = "desktop")] app,
         );
@@ -2978,7 +2992,7 @@ fn scan_localization_package(
         };
         let package_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
         let source_path = path.display().to_string();
-        if !is_localization_source_path(&source_path) {
+        if !is_localization_source_path_for_locale(&source_path, locale) {
             return Vec::new();
         }
         #[cfg(feature = "desktop")]
@@ -3307,7 +3321,7 @@ fn localization_scan_impl(
             all_entries.push(
                 entries
                     .into_iter()
-                    .filter(|entry| is_localization_source_path(&entry.source_path))
+                    .filter(|entry| is_localization_source_path_for_locale(&entry.source_path, &locale))
                     .collect(),
             );
             continue;
@@ -3315,7 +3329,7 @@ fn localization_scan_impl(
         inspected += 1;
         let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled, #[cfg(feature = "desktop")] app.as_ref())
             .into_iter()
-            .filter(|entry| is_localization_source_path(&entry.source_path))
+            .filter(|entry| is_localization_source_path_for_locale(&entry.source_path, &locale))
             .collect::<Vec<_>>();
         if cancelled.load(Ordering::Relaxed) {
             return Err("Localization scan cancelled.".into());
@@ -5194,6 +5208,10 @@ mod tests {
         assert!(is_localization_source_path("mod.scs::def/world/city.sii"));
         assert!(is_localization_source_path("mod.scs::locale/en_us/localization.sii"));
         assert!(!is_localization_source_path("mod.scs::material/ui/icon.mat"));
+        assert!(is_localization_source_path_for_locale("mod.scs::def/world/city.sii", "zh_cn"));
+        assert!(is_localization_source_path_for_locale("mod.scs::locale/zh_cn/localization.sii", "zh_cn"));
+        assert!(!is_localization_source_path_for_locale("mod.scs::locale/en_us/localization.sii", "zh_cn"));
+        assert!(!is_localization_source_path_for_locale("mod.scs::material/ui/icon.mat", "zh_cn"));
     }
 
     #[test]
