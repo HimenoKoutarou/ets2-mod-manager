@@ -2714,95 +2714,121 @@ fn parse_localization_text(
     package_name: &str,
     category: &str,
 ) -> Vec<LocalizationEntryDto> {
-    // SII accepts key[], key[0], and other indexed array spellings.  Keep
-    // the key/value arrays independent and pair them by ordinal, because
-    // official and community locale files commonly omit values at the end.
-    let mut keys = Vec::new();
-    let mut values = Vec::new();
-    let mut scalar = Vec::new();
-    let array = Regex::new(
-        r#"(?i)\b(key|val)\s*(?:\[\s*\]|\[\s*\d+\s*\])\s*:\s*"((?:\\.|[^"\\])*)""#,
-    )
-    .expect("localization array regex");
-    for capture in array.captures_iter(text) {
-        let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
-        let value = capture
-            .get(2)
-            .map(|value| unescape_sii(value.as_str()))
-            .unwrap_or_default();
-        if name.eq_ignore_ascii_case("key") {
-            keys.push(value);
-        } else {
-            values.push(value);
+    fn parse_unit(
+        unit_text: &str,
+        source_path: &str,
+        package_name: &str,
+        category: &str,
+    ) -> Vec<LocalizationEntryDto> {
+        // SII accepts key[], key[0], and other indexed array spellings.
+        // Pair arrays inside each localization_db unit so entries from
+        // separate units can never be accidentally cross-matched.
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        let mut scalar = Vec::new();
+        let array = Regex::new(
+            r#"(?i)\b(key|val)\s*(?:\[\s*\]|\[\s*\d+\s*\])\s*:\s*"((?:\\.|[^"\\])*)""#,
+        )
+        .expect("localization array regex");
+        for capture in array.captures_iter(unit_text) {
+            let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
+            let value = capture
+                .get(2)
+                .map(|value| unescape_sii(value.as_str()))
+                .unwrap_or_default();
+            if name.eq_ignore_ascii_case("key") {
+                keys.push(value);
+            } else {
+                values.push(value);
+            }
         }
-    }
-    for line in text.lines() {
-        let trimmed = line.trim();
-        let Some((raw_key, raw_value)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let key = raw_key.trim();
-        let value = quoted_value(raw_value);
-        if key.to_ascii_lowercase().starts_with("key[")
-            || key.to_ascii_lowercase().starts_with("val[")
-        {
-            continue;
-        } else if !key.contains("[]")
-            && !key.contains(' ')
-            && !key.eq_ignore_ascii_case("active_mods")
-            && !key.eq_ignore_ascii_case("SiiNunit")
-            && !key.eq_ignore_ascii_case("localization_db")
-        {
-            scalar.push((key.to_string(), value));
+        for line in unit_text.lines() {
+            let trimmed = line.trim();
+            let Some((raw_key, raw_value)) = trimmed.split_once(':') else {
+                continue;
+            };
+            let key = raw_key.trim();
+            let value = quoted_value(raw_value);
+            if key.to_ascii_lowercase().starts_with("key[")
+                || key.to_ascii_lowercase().starts_with("val[")
+            {
+                continue;
+            } else if !key.contains("[]")
+                && !key.contains(' ')
+                && !key.eq_ignore_ascii_case("active_mods")
+                && !key.eq_ignore_ascii_case("SiiNunit")
+                && !key.eq_ignore_ascii_case("localization_db")
+            {
+                scalar.push((key.to_string(), value));
+            }
         }
+
+        let mut output = Vec::new();
+        for (index, key) in keys.into_iter().enumerate() {
+            let value = values.get(index).cloned().unwrap_or_default();
+            output.push(LocalizationEntryDto {
+                key: key.clone(),
+                value: value.clone(),
+                source_path: source_path.to_string(),
+                package_name: package_name.to_string(),
+                category: category.to_string(),
+                status: if value.is_empty() {
+                    "missing_value".into()
+                } else {
+                    "native".into()
+                },
+                locale_key_present: true,
+                def_locale_key_present: true,
+                unit_name: String::new(),
+                locale_key: key,
+            });
+        }
+        for (key, value) in scalar {
+            if key.eq_ignore_ascii_case("name")
+                || key.eq_ignore_ascii_case("city_name")
+                || key.eq_ignore_ascii_case("country_name")
+                || key.eq_ignore_ascii_case("ferry_name")
+            {
+                continue;
+            }
+            output.push(LocalizationEntryDto {
+                key: key.clone(),
+                value: value.clone(),
+                source_path: source_path.to_string(),
+                package_name: package_name.to_string(),
+                category: category.to_string(),
+                status: if value.is_empty() {
+                    "missing_value".into()
+                } else {
+                    "native".into()
+                },
+                locale_key_present: true,
+                def_locale_key_present: true,
+                unit_name: String::new(),
+                locale_key: key,
+            });
+        }
+        output
     }
 
+    // Most locale files contain multiple localization_db units. The body
+    // regex intentionally stops at the unit's closing brace; locale units do
+    // not contain nested braces in their key/value payloads.
+    let unit = Regex::new(r"(?is)(?:localization_db|localization)\s*:\s*[^{]+\{(.*?)\}")
+        .expect("localization unit regex");
     let mut output = Vec::new();
-    for (index, key) in keys.into_iter().enumerate() {
-        let value = values.get(index).cloned().unwrap_or_default();
-        output.push(LocalizationEntryDto {
-            key: key.clone(),
-            value: value.clone(),
-            source_path: source_path.to_string(),
-            package_name: package_name.to_string(),
-            category: category.to_string(),
-            status: if value.is_empty() {
-                "missing_value".into()
-            } else {
-                "native".into()
-            },
-            locale_key_present: true,
-            def_locale_key_present: true,
-            unit_name: String::new(),
-            locale_key: key,
-        });
-    }
-    for (key, value) in scalar {
-        if key.eq_ignore_ascii_case("name")
-            || key.eq_ignore_ascii_case("city_name")
-            || key.eq_ignore_ascii_case("country_name")
-            || key.eq_ignore_ascii_case("ferry_name")
-        {
-            continue;
+    for capture in unit.captures_iter(text) {
+        if let Some(body) = capture.get(1) {
+            output.extend(parse_unit(body.as_str(), source_path, package_name, category));
         }
-        output.push(LocalizationEntryDto {
-            key: key.clone(),
-            value: value.clone(),
-            source_path: source_path.to_string(),
-            package_name: package_name.to_string(),
-            category: category.to_string(),
-            status: if value.is_empty() {
-                "missing_value".into()
-            } else {
-                "native".into()
-            },
-            locale_key_present: true,
-            def_locale_key_present: true,
-            unit_name: String::new(),
-            locale_key: key,
-        });
     }
-    output
+    if !output.is_empty() {
+        return output;
+    }
+
+    // A few community files omit the unit header; retain a permissive
+    // fallback so those files still contribute locale entries.
+    parse_unit(text, source_path, package_name, category)
 }
 
 fn parse_definition_text(
@@ -5801,6 +5827,30 @@ mod tests {
         );
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].key, "country.demo");
+    }
+
+    #[test]
+    fn localization_parser_does_not_cross_pair_multiple_units() {
+        let entries = parse_localization_text(
+            r#"SiiNunit {
+                localization_db : .first {
+                    key[]: "city.first"
+                    val[]: "First"
+                }
+                localization_db : .second {
+                    key[]: "city.second"
+                    val[]: "Second"
+                }
+            }"#,
+            "base.scs::locale/zh_cn/localization.sii",
+            "base.scs",
+            "city",
+        );
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "city.first");
+        assert_eq!(entries[0].value, "First");
+        assert_eq!(entries[1].key, "city.second");
+        assert_eq!(entries[1].value, "Second");
     }
 
     #[test]
