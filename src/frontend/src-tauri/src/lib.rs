@@ -3328,9 +3328,11 @@ fn merge_localization_entries(
         for entry in entries {
             let merge_key = entry.key.to_ascii_lowercase();
             if let Some(index) = positions.get(&merge_key).copied() {
-                if !entry.value.is_empty() {
-                    result[index] = entry;
-                }
+                // Packages arrive from lowest to highest priority. The later
+                // entry is authoritative even when its locale value is empty:
+                // a high-priority definition must not inherit a translation
+                // from a lower-priority mod.
+                result[index] = entry;
             } else {
                 positions.insert(merge_key, result.len());
                 result.push(entry);
@@ -5900,7 +5902,7 @@ mod tests {
     }
 
     #[test]
-    fn localization_merge_keeps_first_priority_value() {
+    fn localization_merge_keeps_highest_priority_definition() {
         let high = LocalizationEntryDto {
             key: "city.demo".into(),
             value: String::new(),
@@ -5925,10 +5927,10 @@ mod tests {
             unit_name: String::new(),
             locale_key: "city.demo".into(),
         };
-        let merged = merge_localization_entries(vec![vec![high], vec![low]]);
+        let merged = merge_localization_entries(vec![vec![low], vec![high]]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].value, "低优先级翻译");
-        assert_eq!(merged[0].package_name, "low");
+        assert!(merged[0].value.is_empty());
+        assert_eq!(merged[0].package_name, "high");
     }
 
     #[test]
