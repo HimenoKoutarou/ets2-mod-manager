@@ -141,6 +141,10 @@ function App() {
     let stopFile: UnlistenFn | undefined;
     void listen<{ packageName: string; path?: string; processed: number; total: number }>("localization-progress", (event) => {
       setLocalizationProgress(event.payload);
+      setLocalizationFileProgress({
+        packageName: event.payload.packageName || event.payload.path?.split(/[\\/]/).pop() || "",
+        file: "",
+      });
     }).then((unlisten) => { stop = unlisten; });
     void listen<{ packageName: string; file: string }>("localization-file-progress", (event) => {
       setLocalizationFileProgress(event.payload);
@@ -820,10 +824,10 @@ function App() {
                 {localizationScanning ? (
                   <div className="localization-progress-copy">
                     <span className="localization-progress-mod" title={localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? ""}>
-                      {text.scanning}: {localizationFileProgress?.packageName ?? localizationProgress?.packageName ?? text.noSelection}
+                      {text.scanning}: {localizationFileProgress?.packageName || localizationProgress?.packageName || "..."}
                     </span>
                     <span className="localization-progress-file" title={localizationFileProgress?.file ?? ""}>
-                      {text.localizationFile}: {localizationFileProgress?.file ?? text.noSelection}
+                      {text.localizationFile}: {localizationFileProgress?.file || "..."}
                     </span>
                     <span className="localization-progress-count">
                       {localizationProgress?.processed ?? 0} / {localizationProgress?.total ?? 0}
