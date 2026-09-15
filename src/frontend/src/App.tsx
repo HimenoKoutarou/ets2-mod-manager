@@ -133,6 +133,7 @@ function App() {
     level: "",
   });
   const [localizationDraft, setLocalizationDraft] = useState<Record<string, string>>({});
+  const [localizationKeyDraft, setLocalizationKeyDraft] = useState<Record<string, string>>({});
   const [localizationProgress, setLocalizationProgress] = useState<{ packageName: string; path?: string; processed: number; total: number } | null>(null);
   const [localizationFileProgress, setLocalizationFileProgress] = useState<{ packageName: string; file: string } | null>(null);
   useEffect(() => {
@@ -482,7 +483,16 @@ function App() {
                       <span className="localization-result-kind">{localizationCategory(entry.category, language)}</span>
                       <div className="localization-result-key">
                         <strong title={entry.sourceName || entry.key}>{entry.sourceName || entry.key}</strong>
-                        <code title={entry.key}>@@{entry.key}@@</code>
+                        {entry.key.startsWith("__manual_") ? (
+                          <input
+                            className="localization-key-input"
+                            value={localizationKeyDraft[entry.key] ?? ""}
+                            placeholder={text.fillLocalizationKey}
+                            onChange={(event) => setLocalizationKeyDraft((current) => ({ ...current, [entry.key]: event.target.value }))}
+                          />
+                        ) : (
+                          <code title={entry.key}>@@{entry.key}@@</code>
+                        )}
                         <small>{entry.packageName}</small>
                       </div>
                       <code title={entry.sourcePath}>{entry.sourcePath}</code>

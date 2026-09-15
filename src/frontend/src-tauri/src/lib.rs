@@ -545,7 +545,9 @@ fn workshop_id_from_value(value: &str) -> Option<String> {
         return Some(suffix.to_string());
     }
     if suffix.chars().all(|c| c.is_ascii_hexdigit()) {
-        return u64::from_str_radix(suffix, 16).ok().map(|id| id.to_string());
+        return u64::from_str_radix(suffix, 16)
+            .ok()
+            .map(|id| id.to_string());
     }
     None
 }
@@ -570,17 +572,18 @@ fn workshop_log_title(workshop_id: &str, paths: &Paths) -> Option<String> {
     if workshop_id.is_empty() || !workshop_id.chars().all(|value| value.is_ascii_digit()) {
         return None;
     }
-    let pattern = Regex::new(
-        r"(?m)Active workshop mod ID\s+(\d+)\s+\(name:\s*(.*?),\s+version:",
-    )
-    .ok()?;
+    let pattern =
+        Regex::new(r"(?m)Active workshop mod ID\s+(\d+)\s+\(name:\s*(.*?),\s+version:").ok()?;
     for log_name in ["editor.log.txt", "game.log.txt"] {
         let path = paths.game_root.join(log_name);
         let Ok(text) = fs::read_to_string(path) else {
             continue;
         };
         for captures in pattern.captures_iter(&text) {
-            if captures.get(1).is_some_and(|value| value.as_str() == workshop_id) {
+            if captures
+                .get(1)
+                .is_some_and(|value| value.as_str() == workshop_id)
+            {
                 let title = captures.get(2)?.as_str().trim();
                 if !title.is_empty() {
                     return Some(title.to_string());
@@ -1398,11 +1401,7 @@ fn hide_child_process(command: &mut std::process::Command) {
     }
 }
 
-fn run_external_command_cancellable(
-    tool: &Path,
-    args: &[String],
-    cancelled: &AtomicBool,
-) -> bool {
+fn run_external_command_cancellable(tool: &Path, args: &[String], cancelled: &AtomicBool) -> bool {
     let mut command = std::process::Command::new(tool);
     hide_child_process(&mut command);
     command
@@ -1547,7 +1546,11 @@ fn cached_workshop_preview_url(mod_id: &str) -> Option<String> {
 }
 
 fn workshop_preview_failure_marker(mod_id: &str) -> Option<PathBuf> {
-    Some(cache_directory()?.join("workshop_previews").join(format!("{mod_id}.failed")))
+    Some(
+        cache_directory()?
+            .join("workshop_previews")
+            .join(format!("{mod_id}.failed")),
+    )
 }
 
 fn workshop_preview_download_suppressed(mod_id: &str) -> bool {
@@ -1634,10 +1637,9 @@ fn download_workshop_preview(mod_id: &str) -> Option<String> {
             mark_workshop_preview_failure(mod_id);
             return None;
         };
-        let pattern = Regex::new(
-            r#"(?is)<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']"#,
-        )
-        .ok();
+        let pattern =
+            Regex::new(r#"(?is)<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']"#)
+                .ok();
         let Some(value) = pattern
             .and_then(|regex| regex.captures(&page))
             .and_then(|captures| captures.get(1))
@@ -1809,7 +1811,10 @@ fn external_archive_manifest(path: &Path) -> Option<String> {
     };
     let mut command = std::process::Command::new(&tool);
     hide_child_process(&mut command);
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let status = command.args(args).status().ok();
     let manifest = if status.is_some_and(|value| value.success()) {
         find_extracted_entry(&temp, "manifest.sii").and_then(|path| fs::read_to_string(path).ok())
@@ -1861,7 +1866,10 @@ fn external_archive_image(path: &Path, icon_filename: &str) -> Option<String> {
     };
     let mut command = std::process::Command::new(&tool);
     hide_child_process(&mut command);
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let status = command.args(args).status().ok();
     let mut result = None;
     if status.is_some_and(|value| value.success()) {
@@ -1901,7 +1909,10 @@ fn external_archive_image(path: &Path, icon_filename: &str) -> Option<String> {
 }
 
 fn find_extracted_entry(root: &Path, wanted: &str) -> Option<PathBuf> {
-    let wanted = wanted.replace('\\', "/").trim_start_matches('/').to_ascii_lowercase();
+    let wanted = wanted
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_ascii_lowercase();
     let mut stack = vec![root.to_path_buf()];
     while let Some(current) = stack.pop() {
         for entry in fs::read_dir(&current).ok()?.flatten() {
@@ -1910,9 +1921,16 @@ fn find_extracted_entry(root: &Path, wanted: &str) -> Option<PathBuf> {
                 stack.push(path);
                 continue;
             }
-            let relative = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+            let relative = path
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
             if relative.to_ascii_lowercase() == wanted
-                || relative.rsplit('/').next().is_some_and(|name| name == wanted)
+                || relative
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|name| name == wanted)
             {
                 return Some(path);
             }
@@ -2326,8 +2344,8 @@ fn refresh_cached_workshop_titles(
         let workshop_id = workshop_id_from_value(&row.package_name)
             .or_else(|| workshop_id_from_value(&row.id))
             .unwrap_or_else(|| row.id.clone());
-        let title = workshop_log_title(&workshop_id, paths)
-            .or_else(|| workshop_cached_title(&workshop_id));
+        let title =
+            workshop_log_title(&workshop_id, paths).or_else(|| workshop_cached_title(&workshop_id));
         let Some(title) = title else {
             continue;
         };
@@ -2392,7 +2410,9 @@ fn load_metadata_state(connection: &Connection) -> Result<HashMap<String, i64>, 
         .prepare("SELECT path, resolver_version FROM mod_metadata_state")
         .map_err(|e| format!("query metadata state failed: {e}"))?;
     let rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
         .map_err(|e| format!("read metadata state failed: {e}"))?;
     rows.map(|row| row.map_err(|e| format!("read metadata state row failed: {e}")))
         .collect()
@@ -2722,12 +2742,18 @@ fn is_definition_path(path: &str) -> bool {
 }
 
 fn is_localization_source_path(path: &str) -> bool {
-    let relative = path.rsplit_once("::").map(|(_, value)| value).unwrap_or(path);
+    let relative = path
+        .rsplit_once("::")
+        .map(|(_, value)| value)
+        .unwrap_or(path);
     is_localization_path(relative) || is_definition_path(relative)
 }
 
 fn is_localization_source_path_for_locale(path: &str, locale: &str) -> bool {
-    let relative = path.rsplit_once("::").map(|(_, value)| value).unwrap_or(path);
+    let relative = path
+        .rsplit_once("::")
+        .map(|(_, value)| value)
+        .unwrap_or(path);
     if is_definition_path(relative) {
         return true;
     }
@@ -2804,12 +2830,13 @@ fn parse_localization_text(
         let mut keys: Vec<(Option<usize>, String)> = Vec::new();
         let mut values: Vec<(Option<usize>, String)> = Vec::new();
         let mut scalar = Vec::new();
-        let array = Regex::new(
-            r#"(?i)\b(key|val)\s*\[\s*(\d*)\s*\]\s*:\s*"((?:\\.|[^"\\])*)""#,
-        )
-        .expect("localization array regex");
+        let array = Regex::new(r#"(?i)\b(key|val)\s*\[\s*(\d*)\s*\]\s*:\s*"((?:\\.|[^"\\])*)""#)
+            .expect("localization array regex");
         for capture in array.captures_iter(unit_text) {
-            let name = capture.get(1).map(|value| value.as_str()).unwrap_or_default();
+            let name = capture
+                .get(1)
+                .map(|value| value.as_str())
+                .unwrap_or_default();
             let index = capture
                 .get(2)
                 .map(|value| value.as_str())
@@ -2914,7 +2941,12 @@ fn parse_localization_text(
     let mut output = Vec::new();
     for capture in unit.captures_iter(text) {
         if let Some(body) = capture.get(1) {
-            output.extend(parse_unit(body.as_str(), source_path, package_name, category));
+            output.extend(parse_unit(
+                body.as_str(),
+                source_path,
+                package_name,
+                category,
+            ));
         }
     }
     if !output.is_empty() {
@@ -3031,7 +3063,10 @@ fn scan_localization_directory(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let segments = relative_dir.split('/').filter(|value| !value.is_empty()).collect::<Vec<_>>();
+            let segments = relative_dir
+                .split('/')
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
             let allowed = segments.is_empty()
                 || segments[0].eq_ignore_ascii_case("def")
                 || (segments[0].eq_ignore_ascii_case("locale")
@@ -3061,7 +3096,10 @@ fn scan_localization_directory(
         let source_path = format!("{}::{}", root.display(), relative);
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
-            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": relative}));
+            let _ = app.emit(
+                "localization-file-progress",
+                serde_json::json!({"packageName": package_name, "file": relative}),
+            );
         }
         if is_definition_path(&relative) {
             output.extend(parse_definition_text(
@@ -3121,7 +3159,10 @@ fn scan_localization_archive(
         let source_path = format!("{}::{}", path.display(), normalized);
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
-            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": normalized}));
+            let _ = app.emit(
+                "localization-file-progress",
+                serde_json::json!({"packageName": package_name, "file": normalized}),
+            );
         }
         if is_definition_path(&normalized) {
             output.extend(parse_definition_text(
@@ -3162,6 +3203,7 @@ fn scan_external_localization_archive(
                 extractor,
                 vec![
                     external_tool_path(path).to_string_lossy().into_owned(),
+                    "--deep".into(),
                     format!("--partial={partial}"),
                     "-d".into(),
                     temp.to_string_lossy().into_owned(),
@@ -3205,8 +3247,18 @@ fn scan_external_localization_archive(
         let _ = fs::remove_dir_all(&temp);
         return Vec::new();
     }
-    let package_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
-    let result = scan_localization_directory(&temp, package_name, locale, cancelled, #[cfg(feature = "desktop")] app);
+    let package_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let result = scan_localization_directory(
+        &temp,
+        package_name,
+        locale,
+        cancelled,
+        #[cfg(feature = "desktop")]
+        app,
+    );
     let _ = fs::remove_dir_all(&temp);
     result
 }
@@ -3225,7 +3277,8 @@ fn scan_localization_package(
                 .unwrap_or_default(),
             locale,
             cancelled,
-            #[cfg(feature = "desktop")] app,
+            #[cfg(feature = "desktop")]
+            app,
         );
     }
     if path
@@ -3236,26 +3289,57 @@ fn scan_localization_package(
         let Ok(text) = fs::read_to_string(path) else {
             return Vec::new();
         };
-        let package_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
+        let package_name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
         let source_path = path.display().to_string();
         if !is_localization_source_path_for_locale(&source_path, locale) {
             return Vec::new();
         }
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
-            let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default();
-            let _ = app.emit("localization-file-progress", serde_json::json!({"packageName": package_name, "file": file_name}));
+            let file_name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            let _ = app.emit(
+                "localization-file-progress",
+                serde_json::json!({"packageName": package_name, "file": file_name}),
+            );
         }
         return if is_definition_path(&source_path) {
-            parse_definition_text(&text, &source_path, package_name, &category_for_path(&source_path))
+            parse_definition_text(
+                &text,
+                &source_path,
+                package_name,
+                &category_for_path(&source_path),
+            )
         } else {
-            parse_localization_text(&text, &source_path, package_name, &category_for_path(&source_path))
+            parse_localization_text(
+                &text,
+                &source_path,
+                package_name,
+                &category_for_path(&source_path),
+            )
         };
     }
     match archive_kind(path) {
-        archive_core::ArchiveKind::Zip => scan_localization_archive(path, locale, cancelled, #[cfg(feature = "desktop")] app),
+        archive_core::ArchiveKind::Zip => scan_localization_archive(
+            path,
+            locale,
+            cancelled,
+            #[cfg(feature = "desktop")]
+            app,
+        ),
         archive_core::ArchiveKind::HashFs | archive_core::ArchiveKind::Aem => {
-            scan_external_localization_archive(path, locale, cancelled, #[cfg(feature = "desktop")] app)
+            scan_external_localization_archive(
+                path,
+                locale,
+                cancelled,
+                #[cfg(feature = "desktop")]
+                app,
+            )
         }
         archive_core::ArchiveKind::Unknown => Vec::new(),
     }
@@ -3334,7 +3418,13 @@ fn save_localization_snapshot(
     // the current package is only one member of the complete package set; if
     // cleanup ran here it would delete snapshots already persisted for the
     // preceding packages.
-    save_localization_snapshots_inner(connection, locale, &[], std::slice::from_ref(snapshot), false)
+    save_localization_snapshots_inner(
+        connection,
+        locale,
+        &[],
+        std::slice::from_ref(snapshot),
+        false,
+    )
 }
 
 fn save_localization_snapshots_inner(
@@ -3443,6 +3533,55 @@ fn save_localization_snapshots_inner(
     Ok(())
 }
 
+fn assign_missing_locale_keys(packages: &mut [Vec<LocalizationEntryDto>]) {
+    // 收集所有已占用的 localization key（来自 locale 词条与已带 localized 的 def 词条）。
+    // 生成的 key 必须与它们全局不冲突，否则优先级的覆盖/合并会张冠李戴。
+    let mut used: HashSet<String> = HashSet::new();
+    for package in packages.iter() {
+        for entry in package.iter() {
+            if !entry.def_locale_key_present && !entry.locale_key_present {
+                continue;
+            }
+            let key = entry.locale_key.trim();
+            if !key.is_empty() {
+                used.insert(key.to_ascii_lowercase());
+            }
+        }
+    }
+
+    // 为缺少 localized 字段的 def 词条生成全局唯一 key：
+    //   - name 为英文时用 name 作为 key，冲突则追加 _2/_3 后缀；
+    //   - name 为非英文（Cyrillic/CJK 等）时改用 __manual_N 占位，交由用户在界面上填写真实 key。
+    let mut manual_counter = 0usize;
+    for package in packages.iter_mut() {
+        for entry in package.iter_mut() {
+            if entry.def_locale_key_present
+                || entry.locale_key_present
+                || entry.source_name.trim().is_empty()
+            {
+                continue;
+            }
+            let name = entry.source_name.trim();
+            if name.chars().all(|character| character.is_ascii()) {
+                let mut key = name.to_string();
+                let mut suffix = 2usize;
+                while used.contains(&key.to_ascii_lowercase()) {
+                    key = format!("{name}_{suffix}");
+                    suffix += 1;
+                }
+                used.insert(key.to_ascii_lowercase());
+                entry.key = key.clone();
+                entry.locale_key = key;
+            } else {
+                manual_counter += 1;
+                let key = format!("__manual_{manual_counter}");
+                entry.key = key.clone();
+                entry.locale_key = key;
+            }
+        }
+    }
+}
+
 fn merge_localization_entries(
     packages: impl IntoIterator<Item = Vec<LocalizationEntryDto>>,
 ) -> Vec<LocalizationEntryDto> {
@@ -3476,7 +3615,9 @@ fn merge_localization_entries(
                         current.status = entry.status.clone();
                         current.locale_key_present = true;
                         current.locale_key = entry.locale_key.clone();
-                        if current.source_name.trim().is_empty() && !entry.source_name.trim().is_empty() {
+                        if current.source_name.trim().is_empty()
+                            && !entry.source_name.trim().is_empty()
+                        {
                             current.source_name = entry.source_name.clone();
                         }
                     }
@@ -3588,7 +3729,8 @@ fn localization_scan_impl(
     // Lowest to highest priority: game base/DLC, enabled mods in profile order,
     // then the user base file. Later layers replace earlier values.
     let mut packages = system_localization_packages(&paths);
-    let mut enabled_mods = local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
+    let mut enabled_mods =
+        local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
     packages.append(&mut enabled_mods);
     if let Some(path) = base_file.filter(|value| Path::new(value).is_file()) {
         packages.push(ModDto {
@@ -3616,12 +3758,15 @@ fn localization_scan_impl(
         let fingerprint = package_fingerprint(Path::new(&package.path));
         #[cfg(feature = "desktop")]
         if let Some(app) = &app {
-            let _ = app.emit("localization-progress", serde_json::json!({
-                "packageName": package.display_name,
-                "path": package.path,
-                "processed": inspected + cached,
-                "total": packages.len()
-            }));
+            let _ = app.emit(
+                "localization-progress",
+                serde_json::json!({
+                    "packageName": package.display_name,
+                    "path": package.path,
+                    "processed": inspected + cached,
+                    "total": packages.len()
+                }),
+            );
         }
         if let Some(entries) =
             load_localization_snapshot(&connection, &package.path, &locale, &fingerprint)?
@@ -3630,16 +3775,24 @@ fn localization_scan_impl(
             all_entries.push(
                 entries
                     .into_iter()
-                    .filter(|entry| is_localization_source_path_for_locale(&entry.source_path, &locale))
+                    .filter(|entry| {
+                        is_localization_source_path_for_locale(&entry.source_path, &locale)
+                    })
                     .collect(),
             );
             continue;
         }
         inspected += 1;
-        let entries = scan_localization_package(Path::new(&package.path), &locale, &cancelled, #[cfg(feature = "desktop")] app.as_ref())
-            .into_iter()
-            .filter(|entry| is_localization_source_path_for_locale(&entry.source_path, &locale))
-            .collect::<Vec<_>>();
+        let entries = scan_localization_package(
+            Path::new(&package.path),
+            &locale,
+            &cancelled,
+            #[cfg(feature = "desktop")]
+            app.as_ref(),
+        )
+        .into_iter()
+        .filter(|entry| is_localization_source_path_for_locale(&entry.source_path, &locale))
+        .collect::<Vec<_>>();
         if cancelled.load(Ordering::Relaxed) {
             return Err("Localization scan cancelled.".into());
         }
@@ -3659,6 +3812,7 @@ fn localization_scan_impl(
     // A final empty write performs stale-package cleanup without rewriting
     // snapshots that were already persisted incrementally above.
     save_localization_snapshots(&mut connection, &locale, &current_paths, &[])?;
+    assign_missing_locale_keys(&mut all_entries);
     let entries = merge_localization_entries(all_entries);
     Ok(LocalizationScanDto {
         packages: packages.len(),
@@ -3673,7 +3827,11 @@ fn system_localization_packages(paths: &Paths) -> Vec<ModDto> {
     let Some(game_executable) = &paths.game_executable else {
         return Vec::new();
     };
-    let Some(game_root) = game_executable.parent().and_then(Path::parent).and_then(Path::parent) else {
+    let Some(game_root) = game_executable
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    else {
         return Vec::new();
     };
     let mut files: Vec<PathBuf> = fs::read_dir(game_root)
@@ -3681,44 +3839,82 @@ fn system_localization_packages(paths: &Paths) -> Vec<ModDto> {
         .into_iter()
         .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
         .filter(|path| {
-            let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-            path.is_file() && path.extension().and_then(|value| value.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("scs"))
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("scs"))
                 && (name == "base.scs" || name.starts_with("dlc_"))
         })
         .collect();
     files.sort_by_key(|path| {
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_ascii_lowercase();
-        if name == "base.scs" { (0, name) } else { (1, name) }
-    });
-    files.into_iter().map(|path| {
-        let name = path.file_name().and_then(|value| value.to_str()).unwrap_or_default().to_string();
-        let metadata = fs::metadata(&path).ok();
-        ModDto {
-            id: name.clone(),
-            package_name: name.clone(),
-            path: normalize_path(&path),
-            package_type: "system".into(),
-            display_name: name,
-            author: String::new(),
-            version: String::new(),
-            size: metadata.as_ref().map(|value| value.len()).unwrap_or_default(),
-            modified_ms: metadata.and_then(|value| value.modified().ok()).and_then(|value| value.duration_since(UNIX_EPOCH).ok()).map(|value| value.as_millis() as i64).unwrap_or_default(),
-            enabled: true,
-            category: "system".into(),
-            fingerprint: 0,
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if name == "base.scs" {
+            (0, name)
+        } else {
+            (1, name)
         }
-    }).collect()
+    });
+    files
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let metadata = fs::metadata(&path).ok();
+            ModDto {
+                id: name.clone(),
+                package_name: name.clone(),
+                path: normalize_path(&path),
+                package_type: "system".into(),
+                display_name: name,
+                author: String::new(),
+                version: String::new(),
+                size: metadata
+                    .as_ref()
+                    .map(|value| value.len())
+                    .unwrap_or_default(),
+                modified_ms: metadata
+                    .and_then(|value| value.modified().ok())
+                    .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                    .map(|value| value.as_millis() as i64)
+                    .unwrap_or_default(),
+                enabled: true,
+                category: "system".into(),
+                fingerprint: 0,
+            }
+        })
+        .collect()
 }
 
 fn read_localization_base(connection: &Connection) -> Result<Option<String>, String> {
-    connection.query_row("SELECT value FROM app_setting WHERE key = 'localization.base_file'", [], |row| row.get(0))
+    connection
+        .query_row(
+            "SELECT value FROM app_setting WHERE key = 'localization.base_file'",
+            [],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|error| format!("read localization base failed: {error}"))
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn localization_base_get(state: State<'_, BackendState>) -> Result<Option<String>, String> {
-    let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
     let connection = open_db(&backend.database_path)?;
     read_localization_base(&connection)
 }
@@ -3728,22 +3924,33 @@ fn localization_base_pick(state: State<'_, BackendState>) -> Result<Option<Strin
     #[cfg(windows)]
     {
         let default_directory = {
-            let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
+            let backend = state
+                .inner
+                .lock()
+                .map_err(|_| "backend lock poisoned".to_string())?;
             backend.paths.mod_root.clone()
         };
         let Some(path) = rfd::FileDialog::new()
             .set_directory(&default_directory)
             .add_filter("Localization files", &["scs", "zip", "sii", "sui"])
-            .pick_file() else { return Ok(None); };
+            .pick_file()
+        else {
+            return Ok(None);
+        };
         let value = normalize_path(&path);
-        let backend = state.inner.lock().map_err(|_| "backend lock poisoned".to_string())?;
-        let mut connection = open_db(&backend.database_path)?;
+        let backend = state
+            .inner
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
+        let connection = open_db(&backend.database_path)?;
         let _lock = acquire_db_write_lock();
-        connection.execute(
-            "INSERT INTO app_setting(key, value) VALUES ('localization.base_file', ?1)
+        connection
+            .execute(
+                "INSERT INTO app_setting(key, value) VALUES ('localization.base_file', ?1)
              ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![value],
-        ).map_err(|error| format!("save localization base failed: {error}"))?;
+                params![value],
+            )
+            .map_err(|error| format!("save localization base failed: {error}"))?;
         return Ok(Some(value));
     }
     #[cfg(not(windows))]
@@ -3756,28 +3963,37 @@ fn localization_base_pick(state: State<'_, BackendState>) -> Result<Option<Strin
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn localization_write_base(request: LocalizationWriteRequest) -> Result<(), String> {
     let path = PathBuf::from(&request.base_file);
-    let extension = path.extension().and_then(|v| v.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     if extension != "sii" && extension != "sui" {
         return Err("当前仅支持将文本 .sii/.sui 基底文件直接写回；请先选择文本基底文件。".into());
     }
-    let original = fs::read_to_string(&path).map_err(|e| format!("read localization base failed: {e}"))?;
+    let original =
+        fs::read_to_string(&path).map_err(|e| format!("read localization base failed: {e}"))?;
     let mut output = original.clone();
     for entry in request.entries {
         let value = escape_sii(&entry.value);
         let pattern = Regex::new(&format!(
             r#"(?m)(\b{}\s*:\s*")((?:\\.|[^"\\])*)(")"#,
             regex::escape(&entry.locale_key)
-        )).map_err(|e| format!("build localization replacement failed: {e}"))?;
+        ))
+        .map_err(|e| format!("build localization replacement failed: {e}"))?;
         if pattern.is_match(&output) {
-            output = pattern.replace_all(&output, |caps: &regex::Captures| {
-                format!("{}{}{}", &caps[1], value, &caps[3])
-            }).into_owned();
+            output = pattern
+                .replace_all(&output, |caps: &regex::Captures| {
+                    format!("{}{}{}", &caps[1], value, &caps[3])
+                })
+                .into_owned();
         } else {
             output.push_str(&format!("\n{}: \"{}\"\n", entry.locale_key, value));
         }
     }
     let temp = path.with_extension("ets2mm.tmp");
-    fs::write(&temp, output.as_bytes()).map_err(|e| format!("write localization base failed: {e}"))?;
+    fs::write(&temp, output.as_bytes())
+        .map_err(|e| format!("write localization base failed: {e}"))?;
     fs::rename(&temp, &path).map_err(|e| {
         let _ = fs::remove_file(&temp);
         format!("replace localization base failed: {e}")
@@ -4562,10 +4778,14 @@ fn mod_list(profile_id: String, state: State<'_, BackendState>) -> Result<Vec<Mo
                 }
                 ordered.push(row);
             } else {
-                let workshop_path = workshop_id_from_value(&package)
-                    .and_then(|id| backend.paths.workshop_roots.iter()
+                let workshop_path = workshop_id_from_value(&package).and_then(|id| {
+                    backend
+                        .paths
+                        .workshop_roots
+                        .iter()
                         .map(|root| root.join(&id))
-                        .find(|path| path.is_dir()));
+                        .find(|path| path.is_dir())
+                });
                 let display_name = workshop_id_from_value(&package)
                     .and_then(|id| workshop_log_title(&id, &backend.paths))
                     .or_else(|| workshop_cached_title(&package))
@@ -5058,9 +5278,12 @@ fn mod_open_location(
         #[cfg(windows)]
         {
             let mut command = std::process::Command::new("cmd");
-            command.args(["/C", "start", "", &format!(
-                "https://steamcommunity.com/sharedfiles/filedetails/?id={id}"
-            )]);
+            command.args([
+                "/C",
+                "start",
+                "",
+                &format!("https://steamcommunity.com/sharedfiles/filedetails/?id={id}"),
+            ]);
             hide_child_process(&mut command);
             command
                 .status()
@@ -5099,10 +5322,7 @@ fn mod_open_location(
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn profile_open_location(
-    profile_id: String,
-    state: State<'_, BackendState>,
-) -> Result<(), String> {
+fn profile_open_location(profile_id: String, state: State<'_, BackendState>) -> Result<(), String> {
     let backend = state
         .inner
         .lock()
@@ -5408,7 +5628,10 @@ mod tests {
             fingerprint: 0,
         };
         assert!(is_workshop(&row));
-        assert_eq!(workshop_id_from_value(&row.package_name).as_deref(), Some("3047125015"));
+        assert_eq!(
+            workshop_id_from_value(&row.package_name).as_deref(),
+            Some("3047125015")
+        );
     }
 
     #[test]
@@ -5525,12 +5748,28 @@ mod tests {
         assert!(!is_definition_path("city/world/city.sii"));
         assert!(!is_localization_path("localization/custom.sii"));
         assert!(is_localization_source_path("mod.scs::def/world/city.sii"));
-        assert!(is_localization_source_path("mod.scs::locale/en_us/localization.sii"));
-        assert!(!is_localization_source_path("mod.scs::material/ui/icon.mat"));
-        assert!(is_localization_source_path_for_locale("mod.scs::def/world/city.sii", "zh_cn"));
-        assert!(is_localization_source_path_for_locale("mod.scs::locale/zh_cn/localization.sii", "zh_cn"));
-        assert!(!is_localization_source_path_for_locale("mod.scs::locale/en_us/localization.sii", "zh_cn"));
-        assert!(!is_localization_source_path_for_locale("mod.scs::material/ui/icon.mat", "zh_cn"));
+        assert!(is_localization_source_path(
+            "mod.scs::locale/en_us/localization.sii"
+        ));
+        assert!(!is_localization_source_path(
+            "mod.scs::material/ui/icon.mat"
+        ));
+        assert!(is_localization_source_path_for_locale(
+            "mod.scs::def/world/city.sii",
+            "zh_cn"
+        ));
+        assert!(is_localization_source_path_for_locale(
+            "mod.scs::locale/zh_cn/localization.sii",
+            "zh_cn"
+        ));
+        assert!(!is_localization_source_path_for_locale(
+            "mod.scs::locale/en_us/localization.sii",
+            "zh_cn"
+        ));
+        assert!(!is_localization_source_path_for_locale(
+            "mod.scs::material/ui/icon.mat",
+            "zh_cn"
+        ));
     }
 
     #[test]
@@ -6085,11 +6324,17 @@ mod tests {
         );
         let merged = merge_localization_entries(vec![locale, definition]);
         assert_eq!(merged.len(), 2);
-        let demo = merged.iter().find(|entry| entry.key == "city.promods_demo").unwrap();
+        let demo = merged
+            .iter()
+            .find(|entry| entry.key == "city.promods_demo")
+            .unwrap();
         assert_eq!(demo.source_name, "Promods Demo");
         assert_eq!(demo.value, "Promods 示例城市");
         assert_eq!(demo.category, "city");
-        let indexed = merged.iter().find(|entry| entry.key == "city.promods_indexed").unwrap();
+        let indexed = merged
+            .iter()
+            .find(|entry| entry.key == "city.promods_indexed")
+            .unwrap();
         assert_eq!(indexed.value, "Indexed City");
         assert_eq!(indexed.category, "city");
     }
@@ -6151,7 +6396,11 @@ mod tests {
                 &mut connection,
                 "zh_cn",
                 std::slice::from_ref(&package_path),
-                &[(package_path.clone(), fingerprint.clone(), vec![entry.clone()])],
+                &[(
+                    package_path.clone(),
+                    fingerprint.clone(),
+                    vec![entry.clone()],
+                )],
             )
             .expect("persist localization snapshot");
         }
@@ -6210,26 +6459,22 @@ mod tests {
             assert_eq!(count, 2);
         }
         let connection = open_db(&database).expect("reopen cache db");
-        assert!(
-            load_localization_snapshot(
-                &connection,
-                &first_path,
-                "zh_cn",
-                &("scs-l10n-v4".into(), 1, 11),
-            )
-            .expect("load first package")
-            .is_some()
-        );
-        assert!(
-            load_localization_snapshot(
-                &connection,
-                &second_path,
-                "zh_cn",
-                &("scs-l10n-v4".into(), 2, 22),
-            )
-            .expect("load second package")
-            .is_some()
-        );
+        assert!(load_localization_snapshot(
+            &connection,
+            &first_path,
+            "zh_cn",
+            &("scs-l10n-v4".into(), 1, 11),
+        )
+        .expect("load first package")
+        .is_some());
+        assert!(load_localization_snapshot(
+            &connection,
+            &second_path,
+            "zh_cn",
+            &("scs-l10n-v4".into(), 2, 22),
+        )
+        .expect("load second package")
+        .is_some());
         let _ = fs::remove_file(database);
     }
 
