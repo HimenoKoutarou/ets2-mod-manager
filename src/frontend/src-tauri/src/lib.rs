@@ -481,6 +481,29 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
+static LOG_FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+
+fn app_log(level: &str, message: &str) {
+    let file = LOG_FILE.get_or_init(|| {
+        let log_path = detect_game_root().join("ets2modmanager.log");
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("ets2modmanager.log")
+            })
+            .expect("open log file");
+        Mutex::new(f)
+    });
+    if let Ok(mut f) = file.lock() {
+        let _ = writeln!(f, "[{}] [{}] {}", now_ms(), level, message);
+    }
+}
+
 fn normalize_path(path: &Path) -> String {
     fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -3244,6 +3267,10 @@ fn scan_external_localization_archive(
         );
     }
     if !run_external_command_cancellable(&tool, &args, cancelled) {
+        app_log(
+            "WARN",
+            &format!("archive extract failed: {}", path.display()),
+        );
         let _ = fs::remove_dir_all(&temp);
         return Vec::new();
     }
@@ -3623,11 +3650,22 @@ fn merge_localization_entries(
                     }
                     continue;
                 }
-                // Packages arrive from lowest to highest priority. The later
-                // entry is authoritative even when its locale value is empty:
-                // a high-priority definition must not inherit a translation
-                // from a lower-priority mod.
-                result[index] = entry;
+                if entry.locale_key_present && !entry.def_locale_key_present {
+                    // A locale-only entry from a higher-priority package only
+                    // supplies the translated value; keep the definition's
+                    // source name, package and path so the originating map
+                    // mod remains traceable.
+                    let current = &mut result[index];
+                    current.value = entry.value.clone();
+                    current.status = entry.status.clone();
+                    current.locale_key_present = true;
+                    current.locale_key = entry.locale_key.clone();
+                } else {
+                    // A higher-priority definition replaces the whole entry.
+                    // A high-priority definition must not inherit a
+                    // translation from a lower-priority mod.
+                    result[index] = entry;
+                }
             } else {
                 positions.insert(merge_key, result.len());
                 result.push(entry);
@@ -3722,6 +3760,13 @@ fn localization_scan_impl(
         return Err("Target locale must use the xx_yy format.".into());
     }
     let profile = find_profile(&paths, &request.profile_id).ok_or("Profile not found.")?;
+    app_log(
+        "INFO",
+        &format!(
+            "localization scan start: locale={} profile={}",
+            locale, request.profile_id
+        ),
+    );
     let mut connection = open_db(&database_path)?;
     let base_file = request
         .base_file
@@ -3731,6 +3776,10 @@ fn localization_scan_impl(
     let mut packages = system_localization_packages(&paths);
     let mut enabled_mods =
         local_packages_for_profile(&paths, &mut connection, &profile, &cancelled)?;
+    // Profile order is low -> high priority, but order_localization_packages
+    // returns high -> low (UI order). Reverse it back so the merge below lets a
+    // higher-priority mod override a lower-priority one.
+    enabled_mods.reverse();
     packages.append(&mut enabled_mods);
     if let Some(path) = base_file.filter(|value| Path::new(value).is_file()) {
         packages.push(ModDto {
@@ -3772,6 +3821,7 @@ fn localization_scan_impl(
             load_localization_snapshot(&connection, &package.path, &locale, &fingerprint)?
         {
             cached += 1;
+            app_log("INFO", &format!("localization cache hit: {}", package.path));
             all_entries.push(
                 entries
                     .into_iter()
@@ -3800,6 +3850,14 @@ fn localization_scan_impl(
         // durable even if a later archive is slow, cancelled, or fails.
         let snapshot = (package.path.clone(), fingerprint, entries.clone());
         save_localization_snapshot(&mut connection, &locale, &snapshot)?;
+        app_log(
+            "INFO",
+            &format!(
+                "localization scan: {} -> {} entries",
+                package.path,
+                entries.len()
+            ),
+        );
         all_entries.push(entries);
     }
     if cancelled.load(Ordering::Relaxed) {
@@ -3814,6 +3872,17 @@ fn localization_scan_impl(
     save_localization_snapshots(&mut connection, &locale, &current_paths, &[])?;
     assign_missing_locale_keys(&mut all_entries);
     let entries = merge_localization_entries(all_entries);
+    app_log(
+        "INFO",
+        &format!(
+            "localization scan done: packages={} inspected={} cached={} entries={} elapsed_ms={}",
+            packages.len(),
+            inspected,
+            cached,
+            entries.len(),
+            started.elapsed().as_millis()
+        ),
+    );
     Ok(LocalizationScanDto {
         packages: packages.len(),
         inspected,
