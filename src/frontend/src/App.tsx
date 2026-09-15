@@ -113,6 +113,11 @@ function App() {
     runDiagnostics,
     initialize,
     error,
+    updateInfo,
+    updateDownloading,
+    updateDownloadPath,
+    checkUpdate,
+    downloadUpdate,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
   const [activePage, setActivePage] = useState<"mods" | "profiles" | "save" | "localization">("mods");
@@ -221,6 +226,7 @@ function App() {
     });
   }, [selectedSave?.gameSii]);
   useEffect(() => { void loadLocalizationBase(); }, [loadLocalizationBase]);
+  useEffect(() => { void checkUpdate(); }, [checkUpdate]);
   const text = getCopy(language);
   const categoryText = categoryCopy[language];
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
@@ -355,6 +361,19 @@ function App() {
 
   return (
     <div className={`app-shell ${activePage === "localization" ? "localization-page" : ""}`}>
+      {updateInfo?.hasUpdate ? (
+        <div className="update-banner">
+          <Sparkles size={15} />
+          <span>{text.updateAvailable} v{updateInfo.latestVersion}（当前 v{updateInfo.currentVersion}）</span>
+          {updateDownloadPath ? (
+            <span className="update-downloaded" title={updateDownloadPath}>{text.updateDownloaded}</span>
+          ) : (
+            <button className="button" onClick={() => { void downloadUpdate(); }} disabled={updateDownloading}>
+              {updateDownloading ? text.updateDownloading : text.updateDownload}
+            </button>
+          )}
+        </div>
+      ) : null}
       <header className="app-header">
         <div className="brand-block">
           <div className="brand-mark"><Sparkles size={17} /></div>

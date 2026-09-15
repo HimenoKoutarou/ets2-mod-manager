@@ -41,6 +41,20 @@ export interface PresetRecord {
   activeMods: string[];
 }
 
+export interface UpdateInfo {
+  hasUpdate: boolean;
+  latestVersion: string;
+  currentVersion: string;
+  releaseName: string;
+  assetName: string;
+  assetSize: number;
+  downloadUrl: string;
+}
+
+export interface UpdateDownload {
+  path: string;
+}
+
 export interface LocalizationEntry {
   key: string;
   value: string;
@@ -206,6 +220,8 @@ export interface ModBackend {
   listPresets(profileId: string): Promise<PresetRecord[]>;
   savePreset(profileId: string, name: string, mods: ModRecord[]): Promise<void>;
   loadPreset(profileId: string, name: string): Promise<string[]>;
+  checkUpdate(): Promise<UpdateInfo>;
+  downloadUpdate(url: string, filename: string): Promise<UpdateDownload>;
 }
 
 const tauriBackend: ModBackend = {
@@ -308,6 +324,12 @@ const tauriBackend: ModBackend = {
   },
   async loadPreset(profileId, name) {
     return invoke<string[]>("preset_load", { request: { profileId, name } });
+  },
+  checkUpdate() {
+    return invoke<UpdateInfo>("check_update");
+  },
+  downloadUpdate(url, filename) {
+    return invoke<UpdateDownload>("download_update", { request: { url, filename } });
   },
 };
 

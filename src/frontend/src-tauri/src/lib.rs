@@ -4158,6 +4158,198 @@ fn crash_discover(state: State<'_, BackendState>) -> Result<CrashPairDto, String
     Ok(crash_pair(&backend.paths))
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfoDto {
+    has_update: bool,
+    latest_version: String,
+    current_version: String,
+    release_name: String,
+    asset_name: String,
+    asset_size: u64,
+    download_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDownloadRequest {
+    url: String,
+    filename: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDownloadDto {
+    path: String,
+}
+
+const UPDATE_LATEST_URL: &str =
+    "https://api.github.com/repos/HimenoKoutarou/ets2-mod-manager/releases/latest";
+
+fn update_http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent("ETS2ModManager/update")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("build update client failed: {error}"))
+}
+
+fn version_parts(version: &str) -> Vec<u64> {
+    version
+        .trim()
+        .trim_start_matches('v')
+        .split('.')
+        .filter_map(|part| {
+            part.chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u64>()
+                .ok()
+        })
+        .collect()
+}
+
+fn version_is_newer(latest: &str, current: &str) -> bool {
+    let latest = version_parts(latest);
+    let current = version_parts(current);
+    for (index, part) in latest.iter().enumerate() {
+        let current_part = current.get(index).copied().unwrap_or(0);
+        if *part > current_part {
+            return true;
+        }
+        if *part < current_part {
+            return false;
+        }
+    }
+    latest.len() > current.len()
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn check_update() -> Result<UpdateInfoDto, String> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let client = update_http_client()?;
+    let response = client
+        .get(UPDATE_LATEST_URL)
+        .send()
+        .map_err(|error| format!("check update failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("check update failed: HTTP {}", response.status()));
+    }
+    let payload: serde_json::Value = serde_json::from_str(
+        &response
+            .text()
+            .map_err(|error| format!("read release failed: {error}"))?,
+    )
+    .map_err(|error| format!("parse release failed: {error}"))?;
+    let tag = payload
+        .get("tag_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let latest_version = tag.trim_start_matches('v').to_string();
+    let release_name = payload
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let assets = payload.get("assets").and_then(|value| value.as_array());
+    // Prefer the NSIS installer (.exe), then .msi, then the first asset.
+    let chosen = assets.and_then(|list| {
+        list.iter()
+            .find(|asset| {
+                asset
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|n| n.ends_with(".exe"))
+            })
+            .or_else(|| {
+                list.iter().find(|asset| {
+                    asset
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|n| n.ends_with(".msi"))
+                })
+            })
+            .or_else(|| list.first())
+    });
+    let (asset_name, asset_size, download_url) = match chosen {
+        Some(asset) => (
+            asset
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            asset
+                .get("size")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default(),
+            asset
+                .get("browser_download_url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        None => (String::new(), 0, String::new()),
+    };
+    Ok(UpdateInfoDto {
+        has_update: version_is_newer(&latest_version, current_version),
+        latest_version,
+        current_version: current_version.to_string(),
+        release_name,
+        asset_name,
+        asset_size,
+        download_url,
+    })
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn download_update(request: UpdateDownloadRequest) -> Result<UpdateDownloadDto, String> {
+    let url = request.url.trim();
+    if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("invalid download url".into());
+    }
+    // Take only the final path segment to guard against path traversal.
+    let filename = request
+        .filename
+        .trim()
+        .split(['/', '\\'])
+        .last()
+        .unwrap_or_default()
+        .to_string();
+    let filename = if filename.is_empty() {
+        "ets2-mod-manager-update.exe".to_string()
+    } else {
+        filename
+    };
+    let client = update_http_client()?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|error| format!("download failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("download failed: HTTP {}", response.status()));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("read download failed: {error}"))?;
+    if bytes.is_empty() {
+        return Err("download failed: empty response".into());
+    }
+    let downloads = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|profile| profile.join("Downloads"))
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let destination = downloads.join(&filename);
+    fs::write(&destination, bytes).map_err(|error| format!("write download failed: {error}"))?;
+    app_log(
+        "INFO",
+        &format!("update downloaded to {}", destination.display()),
+    );
+    Ok(UpdateDownloadDto {
+        path: destination.to_string_lossy().to_string(),
+    })
+}
+
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_inspect_bsii(request: BsiiInspectRequest) -> Result<BsiiSummaryDto, String> {
     let path = PathBuf::from(request.path);
@@ -6803,7 +6995,9 @@ pub fn run() {
             crash_precheck,
             save_inspect_bsii,
             save_read_snapshot,
-            save_mutate
+            save_mutate,
+            check_update,
+            download_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running ETS2 Mod Manager");

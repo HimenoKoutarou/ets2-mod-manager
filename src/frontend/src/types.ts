@@ -72,6 +72,10 @@ export interface UiCopy {
   localizationFile: string;
   fillLocalizationKey: string;
   scanCancelled: string;
+  updateAvailable: string;
+  updateDownload: string;
+  updateDownloading: string;
+  updateDownloaded: string;
   scanSummary: (added: number, updated: number, removed: number, inspected: number) => string;
   unsavedConfirm: string;
   save: string;

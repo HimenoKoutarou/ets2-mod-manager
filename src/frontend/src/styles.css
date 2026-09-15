@@ -14,6 +14,8 @@ button, input, select { font: inherit; }
 button { color: inherit; }
 
 .app-shell { height: 100vh; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background: #f5f8fc; }
+.update-banner { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 0 28px; background: #eff6ff; border-bottom: 1px solid #bfdbfe; color: #1e40af; font-size: 13px; }
+.update-banner .update-downloaded { color: #15803d; font-weight: 600; }
 .app-header { height: 72px; display: flex; align-items: center; justify-content: space-between; padding: 0 28px; background: #ffffff; border-bottom: 1px solid #d9e2ef; }
 .brand-block, .header-actions, .batch-actions, .view-row, .priority-row, .panel-status, .detail-heading { display: flex; align-items: center; }
 .brand-block { gap: 12px; }

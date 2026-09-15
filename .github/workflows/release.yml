@@ -1,0 +1,56 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/frontend/src-tauri
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          $cargoPath = "src/frontend/src-tauri/Cargo.toml"
+          $tauriPath = "src/frontend/src-tauri/tauri.conf.json"
+          (Get-Content $cargoPath) -replace '^version\s*=\s*"[^"]*"', ('version = "' + $version + '"') | Set-Content $cargoPath
+          (Get-Content $tauriPath) -replace '"version"\s*:\s*"[^"]*"', ('"version": "' + $version + '"') | Set-Content $tauriPath
+          Write-Host "tag: $env:GITHUB_REF_NAME -> version: $version"
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: src/frontend
+
+      - name: Build release
+        run: npm run desktop:build -- --bundles nsis
+        working-directory: src/frontend
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src/frontend/src-tauri/target/release/bundle/nsis/*.exe
+          generate_release_notes: true

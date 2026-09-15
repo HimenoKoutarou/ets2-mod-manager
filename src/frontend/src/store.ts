@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary } from "./backend";
+import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
 import { ALL_CATEGORIES, batchEnabled, moveBatch, type BatchAction, type MoveDirection } from "./modBatch";
 import { getCopy } from "./i18n";
 import { createMediaLoader, mediaKey } from "./modMedia";
@@ -204,6 +204,8 @@ export const fixtureBackend: ModBackend = {
   listPresets: async () => [],
   savePreset: async () => undefined,
   loadPreset: async () => [],
+  checkUpdate: async () => ({ hasUpdate: false, latestVersion: "", currentVersion: "", releaseName: "", assetName: "", assetSize: 0, downloadUrl: "" }),
+  downloadUpdate: async () => ({ path: "" }),
 };
 
 const backend = createBackend(fixtureBackend);
@@ -318,6 +320,12 @@ interface ModState {
   savePreset: (name: string) => Promise<void>;
   selectPreset: (name: string) => void;
   loadPreset: () => Promise<void>;
+  updateInfo: UpdateInfo | null;
+  updateChecking: boolean;
+  updateDownloading: boolean;
+  updateDownloadPath: string | null;
+  checkUpdate: () => Promise<void>;
+  downloadUpdate: () => Promise<void>;
 }
 
 function applyCategories(mods: ModRecord[], categories: CategorySnapshot): ModRecord[] {
@@ -395,6 +403,10 @@ export const useModStore = create<ModState>((set, get) => ({
   scanWasCancelled: false,
   presets: {},
   selectedPresetName: "",
+  updateInfo: null,
+  updateChecking: false,
+  updateDownloading: false,
+  updateDownloadPath: null,
   setSecondaryPanel: (secondaryPanel) => set({ secondaryPanel }),
   cancelLocalization: async () => {
     if (!get().localizationScanning) return;
@@ -796,6 +808,34 @@ export const useModStore = create<ModState>((set, get) => ({
       set({ mods: nextMods, dirty: true, selectedModId: nextMods[0]?.id ?? null });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+  checkUpdate: async () => {
+    if (get().updateChecking) return;
+    set({ updateChecking: true });
+    try {
+      const updateInfo = await backend.checkUpdate();
+      set({ updateInfo });
+    } catch {
+      set({ updateInfo: null });
+    } finally {
+      set({ updateChecking: false });
+    }
+  },
+  downloadUpdate: async () => {
+    const updateInfo = get().updateInfo;
+    if (!updateInfo?.downloadUrl || get().updateDownloading) return;
+    set({ updateDownloading: true, error: "" });
+    try {
+      const result = await backend.downloadUpdate(
+        updateInfo.downloadUrl,
+        updateInfo.assetName || "ets2-mod-manager-update.exe",
+      );
+      set({ updateDownloadPath: result.path });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ updateDownloading: false });
     }
   },
 }));
