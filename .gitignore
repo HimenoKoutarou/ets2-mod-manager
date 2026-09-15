@@ -27,7 +27,8 @@ Desktop.ini
 .DS_Store
 
 # Project cache
-assets/cache/
+assets/cache/*
+!assets/cache/workshop_titles.json
 
 # External tools
 assets/tools/
