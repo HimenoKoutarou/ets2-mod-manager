@@ -37,8 +37,11 @@ if not exist "%MINGW_ROOT%\bin\gcc.exe" (
 set "RUSTUP_HOME=%TOOLCHAIN_ROOT%\rustup"
 set "CARGO_HOME=%TOOLCHAIN_ROOT%\cargo"
 set "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu"
-if not exist "%CARGO_HOME%\registry\src\index.crates.io-1949cf8c6b5b557f\libsqlite3-sys-0.30.1\bindgen-bindings\bindgen_3.14.0.rs" (
-  if exist "%USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\libsqlite3-sys-0.30.1\bindgen-bindings\bindgen_3.14.0.rs" (
+set "_REG_INCOMPLETE="
+if not exist "%CARGO_HOME%\registry\src\index.crates.io-1949cf8c6b5b557f\libsqlite3-sys-0.30.1\bindgen-bindings\bindgen_3.14.0.rs" set "_REG_INCOMPLETE=1"
+if not exist "%CARGO_HOME%\registry\src\index.crates.io-1949cf8c6b5b557f\atomic-waker-*" set "_REG_INCOMPLETE=1"
+if defined _REG_INCOMPLETE (
+  if exist "%USERPROFILE%\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\atomic-waker-*" (
     echo Cached Cargo registry is incomplete; using the user Cargo registry.
     set "CARGO_HOME=%USERPROFILE%\.cargo"
   )
