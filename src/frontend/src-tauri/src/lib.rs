@@ -1803,11 +1803,9 @@ fn hashfs_has_top_level_directory(path: &Path) -> bool {
     let Some(extractor) = extractor_path() else {
         return false;
     };
-    let Ok(output) = std::process::Command::new(&extractor)
-        .arg(external_tool_path(path))
-        .arg("--list")
-        .output()
-    else {
+    let mut command = std::process::Command::new(&extractor);
+    hide_child_process(&mut command);
+    let Ok(output) = command.arg(external_tool_path(path)).arg("--list").output() else {
         return false;
     };
     // With a listing the extractor writes the contained paths to stdout;
