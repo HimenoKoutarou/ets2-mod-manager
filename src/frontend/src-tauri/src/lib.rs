@@ -3086,6 +3086,7 @@ fn parse_definition_text(
 
 fn scan_localization_directory(
     root: &Path,
+    source_root: &Path,
     package_name: &str,
     locale: &str,
     cancelled: &AtomicBool,
@@ -3137,7 +3138,7 @@ fn scan_localization_directory(
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
-        let source_path = format!("{}::{}", root.display(), relative);
+        let source_path = format!("{}::{}", source_root.display(), relative);
         #[cfg(feature = "desktop")]
         if let Some(app) = app {
             let _ = app.emit(
@@ -3301,6 +3302,7 @@ fn scan_external_localization_archive(
         .unwrap_or_default();
     let result = scan_localization_directory(
         &temp,
+        path,
         package_name,
         locale,
         cancelled,
@@ -3319,6 +3321,7 @@ fn scan_localization_package(
 ) -> Vec<LocalizationEntryDto> {
     if path.is_dir() {
         return scan_localization_directory(
+            path,
             path,
             path.file_name()
                 .and_then(|value| value.to_str())
@@ -3428,7 +3431,7 @@ fn load_localization_snapshot(
         .map_err(|error| format!("prepare localization snapshot failed: {error}"))?;
     let rows = statement
         .query_map(params![path, locale], |row| {
-            Ok(LocalizationEntryDto {
+            let mut entry = LocalizationEntryDto {
                 key: row.get(0)?,
                 value: row.get(1)?,
                 source_name: row.get(2)?,
@@ -3440,7 +3443,20 @@ fn load_localization_snapshot(
                 def_locale_key_present: row.get::<_, i64>(8)? != 0,
                 unit_name: row.get(9)?,
                 locale_key: row.get(10)?,
-            })
+            };
+            // Rewrite the source path on load so entries cached from the
+            // old extractor temp directory (ets2mm-preview-*) resolve to the
+            // real package path and stay stable across restarts.
+            let relative = entry
+                .source_path
+                .rsplit_once("::")
+                .map(|(_, value)| value)
+                .unwrap_or_default()
+                .to_string();
+            if entry.source_path.contains("ets2mm-preview") {
+                entry.source_path = format!("{}::{}", path, relative);
+            }
+            Ok(entry)
         })
         .map_err(|error| format!("read localization snapshot failed: {error}"))?;
     rows.map(|row| row.map_err(|error| format!("read localization entry failed: {error}")))
@@ -3904,6 +3920,20 @@ fn localization_scan_impl(
             started.elapsed().as_millis()
         ),
     );
+    // The per-package progress events stop at total - 1, so emit one final
+    // event at processed == total to leave the UI at a completed state.
+    #[cfg(feature = "desktop")]
+    if let Some(app) = &app {
+        let _ = app.emit(
+            "localization-progress",
+            serde_json::json!({
+                "packageName": "",
+                "path": "",
+                "processed": packages.len(),
+                "total": packages.len()
+            }),
+        );
+    }
     Ok(LocalizationScanDto {
         packages: packages.len(),
         inspected,

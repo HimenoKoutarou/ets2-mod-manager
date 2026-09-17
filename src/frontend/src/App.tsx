@@ -514,7 +514,7 @@ function App() {
                         )}
                         <small>{entry.packageName}</small>
                       </div>
-                      <code title={entry.sourcePath}>{entry.sourcePath}</code>
+                      <code title={entry.sourcePath}>{entry.sourcePath.split("::").pop() ?? entry.sourcePath}</code>
                       <input
                         value={localizationDraft[entry.key] ?? entry.value}
                         placeholder={entry.value || "—"}
