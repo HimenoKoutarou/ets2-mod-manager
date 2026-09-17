@@ -1795,6 +1795,27 @@ fn external_tool_path(path: &Path) -> PathBuf {
     }
 }
 
+// HashFS archives without a top-level directory listing require --deep so
+// the extractor scans contained files for paths. Archives that do have a
+// listing (def.scs, dlc_*.scs) must not use --deep: it forces a full hash
+// scan of every file, which is extremely slow on multi-gigabyte archives.
+fn hashfs_has_top_level_directory(path: &Path) -> bool {
+    let Some(extractor) = extractor_path() else {
+        return false;
+    };
+    let Ok(output) = std::process::Command::new(&extractor)
+        .arg(external_tool_path(path))
+        .arg("--list")
+        .output()
+    else {
+        return false;
+    };
+    // With a listing the extractor writes the contained paths to stdout;
+    // without one it only reports "Top level directory is missing" on stderr.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    !stdout.trim().is_empty()
+}
+
 fn external_archive_manifest(path: &Path) -> Option<String> {
     if !path.is_file() {
         return None;
@@ -3222,17 +3243,17 @@ fn scan_external_localization_archive(
                 let _ = fs::remove_dir_all(&temp);
                 return Vec::new();
             };
-            (
-                extractor,
-                vec![
-                    external_tool_path(path).to_string_lossy().into_owned(),
-                    "--deep".into(),
-                    format!("--partial={partial}"),
-                    "-d".into(),
-                    temp.to_string_lossy().into_owned(),
-                    "-s".into(),
-                ],
-            )
+            let mut args = vec![
+                external_tool_path(path).to_string_lossy().into_owned(),
+                format!("--partial={partial}"),
+                "-d".into(),
+                temp.to_string_lossy().into_owned(),
+                "-s".into(),
+            ];
+            if !hashfs_has_top_level_directory(path) {
+                args.insert(1, "--deep".into());
+            }
+            (extractor, args)
         }
         archive_core::ArchiveKind::Aem => {
             let Some(sxc) = sxc_path() else {
@@ -3918,7 +3939,10 @@ fn system_localization_packages(paths: &Paths) -> Vec<ModDto> {
                     .extension()
                     .and_then(|value| value.to_str())
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("scs"))
-                && (name == "base.scs" || name.starts_with("dlc_"))
+                && (name == "base.scs"
+                    || name == "def.scs"
+                    || name == "locale.scs"
+                    || name.starts_with("dlc_"))
         })
         .collect();
     files.sort_by_key(|path| {
@@ -3927,11 +3951,20 @@ fn system_localization_packages(paths: &Paths) -> Vec<ModDto> {
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if name == "base.scs" {
-            (0, name)
+        // Lowest layer first: base.scs, then def.scs (definitions), then
+        // locale.scs (translated values), then DLCs. locale.scs must come
+        // after def.scs so its locale-only entries fill the definitions'
+        // @@key@@ references during the merge below.
+        let order = if name == "base.scs" {
+            0
+        } else if name == "def.scs" {
+            1
+        } else if name == "locale.scs" {
+            2
         } else {
-            (1, name)
-        }
+            3
+        };
+        (order, name)
     });
     files
         .into_iter()
