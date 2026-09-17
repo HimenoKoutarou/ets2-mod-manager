@@ -4226,6 +4226,7 @@ struct UpdateInfoDto {
     latest_version: String,
     current_version: String,
     release_name: String,
+    release_notes: String,
     asset_name: String,
     asset_size: u64,
     download_url: String,
@@ -4312,6 +4313,11 @@ fn check_update() -> Result<UpdateInfoDto, String> {
         .and_then(|value| value.as_str())
         .unwrap_or_default()
         .to_string();
+    let release_notes = payload
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
     let assets = payload.get("assets").and_then(|value| value.as_array());
     // Prefer the NSIS installer (.exe), then .msi, then the first asset.
     let chosen = assets.and_then(|list| {
@@ -4356,6 +4362,7 @@ fn check_update() -> Result<UpdateInfoDto, String> {
         latest_version,
         current_version: current_version.to_string(),
         release_name,
+        release_notes,
         asset_name,
         asset_size,
         download_url,
@@ -4363,7 +4370,10 @@ fn check_update() -> Result<UpdateInfoDto, String> {
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn download_update(request: UpdateDownloadRequest) -> Result<UpdateDownloadDto, String> {
+fn download_update(
+    #[cfg(feature = "desktop")] app: AppHandle,
+    request: UpdateDownloadRequest,
+) -> Result<UpdateDownloadDto, String> {
     let url = request.url.trim();
     if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
         return Err("invalid download url".into());
@@ -4389,26 +4399,107 @@ fn download_update(request: UpdateDownloadRequest) -> Result<UpdateDownloadDto, 
     if !response.status().is_success() {
         return Err(format!("download failed: HTTP {}", response.status()));
     }
-    let bytes = response
-        .bytes()
-        .map_err(|error| format!("read download failed: {error}"))?;
-    if bytes.is_empty() {
+    let total = response.content_length().unwrap_or(0);
+    let update_dir = std::env::temp_dir().join("ets2modmanager-update");
+    fs::create_dir_all(&update_dir)
+        .map_err(|error| format!("create update directory failed: {error}"))?;
+    let destination = update_dir.join(&filename);
+    let mut reader = response;
+    let mut file = fs::File::create(&destination)
+        .map_err(|error| format!("create download file failed: {error}"))?;
+    let mut buffer = [0u8; 64 * 1024];
+    let mut downloaded = 0u64;
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| format!("read download failed: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read])
+            .map_err(|error| format!("write download failed: {error}"))?;
+        downloaded = downloaded.saturating_add(read as u64);
+        #[cfg(feature = "desktop")]
+        let _ = app.emit(
+            "update-download-progress",
+            serde_json::json!({ "downloaded": downloaded, "total": total }),
+        );
+    }
+    drop(file);
+    if downloaded == 0 {
+        let _ = fs::remove_file(&destination);
         return Err("download failed: empty response".into());
     }
-    let downloads = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .map(|profile| profile.join("Downloads"))
-        .filter(|dir| dir.is_dir())
-        .unwrap_or_else(std::env::temp_dir);
-    let destination = downloads.join(&filename);
-    fs::write(&destination, bytes).map_err(|error| format!("write download failed: {error}"))?;
     app_log(
         "INFO",
-        &format!("update downloaded to {}", destination.display()),
+        &format!(
+            "update downloaded: {} bytes -> {}",
+            downloaded,
+            destination.display()
+        ),
     );
     Ok(UpdateDownloadDto {
         path: destination.to_string_lossy().to_string(),
     })
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallUpdateRequest {
+    path: String,
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn install_update(
+    #[cfg(feature = "desktop")] app: AppHandle,
+    request: InstallUpdateRequest,
+) -> Result<(), String> {
+    let path = PathBuf::from(request.path.trim());
+    if !path.is_file() {
+        return Err(format!("Installer was not found: {}", path.display()));
+    }
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Err("Installer path is invalid.".into());
+    };
+    if !name.to_ascii_lowercase().ends_with(".exe") {
+        return Err("Installer must be an .exe file.".into());
+    }
+    app_log(
+        "INFO",
+        &format!("launching silent installer: {}", path.display()),
+    );
+    let mut command = std::process::Command::new(&path);
+    hide_child_process(&mut command);
+    command.arg("/S");
+    let Ok(_child) = command.spawn() else {
+        return Err(format!("failed to start installer: {}", path.display()));
+    };
+    // The installer cannot overwrite the running executable, so close this
+    // instance right after returning. The NSIS installer (runAfterInstall)
+    // starts the new version, and the new process cleans up the downloaded
+    // installer on startup.
+    #[cfg(feature = "desktop")]
+    {
+        let exit_app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            exit_app.exit(0);
+        });
+    }
+    Ok(())
+}
+
+// Removes leftover update installers from a previous silent install.
+fn cleanup_update_downloads() {
+    let update_dir = std::env::temp_dir().join("ets2modmanager-update");
+    if let Ok(entries) = fs::read_dir(&update_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
@@ -7058,8 +7149,14 @@ pub fn run() {
             save_read_snapshot,
             save_mutate,
             check_update,
-            download_update
+            download_update,
+            install_update
         ])
+        .setup(|_app| {
+            // Remove any installer left over from a previous silent update.
+            cleanup_update_downloads();
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running ETS2 Mod Manager");
 }

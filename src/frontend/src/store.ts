@@ -204,8 +204,9 @@ export const fixtureBackend: ModBackend = {
   listPresets: async () => [],
   savePreset: async () => undefined,
   loadPreset: async () => [],
-  checkUpdate: async () => ({ hasUpdate: false, latestVersion: "", currentVersion: "", releaseName: "", assetName: "", assetSize: 0, downloadUrl: "" }),
+  checkUpdate: async () => ({ hasUpdate: false, latestVersion: "", currentVersion: "", releaseName: "", releaseNotes: "", assetName: "", assetSize: 0, downloadUrl: "" }),
   downloadUpdate: async () => ({ path: "" }),
+  installUpdate: async () => undefined,
 };
 
 const backend = createBackend(fixtureBackend);
@@ -323,9 +324,14 @@ interface ModState {
   updateInfo: UpdateInfo | null;
   updateChecking: boolean;
   updateDownloading: boolean;
+  updateInstalling: boolean;
+  updateProgress: { downloaded: number; total: number } | null;
   updateDownloadPath: string | null;
+  dismissedUpdateVersion: string | null;
   checkUpdate: () => Promise<void>;
   downloadUpdate: () => Promise<void>;
+  installUpdate: () => Promise<void>;
+  dismissUpdate: () => void;
 }
 
 function applyCategories(mods: ModRecord[], categories: CategorySnapshot): ModRecord[] {
@@ -334,6 +340,14 @@ function applyCategories(mods: ModRecord[], categories: CategorySnapshot): ModRe
     const category = categories.assignments[mod.id] ?? "";
     return { ...mod, category: folders.has(category) ? category : "" };
   });
+}
+
+function readDismissedUpdateVersion(): string | null {
+  try {
+    return localStorage.getItem("ets2mm-dismissed-update");
+  } catch {
+    return null;
+  }
 }
 
 function canEditMods(state: ModState): boolean {
@@ -406,7 +420,10 @@ export const useModStore = create<ModState>((set, get) => ({
   updateInfo: null,
   updateChecking: false,
   updateDownloading: false,
+  updateInstalling: false,
+  updateProgress: null,
   updateDownloadPath: null,
+  dismissedUpdateVersion: readDismissedUpdateVersion(),
   setSecondaryPanel: (secondaryPanel) => set({ secondaryPanel }),
   cancelLocalization: async () => {
     if (!get().localizationScanning) return;
@@ -824,18 +841,40 @@ export const useModStore = create<ModState>((set, get) => ({
   },
   downloadUpdate: async () => {
     const updateInfo = get().updateInfo;
-    if (!updateInfo?.downloadUrl || get().updateDownloading) return;
-    set({ updateDownloading: true, error: "" });
+    if (!updateInfo?.downloadUrl || get().updateDownloading || get().updateInstalling) return;
+    set({ updateDownloading: true, updateProgress: null, error: "" });
     try {
       const result = await backend.downloadUpdate(
         updateInfo.downloadUrl,
         updateInfo.assetName || "ets2-mod-manager-update.exe",
       );
       set({ updateDownloadPath: result.path });
+      // Download finished: kick off the silent install automatically.
+      await get().installUpdate();
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       set({ updateDownloading: false });
     }
+  },
+  installUpdate: async () => {
+    const path = get().updateDownloadPath;
+    if (!path || get().updateInstalling) return;
+    set({ updateInstalling: true, error: "" });
+    try {
+      await backend.installUpdate(path);
+    } catch (error) {
+      set({ updateInstalling: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+  dismissUpdate: () => {
+    const version = get().updateInfo?.latestVersion ?? "";
+    if (!version) return;
+    try {
+      localStorage.setItem("ets2mm-dismissed-update", version);
+    } catch {
+      // localStorage may be unavailable in restricted webviews.
+    }
+    set({ dismissedUpdateVersion: version });
   },
 }));

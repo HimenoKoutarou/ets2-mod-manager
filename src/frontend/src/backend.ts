@@ -46,6 +46,7 @@ export interface UpdateInfo {
   latestVersion: string;
   currentVersion: string;
   releaseName: string;
+  releaseNotes: string;
   assetName: string;
   assetSize: number;
   downloadUrl: string;
@@ -222,6 +223,7 @@ export interface ModBackend {
   loadPreset(profileId: string, name: string): Promise<string[]>;
   checkUpdate(): Promise<UpdateInfo>;
   downloadUpdate(url: string, filename: string): Promise<UpdateDownload>;
+  installUpdate(path: string): Promise<void>;
 }
 
 const tauriBackend: ModBackend = {
@@ -330,6 +332,9 @@ const tauriBackend: ModBackend = {
   },
   downloadUpdate(url, filename) {
     return invoke<UpdateDownload>("download_update", { request: { url, filename } });
+  },
+  installUpdate(path) {
+    return invoke<void>("install_update", { request: { path } });
   },
 };
 

@@ -76,6 +76,11 @@ export interface UiCopy {
   updateDownload: string;
   updateDownloading: string;
   updateDownloaded: string;
+  updateInstall: string;
+  updateInstalling: string;
+  updateLater: string;
+  updateIgnore: string;
+  updateProgress: (percent: number) => string;
   scanSummary: (added: number, updated: number, removed: number, inspected: number) => string;
   unsavedConfirm: string;
   save: string;

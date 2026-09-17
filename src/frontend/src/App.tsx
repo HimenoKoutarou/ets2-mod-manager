@@ -115,9 +115,13 @@ function App() {
     error,
     updateInfo,
     updateDownloading,
+    updateInstalling,
+    updateProgress,
     updateDownloadPath,
+    dismissedUpdateVersion,
     checkUpdate,
     downloadUpdate,
+    dismissUpdate,
   } = useModStore();
   const [presetName, setPresetName] = useState("");
   const [activePage, setActivePage] = useState<"mods" | "profiles" | "save" | "localization">("mods");
@@ -141,10 +145,12 @@ function App() {
   const [localizationKeyDraft, setLocalizationKeyDraft] = useState<Record<string, string>>({});
   const [localizationProgress, setLocalizationProgress] = useState<{ packageName: string; path?: string; processed: number; total: number } | null>(null);
   const [localizationFileProgress, setLocalizationFileProgress] = useState<{ packageName: string; file: string } | null>(null);
+  const [updateDownloadProgress, setUpdateDownloadProgress] = useState<{ downloaded: number; total: number } | null>(null);
   useEffect(() => {
     if (!isTauriRuntime()) return;
     let stop: UnlistenFn | undefined;
     let stopFile: UnlistenFn | undefined;
+    let stopDownload: UnlistenFn | undefined;
     void listen<{ packageName: string; path?: string; processed: number; total: number }>("localization-progress", (event) => {
       setLocalizationProgress(event.payload);
       setLocalizationFileProgress({
@@ -155,7 +161,10 @@ function App() {
     void listen<{ packageName: string; file: string }>("localization-file-progress", (event) => {
       setLocalizationFileProgress(event.payload);
     }).then((unlisten) => { stopFile = unlisten; });
-    return () => { stop?.(); stopFile?.(); };
+    void listen<{ downloaded: number; total: number }>("update-download-progress", (event) => {
+      setUpdateDownloadProgress(event.payload);
+    }).then((unlisten) => { stopDownload = unlisten; });
+    return () => { stop?.(); stopFile?.(); stopDownload?.(); };
   }, []);
   useEffect(() => {
     if (!contextMenu) return;
@@ -359,9 +368,41 @@ function App() {
 
   if (windowLabel === "initializer") return <InitializerWindow />;
 
+  const updateDismissed = Boolean(
+    updateInfo && dismissedUpdateVersion && updateInfo.latestVersion === dismissedUpdateVersion,
+  );
+  const showUpdateDialog = Boolean(
+    updateInfo?.hasUpdate
+    && !updateDismissed
+    && (updateDownloading || updateInstalling || !updateDownloadPath),
+  );
+  const downloadPercent = updateDownloadProgress?.total
+    ? Math.min(100, Math.floor((updateDownloadProgress.downloaded / updateDownloadProgress.total) * 100))
+    : 0;
+
+  const renderReleaseNotes = (notes: string) => {
+    if (!notes.trim()) return null;
+    return notes.split("\n").map((line, index) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("## ")) {
+        return <h4 className="update-note-heading" key={index}>{trimmed.slice(3)}</h4>;
+      }
+      if (trimmed.startsWith("# ")) {
+        return <h4 className="update-note-heading" key={index}>{trimmed.slice(2)}</h4>;
+      }
+      if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+        return <div className="update-note-item" key={index}>• {trimmed.slice(2)}</div>;
+      }
+      if (trimmed === "") {
+        return <div className="update-note-gap" key={index} />;
+      }
+      return <p className="update-note-line" key={index}>{trimmed}</p>;
+    });
+  };
+
   return (
     <div className={`app-shell ${activePage === "localization" ? "localization-page" : ""}`}>
-      {updateInfo?.hasUpdate ? (
+      {updateInfo?.hasUpdate && !updateDismissed ? (
         <div className="update-banner">
           <Sparkles size={15} />
           <span>{text.updateAvailable} v{updateInfo.latestVersion}（当前 v{updateInfo.currentVersion}）</span>
@@ -372,6 +413,46 @@ function App() {
               {updateDownloading ? text.updateDownloading : text.updateDownload}
             </button>
           )}
+        </div>
+      ) : null}
+      {showUpdateDialog && updateInfo ? (
+        <div className="update-dialog-overlay">
+          <div className="update-dialog">
+            <div className="update-dialog-header">
+              <div className="update-dialog-icon"><Sparkles size={20} /></div>
+              <div className="update-dialog-title">
+                <strong>{text.updateAvailable}</strong>
+                <span>v{updateInfo.latestVersion} · 当前 v{updateInfo.currentVersion}</span>
+              </div>
+            </div>
+            {updateInstalling ? (
+              <div className="update-dialog-installing">
+                <RefreshCw size={18} className="spin" />
+                <span>{text.updateInstalling}</span>
+              </div>
+            ) : updateDownloading ? (
+              <div className="update-dialog-progress">
+                <div className="update-dialog-progress-track">
+                  <span style={{ width: `${downloadPercent}%` }} />
+                </div>
+                <span className="update-dialog-progress-copy">{text.updateProgress(downloadPercent)}</span>
+              </div>
+            ) : (
+              <>
+                <div className="update-dialog-notes">
+                  {updateInfo.releaseNotes ? renderReleaseNotes(updateInfo.releaseNotes) : (
+                    <p className="update-note-line">{updateInfo.releaseName}</p>
+                  )}
+                </div>
+                <div className="update-dialog-actions">
+                  <button className="button button-primary" onClick={() => { void downloadUpdate(); }}>
+                    {text.updateInstall}
+                  </button>
+                  <button className="button" onClick={dismissUpdate}>{text.updateIgnore}</button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       ) : null}
       <header className="app-header">
