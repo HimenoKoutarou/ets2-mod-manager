@@ -4450,10 +4450,7 @@ struct InstallUpdateRequest {
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
-fn install_update(
-    #[cfg(feature = "desktop")] app: AppHandle,
-    request: InstallUpdateRequest,
-) -> Result<(), String> {
+fn install_update(request: InstallUpdateRequest) -> Result<(), String> {
     let path = PathBuf::from(request.path.trim());
     if !path.is_file() {
         return Err(format!("Installer was not found: {}", path.display()));
@@ -4470,22 +4467,14 @@ fn install_update(
     );
     let mut command = std::process::Command::new(&path);
     hide_child_process(&mut command);
-    command.arg("/S");
+    // /S: silent install; the Tauri NSIS installer auto-kills the running
+    // instance before overwriting files. /R: (re)start the app after the
+    // install finishes. The freshly started process cleans up the leftover
+    // installer from %TEMP%\ets2modmanager-update on startup.
+    command.args(["/S", "/R"]);
     let Ok(_child) = command.spawn() else {
         return Err(format!("failed to start installer: {}", path.display()));
     };
-    // The installer cannot overwrite the running executable, so close this
-    // instance right after returning. The NSIS installer (runAfterInstall)
-    // starts the new version, and the new process cleans up the downloaded
-    // installer on startup.
-    #[cfg(feature = "desktop")]
-    {
-        let exit_app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            exit_app.exit(0);
-        });
-    }
     Ok(())
 }
 
