@@ -109,6 +109,7 @@ function App() {
     loadLocalizationBase,
     pickLocalizationBase,
     writeLocalizationBase,
+    saveLocalizationAs,
     cancelLocalization,
     runDiagnostics,
     initialize,
@@ -400,6 +401,17 @@ function App() {
     });
   };
 
+  const saveLocalizationAsClick = () => {
+    if (!localization) return;
+    const entries = localization.entries.map((entry) => {
+      const manualKey = localizationKeyDraft[entry.key]?.trim();
+      const key = manualKey || entry.key;
+      return { ...entry, key, localeKey: key, value: localizationDraft[entry.key] ?? entry.value };
+    });
+    const baseName = (localizationBase?.split(/[\\/]/).pop() ?? "localization").replace(/\.(sii|sui)$/i, "");
+    void saveLocalizationAs(entries, `${baseName}_zh.sui`);
+  };
+
   return (
     <div className={`app-shell ${activePage === "localization" ? "localization-page" : ""}`}>
       {updateInfo?.hasUpdate && !updateDismissed ? (
@@ -547,13 +559,10 @@ function App() {
               </button>
               <button
                 className="button"
-                disabled={!localizationBase || !localization?.entries.length || localizationScanning}
-                onClick={() => {
-                  if (!localization) return;
-                  void writeLocalizationBase(localization.entries.map((entry) => ({ ...entry, value: localizationDraft[entry.key] ?? entry.value })));
-                }}
+                disabled={!localization?.entries.length || localizationScanning}
+                onClick={saveLocalizationAsClick}
               >
-                <Save size={14} />{text.startLocalization}
+                <Save size={14} />{text.saveLocalizationAs}
               </button>
             </section>
 
@@ -1052,10 +1061,9 @@ function App() {
                   <span>{localization ? text.entriesSummary(localization.entries.length, localization.cached, localization.inspected) : text.noSelection}</span>
                 )}
               </div>
-              <button className="button button-small panel-action" disabled={!localizationBase || !localization?.entries.length || localizationScanning} onClick={() => {
-                if (!localization) return;
-                void writeLocalizationBase(localization.entries.map((entry) => ({ ...entry, value: localizationDraft[entry.key] ?? entry.value })));
-              }}>{text.startLocalization}</button>
+              <button className="button button-small panel-action" disabled={!localization?.entries.length || localizationScanning} onClick={saveLocalizationAsClick}>
+                <Save size={13} />{text.saveLocalizationAs}
+              </button>
               <div className="localization-base-control">
                 <div className="detail-package" title={localizationBase ?? ""}>
                   {text.localizationBase}: {localizationBase ? localizationBase.split(/[\\/]/).pop() : text.noneFound}

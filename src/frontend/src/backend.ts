@@ -207,6 +207,7 @@ export interface ModBackend {
   getLocalizationBase(): Promise<string | null>;
   pickLocalizationBase(): Promise<string | null>;
   cancelLocalization(): Promise<void>;
+  saveLocalizationAs(entries: LocalizationEntry[], suggestedName: string): Promise<string | null>;
   writeLocalizationBase(baseFile: string, entries: LocalizationEntry[]): Promise<void>;
   precheckCrash(profileId: string): Promise<CrashPrecheck>;
   inspectBsii(path: string): Promise<BsiiSummary>;
@@ -273,6 +274,9 @@ const tauriBackend: ModBackend = {
   },
   pickLocalizationBase() {
     return invoke<string | null>("localization_base_pick");
+  },
+  saveLocalizationAs(entries, suggestedName) {
+    return invoke<string | null>("localization_save_as", { request: { entries, suggestedName } });
   },
   cancelLocalization() {
     return invoke<void>("localization_cancel");

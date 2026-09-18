@@ -1,4 +1,4 @@
-import type { Language, UiCopy } from "./types";
+﻿import type { Language, UiCopy } from "./types";
 
 const copy: Record<Language, UiCopy> = {
   zh_CN: {
@@ -23,6 +23,7 @@ const copy: Record<Language, UiCopy> = {
     localizationBase: "汉化基底文件",
     chooseLocalizationBase: "选择基底文件",
     startLocalization: "开始扫描并汉化",
+    saveLocalizationAs: "另存为...",
     scanLocalization: "开始扫描",
     scan: "扫描模组",
     cancelScan: "取消扫描",
@@ -125,6 +126,7 @@ const copy: Record<Language, UiCopy> = {
     localizationBase: "Localization base file",
     chooseLocalizationBase: "Choose base file",
     startLocalization: "Start scan and localize",
+    saveLocalizationAs: "Save as...",
     scanLocalization: "Start scan",
     scan: "Scan mods",
     cancelScan: "Cancel scan",
@@ -227,6 +229,7 @@ const copy: Record<Language, UiCopy> = {
     localizationBase: "Базовый файл локализации",
     chooseLocalizationBase: "Выбрать базовый файл",
     startLocalization: "Начать сканирование и локализацию",
+    saveLocalizationAs: "Сохранить как...",
     scanLocalization: "Начать сканирование",
     scan: "Сканировать моды",
     cancelScan: "Отменить сканирование",

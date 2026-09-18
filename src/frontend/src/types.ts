@@ -65,6 +65,7 @@ export interface UiCopy {
   localizationBase: string;
   chooseLocalizationBase: string;
   startLocalization: string;
+  saveLocalizationAs: string;
   scanLocalization: string;
   scan: string;
   cancelScan: string;

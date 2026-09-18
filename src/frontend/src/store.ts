@@ -196,6 +196,7 @@ export const fixtureBackend: ModBackend = {
   cancelLocalization: async () => undefined,
   getLocalizationBase: async () => null,
   pickLocalizationBase: async () => null,
+  saveLocalizationAs: async () => null,
   writeLocalizationBase: async () => undefined,
   saveProfile: async () => undefined,
   launchGame: async () => undefined,
@@ -294,6 +295,7 @@ interface ModState {
   scanLocalization: () => Promise<void>;
   loadLocalizationBase: () => Promise<void>;
   pickLocalizationBase: () => Promise<void>;
+  saveLocalizationAs: (entries: LocalizationEntry[], suggestedName: string) => Promise<void>;
   writeLocalizationBase: (entries: LocalizationEntry[]) => Promise<void>;
   cancelLocalization: () => Promise<void>;
   runDiagnostics: () => Promise<void>;
@@ -483,6 +485,15 @@ export const useModStore = create<ModState>((set, get) => ({
     try {
       await backend.writeLocalizationBase(base, entries);
       set({ error: "" });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    }
+  },
+  saveLocalizationAs: async (entries, suggestedName) => {
+    set({ error: "" });
+    try {
+      const path = await backend.saveLocalizationAs(entries, suggestedName);
+      if (path) set({ localizationBase: path });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     }

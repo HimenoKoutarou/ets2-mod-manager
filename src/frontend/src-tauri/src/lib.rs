@@ -4090,6 +4090,71 @@ fn localization_base_pick(state: State<'_, BackendState>) -> Result<Option<Strin
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalizationSaveAsRequest {
+    entries: Vec<LocalizationEntryDto>,
+    suggested_name: String,
+}
+
+// Renders entries as a standalone SiiNunit localization_db file that the
+// game (or a later scan) can load directly.
+fn localization_export_text(entries: &[LocalizationEntryDto]) -> String {
+    let mut output = String::from("SiiNunit\n{\n\nlocalization_db : .localization\n{\n");
+    for entry in entries {
+        let key = entry.locale_key.trim();
+        if key.is_empty() || key.starts_with("__manual_") {
+            continue;
+        }
+        output.push_str(&format!("key[]: \"{}\"\n", key));
+        output.push_str(&format!("val[]: \"{}\"\n", escape_sii(&entry.value)));
+        output.push('\n');
+    }
+    output.push_str("}\n}\n");
+    output
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn localization_save_as(
+    state: State<'_, BackendState>,
+    request: LocalizationSaveAsRequest,
+) -> Result<Option<String>, String> {
+    let (game_root, _mod_root) = {
+        let backend = state
+            .inner
+            .lock()
+            .map_err(|_| "backend lock poisoned".to_string())?;
+        (
+            backend.paths.game_root.clone(),
+            backend.paths.mod_root.clone(),
+        )
+    };
+    // Default to the user's ETS2 documents folder.
+    let default_directory = game_root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let suggested = if request.suggested_name.trim().is_empty() {
+        "localization.sui".to_string()
+    } else {
+        request.suggested_name.trim().to_string()
+    };
+    let Some(path) = rfd::FileDialog::new()
+        .set_directory(&default_directory)
+        .set_file_name(&suggested)
+        .add_filter("Localization files", &["sui", "sii"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    let path = normalize_path(&path);
+    let text = localization_export_text(&request.entries);
+    fs::write(&path, text.as_bytes())
+        .map_err(|e| format!("write localization file failed: {e}"))?;
+    app_log("INFO", &format!("localization exported to {}", path));
+    Ok(Some(path))
+}
+
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn localization_write_base(request: LocalizationWriteRequest) -> Result<(), String> {
     let path = PathBuf::from(&request.base_file);
@@ -7129,6 +7194,7 @@ pub fn run() {
             game_launch,
             localization_scan,
             localization_write_base,
+            localization_save_as,
             localization_cancel,
             localization_base_get,
             localization_base_pick,
