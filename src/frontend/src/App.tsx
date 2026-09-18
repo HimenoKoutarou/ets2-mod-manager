@@ -383,7 +383,12 @@ function App() {
 
   const renderReleaseNotes = (notes: string) => {
     if (!notes.trim()) return null;
-    return notes.split("\n").map((line, index) => {
+    const lines = notes.split("\n").filter((line) => {
+      // Drop auto-generated link-only lines (e.g. "Full Changelog: https://...").
+      const trimmed = line.trim();
+      return !/^https?:\/\/\S+$/.test(trimmed);
+    });
+    return lines.map((line, index) => {
       const trimmed = line.trim();
       if (trimmed.startsWith("## ")) {
         return <h4 className="update-note-heading" key={index}>{trimmed.slice(3)}</h4>;
