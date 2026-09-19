@@ -525,16 +525,14 @@ function App() {
 
             <div className="localization-toolbar">
               <label className="localization-select">
-                <span>{text.saves}</span>
+                <span>{text.profiles}</span>
                 <select
-                  value={selectedSave?.slotId ?? ""}
+                  value={selectedProfileId}
                   onChange={(event) => {
-                    const next = saves.find((save) => save.slotId === event.target.value);
-                    if (next) void selectSave(next);
+                    if (event.target.value) void selectProfile(event.target.value);
                   }}
                 >
-                  <option value="">{text.noSelection}</option>
-                  {saves.map((save) => <option key={save.slotId} value={save.slotId}>{save.displayName}</option>)}
+                  {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
                 </select>
               </label>
               <label className="localization-select">

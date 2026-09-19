@@ -2134,44 +2134,44 @@ fn directory_info_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u
     let mut latest_modified = 0i64;
     let mut fingerprint = 1469598103934665603u64;
     let mut files = Vec::new();
-    let Ok(entries) = fs::read_dir(path) else {
-        return (0, 0, fingerprint);
-    };
-    for entry in entries.flatten() {
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current_dir) = stack.pop() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        let current = entry.path();
-        let Ok(metadata) = fs::metadata(&current) else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
+        let Ok(entries) = fs::read_dir(&current_dir) else { continue; };
+        for entry in entries.flatten() {
+            let current = entry.path();
+            let Ok(metadata) = fs::metadata(&current) else { continue; };
+            if metadata.is_dir() {
+                stack.push(current);
+                continue;
+            }
+            let relative = current
+                .strip_prefix(path)
+                .unwrap_or(&current)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !is_mod_info_path(&relative) {
+                continue;
+            }
+            if let Some(modified) = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis() as i64)
+            {
+                latest_modified = latest_modified.max(modified);
+            }
+            total_size = total_size.saturating_add(metadata.len());
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis() as u64)
+                .unwrap_or_default();
+            files.push((relative, metadata.len(), modified));
         }
-        let relative = current
-            .strip_prefix(path)
-            .unwrap_or(&current)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if !is_mod_info_path(&relative) {
-            continue;
-        }
-        if let Some(modified) = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map(|value| value.as_millis() as i64)
-        {
-            latest_modified = latest_modified.max(modified);
-        }
-        total_size = total_size.saturating_add(metadata.len());
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-            .map(|value| value.as_millis() as u64)
-            .unwrap_or_default();
-        files.push((relative, metadata.len(), modified));
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     for (relative, size, modified) in files {
@@ -2761,9 +2761,36 @@ fn package_fingerprint(path: &Path) -> (String, i64, i64) {
         .and_then(|value| value.to_str())
         .unwrap_or("file")
         .to_ascii_lowercase();
-    // Bump the persisted localization snapshot fingerprint whenever the
-    // parser contract changes, so old incomplete locale indexes are rebuilt.
-    (format!("{kind}-l10n-v4"), size, modified)
+    // ZIP central-directory metadata lets us invalidate the snapshot when
+    // def/locale entries change without hashing or extracting game assets.
+    if kind == "zip" || kind == "scs" {
+        if let Ok(file) = fs::File::open(path) {
+            if let Ok(mut archive) = ZipArchive::new(file) {
+                let mut hash = 1469598103934665603u64;
+                let mut matched = false;
+                for index in 0..archive.len() {
+                    let Ok(entry) = archive.by_index(index) else { continue; };
+                    let normalized = entry.name().replace('\\', "/");
+                    if !is_localization_path(&normalized) && !is_definition_path(&normalized) {
+                        continue;
+                    }
+                    matched = true;
+                    for byte in normalized.bytes() {
+                        hash ^= byte as u64;
+                        hash = hash.wrapping_mul(1099511628211);
+                    }
+                    hash ^= entry.size();
+                    hash = hash.wrapping_mul(1099511628211);
+                    hash ^= entry.crc32() as u64;
+                    hash = hash.wrapping_mul(1099511628211);
+                }
+                if matched {
+                    return ("archive-l10n-v5".into(), size, (hash ^ modified as u64) as i64);
+                }
+            }
+        }
+    }
+    (format!("{kind}-l10n-v5"), size, modified)
 }
 
 fn has_path_segment(path: &str, segment: &str) -> bool {
@@ -3717,13 +3744,13 @@ fn local_packages_for_profile(
     cancelled: &AtomicBool,
 ) -> Result<Vec<ModDto>, String> {
     let mut mods = dedupe_mods(load_cached(connection)?);
-    if mods.is_empty() {
-        let mut discovered = discover_packages(Some(&paths.mod_root), false, cancelled);
-        discovered.extend(discover_workshop_packages(&paths.workshop_roots, cancelled));
-        if !discovered.is_empty() {
-            sync_index(connection, &discovered)?;
-            mods = dedupe_mods(load_cached(connection)?);
-        }
+    // Reconcile the shallow package catalog on every request so newly added
+    // and removed packages are visible without re-reading game assets.
+    let mut discovered = discover_packages(Some(&paths.mod_root), false, cancelled);
+    discovered.extend(discover_workshop_packages(&paths.workshop_roots, cancelled));
+    if !discovered.is_empty() || !mods.is_empty() {
+        sync_index(connection, &discovered)?;
+        mods = dedupe_mods(load_cached(connection)?);
     }
     let active = active_for_profile(profile)?;
     apply_enabled(&mut mods, &active);
@@ -3739,7 +3766,7 @@ fn order_localization_packages(mods: Vec<ModDto>, active: &[String]) -> Vec<ModD
     for package in profile_order_to_ui(active) {
         if let Some(index) = remaining
             .iter()
-            .position(|row| rows_match(&row.package_name, &package))
+            .position(|row| row_matches_active(row, &package))
         {
             ordered.push(remaining.remove(index));
         }
@@ -4853,11 +4880,17 @@ fn rows_match(left: &str, right: &str) -> bool {
         .any(|alias| right_aliases.contains(&alias))
 }
 
+fn row_matches_active(row: &ModDto, active: &str) -> bool {
+    [row.id.as_str(), row.package_name.as_str(), row.display_name.as_str()]
+        .into_iter()
+        .any(|value| rows_match(value, active))
+}
+
 fn apply_enabled(mods: &mut [ModDto], active: &[String]) {
     for row in mods {
         row.enabled = active
             .iter()
-            .any(|entry| rows_match(&row.package_name, entry));
+            .any(|entry| row_matches_active(row, entry));
     }
 }
 
@@ -6102,6 +6135,30 @@ mod tests {
     }
 
     #[test]
+    fn workshop_active_matching_uses_id_and_display_name_aliases() {
+        let row = ModDto {
+            id: "mod_workshop_package.00000000B59F7017".into(),
+            package_name: "real_traffic_lights".into(),
+            path: "workshop/3047125015".into(),
+            package_type: "workshop".into(),
+            display_name: "Real traffic lights".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 0,
+            modified_ms: 0,
+            enabled: false,
+            category: "unknown".into(),
+            fingerprint: 0,
+        };
+        assert!(row_matches_active(&row, "mod_workshop_package.00000000B59F7017"));
+        assert!(row_matches_active(&row, "3047125015"));
+        assert!(row_matches_active(&row, "Real traffic lights"));
+        let mut rows = vec![row];
+        apply_enabled(&mut rows, &["mod_workshop_package.00000000B59F7017".into()]);
+        assert!(rows[0].enabled);
+    }
+
+    #[test]
     fn sii_unescape_decodes_utf8_hex_sequences() {
         assert_eq!(
             unescape_sii(r"\xe5\xa7\xac\xe9\x87\x8e\xe6\x98\x9f\xe5\xa5\x8f"),
@@ -6203,6 +6260,19 @@ mod tests {
         let before = directory_info_signature(&root, &AtomicBool::new(false));
         fs::write(root.join("manifest.sii"), b"display_name: \"Two Longer\"")
             .expect("rewrite manifest");
+        let after = directory_info_signature(&root, &AtomicBool::new(false));
+        let _ = fs::remove_dir_all(&root);
+        assert_ne!(before.2, after.2);
+    }
+
+    #[test]
+    fn directory_info_signature_finds_nested_metadata() {
+        let root = std::env::temp_dir().join(format!("ets2modmanager-nested-info-{}", now_ms()));
+        let nested = root.join("metadata");
+        fs::create_dir_all(&nested).expect("create nested metadata directory");
+        fs::write(nested.join("manifest.sii"), b"display_name: \"One\"").expect("write manifest");
+        let before = directory_info_signature(&root, &AtomicBool::new(false));
+        fs::write(nested.join("manifest.sii"), b"display_name: \"Two\"").expect("rewrite manifest");
         let after = directory_info_signature(&root, &AtomicBool::new(false));
         let _ = fs::remove_dir_all(&root);
         assert_ne!(before.2, after.2);
@@ -6843,7 +6913,7 @@ mod tests {
     fn localization_snapshot_survives_reload() {
         let database = std::env::temp_dir().join(format!("ets2-l10n-cache-{}.db", now_ms()));
         let package_path = "base.scs".to_string();
-        let fingerprint = ("scs-l10n-v4".to_string(), 123, 456);
+        let fingerprint = ("scs-l10n-v5".to_string(), 123, 456);
         let entry = LocalizationEntryDto {
             key: "city.demo".into(),
             value: "示例城市".into(),
@@ -6904,12 +6974,12 @@ mod tests {
             let mut connection = open_db(&database).expect("open cache db");
             let first = (
                 first_path.clone(),
-                ("scs-l10n-v4".into(), 1, 11),
+                ("scs-l10n-v5".into(), 1, 11),
                 vec![entry("base.scs", "city.first")],
             );
             let second = (
                 second_path.clone(),
-                ("scs-l10n-v4".into(), 2, 22),
+                ("scs-l10n-v5".into(), 2, 22),
                 vec![entry("dlc_east.scs", "city.second")],
             );
             save_localization_snapshot(&mut connection, "zh_cn", &first)
@@ -6930,7 +7000,7 @@ mod tests {
             &connection,
             &first_path,
             "zh_cn",
-            &("scs-l10n-v4".into(), 1, 11),
+            &("scs-l10n-v5".into(), 1, 11),
         )
         .expect("load first package")
         .is_some());
@@ -6938,7 +7008,7 @@ mod tests {
             &connection,
             &second_path,
             "zh_cn",
-            &("scs-l10n-v4".into(), 2, 22),
+            &("scs-l10n-v5".into(), 2, 22),
         )
         .expect("load second package")
         .is_some());
