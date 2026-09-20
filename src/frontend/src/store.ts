@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveInventory, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
+import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveInventory, type SaveMutation, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
 import { ALL_CATEGORIES, batchEnabled, moveBatch, type BatchAction, type MoveDirection } from "./modBatch";
 import { getCopy } from "./i18n";
 import { createMediaLoader, mediaKey } from "./modMedia";
@@ -277,6 +277,7 @@ interface ModState {
   selectedSave: SaveSlot | null;
   saveSnapshot: SaveSnapshot | null;
   saveInventory: SaveInventory | null;
+  saveMutation: SaveMutation | null;
   localization: LocalizationScan | null;
   localizationBase: string | null;
   diagnostics: CrashPrecheck | null;
@@ -375,6 +376,7 @@ export const useModStore = create<ModState>((set, get) => ({
   selectedSave: null,
   saveSnapshot: null,
   saveInventory: null,
+  saveMutation: null,
   localization: null,
   localizationBase: null,
   diagnostics: null,
@@ -528,6 +530,7 @@ export const useModStore = create<ModState>((set, get) => ({
       selectedSave,
       saveSnapshot: null,
       saveInventory: null,
+      saveMutation: null,
       error: "",
     });
     if (!selectedSave?.gameSii) return;
@@ -542,7 +545,7 @@ export const useModStore = create<ModState>((set, get) => ({
       ) {
         return;
       }
-      set({ saveSnapshot, saveInventory, secondaryPanel: "saves" });
+      set({ saveSnapshot, saveInventory, saveMutation: null, secondaryPanel: "saves" });
     } catch (error) {
       if (
         requestId !== saveSelectionRequest
@@ -568,7 +571,7 @@ export const useModStore = create<ModState>((set, get) => ({
         backend.readSaveInventory(selectedSave.gameSii),
       ]);
       if (get().selectedSave?.gameSii !== selectedSave.gameSii) return;
-      set({ saveSnapshot, saveInventory });
+      set({ saveSnapshot, saveInventory, saveMutation: result });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -607,6 +610,7 @@ export const useModStore = create<ModState>((set, get) => ({
         selectedSave: null,
         saveSnapshot: null,
         saveInventory: null,
+        saveMutation: null,
         selectedModId: mods[0]?.id ?? null,
         presets: {},
         selectedPresetName: "",
@@ -660,6 +664,7 @@ export const useModStore = create<ModState>((set, get) => ({
         selectedSave: null,
         saveSnapshot: null,
         saveInventory: null,
+        saveMutation: null,
         secondaryPanel: "none",
         localization: null,
         diagnostics: null,

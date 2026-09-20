@@ -63,6 +63,7 @@ function App() {
     selectedSave,
     saveSnapshot,
     saveInventory,
+    saveMutation,
     localization,
     localizationBase,
     diagnostics,
@@ -718,6 +719,17 @@ function App() {
                           {!saveInventory?.trailers && <div className="save-tool-empty">{text.noneFound}</div>}
                         </div>
                       </section>
+                      {saveMutation && (
+                        <div className={`save-transaction-notice ${saveMutation.success ? "is-success" : "is-neutral"}`}>
+                          <strong>{saveMutation.message}</strong>
+                          {saveMutation.backupPath && (
+                            <span title={saveMutation.backupPath}>
+                              {language === "zh_CN" ? "备份：" : language === "ru_RU" ? "Резервная копия: " : "Backup: "}
+                              {saveMutation.backupPath.split(/[\\/]/).pop()}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <div className="save-form">
                       <div className="save-form-heading"><strong>{text.saveSnapshot}</strong><span>{saveSnapshot ? `${text.saveSnapshot} · v${saveSnapshot.version}` : text.scanning}</span></div>

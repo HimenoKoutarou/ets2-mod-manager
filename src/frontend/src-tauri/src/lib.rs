@@ -6322,6 +6322,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn level_xp_uses_profile_formula_and_rejects_invalid_levels() {
+        assert_eq!(level_xp(1).expect("level 1"), 0);
+        assert_eq!(level_xp(2).expect("level 2"), 1_000);
+        assert_eq!(level_xp(200).expect("level 200"), 19_900_000);
+        assert!(level_xp(0).is_err());
+        assert!(level_xp(201).is_err());
+    }
+
+    #[test]
     fn crash_log_analysis_matches_active_mod_and_keeps_evidence() {
         let dir = std::env::temp_dir().join(format!("ets2mm-crash-{}", now_ms()));
         fs::create_dir_all(&dir).expect("create temp dir");

@@ -147,6 +147,10 @@ button { color: inherit; }
 .save-tool-card strong { color: #172033; font-size: 12px; }
 .save-tool-card span { color: #667085; font-size: 10px; }
 .save-tool-empty { padding: 14px 4px; color: #98a2b3; font-size: 11px; }
+.save-transaction-notice { display: grid; gap: 4px; margin-top: 12px; padding: 10px 12px; border: 1px solid #d9e2ef; background: #f8fafc; color: #475467; font-size: 11px; }
+.save-transaction-notice.is-success { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+.save-transaction-notice strong { font-size: 12px; }
+.save-transaction-notice span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .save-form { display: grid; gap: 12px; margin-top: 22px; }
 .save-form-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #172033; }
 .save-form-heading span { color: #667085; font-size: 11px; }
