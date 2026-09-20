@@ -4876,24 +4876,18 @@ fn mutate_save(path: &Path, operation: &str, value: i64) -> Result<SaveMutationD
     } else {
         output_plain
     };
-    let backup = path.with_extension(format!("bak-{}", now_ms()));
-    fs::copy(path, &backup).map_err(|error| format!("backup save failed: {error}"))?;
+    let backup = transaction_backup(path, "save")?;
     if let Err(error) = atomic_write(path, &output) {
-        let _ = fs::copy(&backup, path);
-        return Err(error);
+        return Err(transaction_failure(path, &backup, error));
     }
     let verify = match save_snapshot(path) {
         Ok(snapshot) => snapshot,
         Err(verify_error) => {
-            let restore_error = fs::copy(&backup, path).err();
-            return Err(match restore_error {
-                Some(error) => format!(
-                    "Save write verification read failed: {verify_error}; restoring backup failed: {error}"
-                ),
-                None => format!(
-                    "Save write verification read failed: {verify_error}; original save restored from backup."
-                ),
-            });
+            return Err(transaction_failure(
+                path,
+                &backup,
+                format!("Save write verification read failed: {verify_error}"),
+            ));
         }
     };
     let verified = verify
@@ -4907,8 +4901,11 @@ fn mutate_save(path: &Path, operation: &str, value: i64) -> Result<SaveMutationD
         })
         .map(|entry| entry.value);
     if verified != Some(write_value) {
-        let _ = fs::copy(&backup, path);
-        return Err("Save write verification failed; original save restored.".into());
+        return Err(transaction_failure(
+            path,
+            &backup,
+            "Save write verification failed",
+        ));
     }
     Ok(SaveMutationDto {
         success: true,
@@ -5191,6 +5188,26 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+fn transaction_backup(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let backup = path.with_extension(format!("bak-{}", now_ms()));
+    fs::copy(path, &backup).map_err(|error| format!("backup {label} failed: {error}"))?;
+    Ok(backup)
+}
+
+fn restore_transaction(path: &Path, backup: &Path) -> Result<(), String> {
+    fs::copy(backup, path)
+        .map(|_| ())
+        .map_err(|error| format!("restoring backup failed: {error}"))
+}
+
+fn transaction_failure(path: &Path, backup: &Path, message: impl Into<String>) -> String {
+    let message = message.into();
+    match restore_transaction(path, backup) {
+        Ok(()) => format!("{message}; original file restored from backup."),
+        Err(error) => format!("{message}; {error}"),
+    }
+}
+
 fn replace_active(profile: &ProfileDto, active_mods: &[String]) -> Result<SaveResult, String> {
     if !profile.writable {
         return Err("Steam/Cloud profiles are read-only.".into());
@@ -5257,38 +5274,26 @@ fn replace_active(profile: &ProfileDto, active_mods: &[String]) -> Result<SaveRe
     } else {
         plain
     };
-    let backup = path.with_extension(format!("bak-{}", now_ms()));
-    fs::copy(&path, &backup).map_err(|e| format!("backup profile failed: {e}"))?;
+    let backup = transaction_backup(&path, "profile")?;
     if let Err(write_error) = atomic_write(&path, &encoded) {
-        let restore_error = fs::copy(&backup, &path).err();
-        return Err(match restore_error {
-            Some(error) => format!("{write_error}; restoring backup failed: {error}"),
-            None => format!("{write_error}; original profile restored from backup."),
-        });
+        return Err(transaction_failure(&path, &backup, write_error));
     }
     let verify = match read_sii(&path) {
         Ok(value) => value,
         Err(read_error) => {
-            let restore_error = fs::copy(&backup, &path).err();
-            return Err(match restore_error {
-                Some(error) => format!(
-                    "profile write verification read failed: {read_error}; restoring backup failed: {error}"
-                ),
-                None => format!(
-                    "profile write verification read failed: {read_error}; original profile restored from backup."
-                ),
-            });
+            return Err(transaction_failure(
+                &path,
+                &backup,
+                format!("profile write verification read failed: {read_error}"),
+            ));
         }
     };
     if parse_active_mods(&verify) != active_mods {
-        let restore_error = fs::copy(&backup, &path).err();
-        return Err(match restore_error {
-            Some(error) => {
-                format!("active_mods write verification failed; restoring backup failed: {error}")
-            }
-            None => "active_mods write verification failed; original profile restored from backup."
-                .into(),
-        });
+        return Err(transaction_failure(
+            &path,
+            &backup,
+            "active_mods write verification failed",
+        ));
     }
     Ok(SaveResult {
         success: true,
