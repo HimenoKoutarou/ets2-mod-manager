@@ -127,6 +127,25 @@ export interface SaveMutation {
   value?: number;
 }
 
+export interface SaveObjectField {
+  name: string;
+  typeId: number;
+  value: string;
+}
+
+export interface SaveObject {
+  structureName: string;
+  kind: "truck" | "trailer" | "garage" | "profile";
+  fields: SaveObjectField[];
+}
+
+export interface SaveInventory {
+  version: number;
+  objects: SaveObject[];
+  trucks: number;
+  trailers: number;
+}
+
 interface SaveSlotWire {
   profileId: string;
   slotId: string;
@@ -216,6 +235,7 @@ export interface ModBackend {
   precheckCrash(profileId: string): Promise<CrashPrecheck>;
   inspectBsii(path: string): Promise<BsiiSummary>;
   readSaveSnapshot(path: string): Promise<SaveSnapshot>;
+  readSaveInventory(path: string): Promise<SaveInventory>;
   mutateSave(path: string, operation: "set_money" | "set_experience" | "set_level", value: number): Promise<SaveMutation>;
   scan(): Promise<ScanSummary>;
   cancelScan(): Promise<void>;
@@ -298,6 +318,9 @@ const tauriBackend: ModBackend = {
   },
   readSaveSnapshot(path) {
     return invoke<SaveSnapshot>("save_read_snapshot", { request: { path } });
+  },
+  readSaveInventory(path) {
+    return invoke<SaveInventory>("save_read_inventory", { request: { path } });
   },
   mutateSave(path, operation, value) {
     return invoke<SaveMutation>("save_mutate", { request: { path, operation, value } });

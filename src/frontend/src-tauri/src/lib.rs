@@ -298,6 +298,31 @@ struct SaveSnapshotDto {
     fields: Vec<SaveFieldDto>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveObjectFieldDto {
+    name: String,
+    type_id: u32,
+    value: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveObjectDto {
+    structure_name: String,
+    kind: String,
+    fields: Vec<SaveObjectFieldDto>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveInventoryDto {
+    version: u32,
+    objects: Vec<SaveObjectDto>,
+    trucks: usize,
+    trailers: usize,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveMutationRequest {
@@ -4900,6 +4925,63 @@ fn save_read_snapshot(request: BsiiInspectRequest) -> Result<SaveSnapshotDto, St
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn save_read_inventory(request: BsiiInspectRequest) -> Result<SaveInventoryDto, String> {
+    let path = PathBuf::from(request.path);
+    if !path.is_file() {
+        return Err(format!("Save file was not found: {}", path.display()));
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("read save failed: {error}"))?;
+    let bytes = decode_scsc_or_plain(&bytes)?;
+    let header = bsii_core::inspect_header(&bytes).map_err(str::to_string)?;
+    let objects = bsii_core::inspect_objects(&bytes, 20_000)
+        .map_err(|error| format!("inspect save objects failed: {error}"))?;
+    let objects = objects
+        .into_iter()
+        .filter_map(|object| {
+            let structure = object.structure_name.to_ascii_lowercase();
+            let kind = if structure.contains("truck") {
+                "truck"
+            } else if structure.contains("trailer") {
+                "trailer"
+            } else if structure.contains("garage") {
+                "garage"
+            } else if structure.contains("economy")
+                || structure.contains("player")
+                || structure.contains("profile")
+            {
+                "profile"
+            } else {
+                return None;
+            };
+            Some(SaveObjectDto {
+                structure_name: object.structure_name,
+                kind: kind.into(),
+                fields: object
+                    .fields
+                    .into_iter()
+                    .map(|field| SaveObjectFieldDto {
+                        name: field.name,
+                        type_id: field.type_id,
+                        value: field.value,
+                    })
+                    .collect(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let trucks = objects.iter().filter(|object| object.kind == "truck").count();
+    let trailers = objects
+        .iter()
+        .filter(|object| object.kind == "trailer")
+        .count();
+    Ok(SaveInventoryDto {
+        version: header.version,
+        objects,
+        trucks,
+        trailers,
+    })
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_mutate(request: SaveMutationRequest) -> Result<SaveMutationDto, String> {
     mutate_save(Path::new(&request.path), &request.operation, request.value)
 }
@@ -7533,6 +7615,7 @@ pub fn run() {
             crash_precheck,
             save_inspect_bsii,
             save_read_snapshot,
+            save_read_inventory,
             save_mutate,
             check_update,
             download_update,

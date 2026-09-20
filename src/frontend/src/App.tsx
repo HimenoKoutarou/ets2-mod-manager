@@ -62,6 +62,7 @@ function App() {
     saves,
     selectedSave,
     saveSnapshot,
+    saveInventory,
     localization,
     localizationBase,
     diagnostics,
@@ -238,6 +239,11 @@ function App() {
   useEffect(() => { void loadLocalizationBase(); }, [loadLocalizationBase]);
   useEffect(() => { void checkUpdate(); }, [checkUpdate]);
   const text = getCopy(language);
+  const saveToolLabels = language === "zh_CN"
+    ? { profile: "Profile", trucks: "卡车", trailers: "拖车", detected: "已识别", object: "对象", truckObject: "卡车对象", trailerObject: "拖车对象" }
+    : language === "ru_RU"
+      ? { profile: "Профиль", trucks: "Грузовики", trailers: "Прицепы", detected: "найдено", object: "объектов", truckObject: "объект грузовика", trailerObject: "объект прицепа" }
+      : { profile: "Profile", trucks: "Trucks", trailers: "Trailers", detected: "detected", object: "objects", truckObject: "Truck object", trailerObject: "Trailer object" };
   const categoryText = categoryCopy[language];
   const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? {
     id: "",
@@ -664,6 +670,54 @@ function App() {
                         <div className="panel-subtitle">{selectedSave.folder}</div>
                       </div>
                       <span className={`source source-${selectedSave.profileLocation}`}>{selectedSave.profileLocation === "local" ? text.sourceLocal : text.readOnly}</span>
+                    </div>
+                    <div className="save-tool-sections">
+                      <section className="save-tool-section">
+                        <div className="save-tool-section-heading">
+                          <div><strong>{saveToolLabels.profile}</strong><span>{text.profileDetails}</span></div>
+                          <span className="save-tool-count">{saveInventory?.objects.filter((object) => object.kind === "profile" || object.kind === "garage").length ?? 0}</span>
+                        </div>
+                        <div className="save-tool-card-grid">
+                          <article className="save-tool-card">
+                            <div className="save-tool-card-icon"><Wrench size={16} /></div>
+                            <div><strong>{text.money} / {text.experience}</strong><span>{saveSnapshot ? "BSII snapshot" : text.scanning}</span></div>
+                          </article>
+                          <article className="save-tool-card">
+                            <div className="save-tool-card-icon"><FolderOpen size={16} /></div>
+                            <div><strong>{text.saves}</strong><span>v{saveInventory?.version ?? "—"} · {saveInventory?.objects.length ?? 0} {saveToolLabels.object}</span></div>
+                          </article>
+                        </div>
+                      </section>
+                      <section className="save-tool-section">
+                        <div className="save-tool-section-heading">
+                          <div><strong>{saveToolLabels.trucks}</strong><span>{saveInventory?.trucks ?? 0} {saveToolLabels.detected}</span></div>
+                          <span className="save-tool-count">{saveInventory?.trucks ?? 0}</span>
+                        </div>
+                        <div className="save-tool-card-grid">
+                          {(saveInventory?.objects.filter((object) => object.kind === "truck").slice(0, 6) ?? []).map((object, index) => (
+                            <article className="save-tool-card" key={`${object.structureName}-${index}`}>
+                              <div className="save-tool-card-icon"><Wrench size={16} /></div>
+                              <div><strong>{object.structureName}</strong><span>{object.fields.find((field) => field.name === "name")?.value || saveToolLabels.truckObject}</span></div>
+                            </article>
+                          ))}
+                          {!saveInventory?.trucks && <div className="save-tool-empty">{text.noneFound}</div>}
+                        </div>
+                      </section>
+                      <section className="save-tool-section">
+                        <div className="save-tool-section-heading">
+                          <div><strong>{saveToolLabels.trailers}</strong><span>{saveInventory?.trailers ?? 0} {saveToolLabels.detected}</span></div>
+                          <span className="save-tool-count">{saveInventory?.trailers ?? 0}</span>
+                        </div>
+                        <div className="save-tool-card-grid">
+                          {(saveInventory?.objects.filter((object) => object.kind === "trailer").slice(0, 6) ?? []).map((object, index) => (
+                            <article className="save-tool-card" key={`${object.structureName}-${index}`}>
+                              <div className="save-tool-card-icon"><FolderOpen size={16} /></div>
+                              <div><strong>{object.structureName}</strong><span>{object.fields.find((field) => field.name === "name")?.value || saveToolLabels.trailerObject}</span></div>
+                            </article>
+                          ))}
+                          {!saveInventory?.trailers && <div className="save-tool-empty">{text.noneFound}</div>}
+                        </div>
+                      </section>
                     </div>
                     <div className="save-form">
                       <div className="save-form-heading"><strong>{text.saveSnapshot}</strong><span>{saveSnapshot ? `${text.saveSnapshot} · v${saveSnapshot.version}` : text.scanning}</span></div>

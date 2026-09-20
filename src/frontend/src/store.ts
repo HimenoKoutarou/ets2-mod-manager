@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
+import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveInventory, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
 import { ALL_CATEGORIES, batchEnabled, moveBatch, type BatchAction, type MoveDirection } from "./modBatch";
 import { getCopy } from "./i18n";
 import { createMediaLoader, mediaKey } from "./modMedia";
@@ -177,6 +177,15 @@ export const fixtureBackend: ModBackend = {
       },
     ],
   }),
+  readSaveInventory: async () => ({
+    version: 3,
+    trucks: 1,
+    trailers: 1,
+    objects: [
+      { structureName: "truck", kind: "truck", fields: [{ name: "name", typeId: 0, value: "示例卡车" }] },
+      { structureName: "trailer", kind: "trailer", fields: [{ name: "name", typeId: 0, value: "示例拖车" }] },
+    ],
+  }),
   mutateSave: async (_path, operation, value) => {
     if (operation === "set_money") fixtureSaveMoney = value;
     if (operation === "set_experience") fixtureSaveExperience = value;
@@ -267,6 +276,7 @@ interface ModState {
   saves: SaveSlot[];
   selectedSave: SaveSlot | null;
   saveSnapshot: SaveSnapshot | null;
+  saveInventory: SaveInventory | null;
   localization: LocalizationScan | null;
   localizationBase: string | null;
   diagnostics: CrashPrecheck | null;
@@ -364,6 +374,7 @@ export const useModStore = create<ModState>((set, get) => ({
   saves: [],
   selectedSave: null,
   saveSnapshot: null,
+  saveInventory: null,
   localization: null,
   localizationBase: null,
   diagnostics: null,
@@ -516,18 +527,22 @@ export const useModStore = create<ModState>((set, get) => ({
     set({
       selectedSave,
       saveSnapshot: null,
+      saveInventory: null,
       error: "",
     });
     if (!selectedSave?.gameSii) return;
     try {
-      const saveSnapshot = await backend.readSaveSnapshot(selectedSave.gameSii);
+      const [saveSnapshot, saveInventory] = await Promise.all([
+        backend.readSaveSnapshot(selectedSave.gameSii),
+        backend.readSaveInventory(selectedSave.gameSii),
+      ]);
       if (
         requestId !== saveSelectionRequest
         || get().selectedSave?.gameSii !== selectedSave.gameSii
       ) {
         return;
       }
-      set({ saveSnapshot, secondaryPanel: "saves" });
+      set({ saveSnapshot, saveInventory, secondaryPanel: "saves" });
     } catch (error) {
       if (
         requestId !== saveSelectionRequest
@@ -548,9 +563,12 @@ export const useModStore = create<ModState>((set, get) => ({
         set({ error: result.message });
         return;
       }
-      const saveSnapshot = await backend.readSaveSnapshot(selectedSave.gameSii);
+      const [saveSnapshot, saveInventory] = await Promise.all([
+        backend.readSaveSnapshot(selectedSave.gameSii),
+        backend.readSaveInventory(selectedSave.gameSii),
+      ]);
       if (get().selectedSave?.gameSii !== selectedSave.gameSii) return;
-      set({ saveSnapshot });
+      set({ saveSnapshot, saveInventory });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -588,6 +606,7 @@ export const useModStore = create<ModState>((set, get) => ({
         saves: [],
         selectedSave: null,
         saveSnapshot: null,
+        saveInventory: null,
         selectedModId: mods[0]?.id ?? null,
         presets: {},
         selectedPresetName: "",
@@ -640,6 +659,7 @@ export const useModStore = create<ModState>((set, get) => ({
         saves: [],
         selectedSave: null,
         saveSnapshot: null,
+        saveInventory: null,
         secondaryPanel: "none",
         localization: null,
         diagnostics: null,

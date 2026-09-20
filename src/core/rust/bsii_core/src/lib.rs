@@ -23,6 +23,19 @@ pub struct NumericField {
     pub size: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectField {
+    pub name: String,
+    pub type_id: u32,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectSummary {
+    pub structure_name: String,
+    pub fields: Vec<ObjectField>,
+}
+
 pub fn inspect_header(bytes: &[u8]) -> Result<BsiiHeader, &'static str> {
     if bytes.len() < 8 || &bytes[..4] != b"BSII" {
         return Err("invalid_bsii_header");
@@ -107,6 +120,98 @@ impl<'a> Reader<'a> {
 
 fn encoded_string(reader: &mut Reader<'_>) -> Result<(), String> {
     reader.u64().map(|_| ())
+}
+
+fn encoded_token(reader: &mut Reader<'_>) -> Result<String, String> {
+    let parts = reader.u8()?;
+    if parts == 0xFF {
+        return Ok(format!("{:016x}", reader.u64()?));
+    }
+    let mut values = Vec::with_capacity(parts as usize);
+    for _ in 0..parts {
+        values.push(format!("{:016x}", reader.u64()?));
+    }
+    Ok(values.join("."))
+}
+
+fn captured_value(reader: &mut Reader<'_>, ty: u32) -> Result<Option<String>, String> {
+    match ty {
+        0x01 => Ok(Some(reader.string()?)),
+        0x03 => Ok(Some(encoded_token(reader)?)),
+        0x27 | 0x2F => Ok(Some(reader.u32()?.to_string())),
+        0x31 => Ok(Some(reader.i64()?.to_string())),
+        0x35 => Ok(Some(reader.u8()?.to_string())),
+        _ => {
+            skip_value(reader, ty, 0)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Returns a bounded, read-only view of save objects. Unknown/complex field
+/// types are skipped safely; callers can inspect them later without mutating
+/// the original bytes.
+pub fn inspect_objects(bytes: &[u8], max_objects: usize) -> Result<Vec<ObjectSummary>, String> {
+    let header = inspect_header(bytes).map_err(str::to_string)?;
+    let mut reader = Reader::new(bytes, header.version);
+    let mut definitions: Vec<Option<(String, Vec<(String, u32, u32)>)>> = Vec::new();
+    let mut result = Vec::new();
+    while reader.pos < reader.data.len() && result.len() < max_objects {
+        let block = reader.u32()?;
+        if block == 0 {
+            let valid = reader.u8()? != 0;
+            if !valid {
+                continue;
+            }
+            let id = reader.u32()?;
+            let name = reader.string()?;
+            let mut fields = Vec::new();
+            loop {
+                let ty = reader.u32()?;
+                if ty == 0 {
+                    break;
+                }
+                let field_name = reader.string()?;
+                let mut ordinal_count = 0;
+                if ty == 0x37 {
+                    ordinal_count = reader.u32()?;
+                    for _ in 0..ordinal_count {
+                        reader.u32()?;
+                        reader.string()?;
+                    }
+                }
+                fields.push((field_name, ty, ordinal_count));
+            }
+            if id as usize >= definitions.len() {
+                definitions.resize(id as usize + 1, None);
+            }
+            definitions[id as usize] = Some((name, fields));
+            continue;
+        }
+        let Some((structure_name, fields)) =
+            definitions.get(block as usize).and_then(Option::as_ref)
+        else {
+            return Err("unknown_bsii_structure".into());
+        };
+        let _object_id = encoded_token(&mut reader)?;
+        let mut captured = Vec::new();
+        for (field_name, ty, ordinal_count) in fields {
+            if let Some(value) = captured_value(&mut reader, *ty)? {
+                captured.push(ObjectField {
+                    name: field_name.clone(),
+                    type_id: *ty,
+                    value,
+                });
+            } else if *ty == 0x37 && *ordinal_count > 0 {
+                // enum fields are already consumed by skip_value.
+            }
+        }
+        result.push(ObjectSummary {
+            structure_name: structure_name.clone(),
+            fields: captured,
+        });
+    }
+    Ok(result)
 }
 fn encoded_id(reader: &mut Reader<'_>) -> Result<(), String> {
     let parts = reader.u8()?;

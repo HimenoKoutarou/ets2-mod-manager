@@ -132,6 +132,21 @@ button { color: inherit; }
 .save-browser-panel .save-item { width: 100%; border-radius: 5px; text-align: left; cursor: pointer; }
 .save-workbench-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid #e7edf5; }
 .save-workbench-heading .panel-subtitle { max-width: 620px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.save-tool-sections { display: grid; gap: 12px; margin-top: 18px; }
+.save-tool-section { padding: 13px; border: 1px solid #d9e2ef; background: #fbfdff; }
+.save-tool-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.save-tool-section-heading > div { display: grid; gap: 3px; }
+.save-tool-section-heading strong { color: #172033; font-size: 13px; }
+.save-tool-section-heading span { color: #667085; font-size: 11px; }
+.save-tool-count { display: grid; place-items: center; min-width: 28px; height: 24px; padding: 0 7px; border: 1px solid #bfdbfe; border-radius: 4px; color: #1d4ed8 !important; background: #eff6ff; font-weight: 700; }
+.save-tool-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.save-tool-card { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 54px; padding: 9px 10px; border: 1px solid #e7edf5; background: #ffffff; }
+.save-tool-card-icon { display: grid; place-items: center; width: 29px; height: 29px; flex: 0 0 29px; border-radius: 4px; color: #2563eb; background: #dbeafe; }
+.save-tool-card > div:last-child { display: grid; min-width: 0; gap: 3px; }
+.save-tool-card strong, .save-tool-card span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.save-tool-card strong { color: #172033; font-size: 12px; }
+.save-tool-card span { color: #667085; font-size: 10px; }
+.save-tool-empty { padding: 14px 4px; color: #98a2b3; font-size: 11px; }
 .save-form { display: grid; gap: 12px; margin-top: 22px; }
 .save-form-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: #172033; }
 .save-form-heading span { color: #667085; font-size: 11px; }
