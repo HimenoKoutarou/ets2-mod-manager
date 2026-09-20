@@ -130,6 +130,16 @@ fn display(path: &Path) -> String {
         .to_string()
 }
 
+#[cfg(test)]
+fn equivalent_display(path: &Path) -> String {
+    // Windows may expose the same directory through its long name or an 8.3
+    // alias (for example RUNNER~1). Compare the filesystem-resolved form so
+    // tests do not depend on which spelling the junction API returns.
+    fs::canonicalize(path)
+        .map(|resolved| display(&resolved))
+        .unwrap_or_else(|_| display(path))
+}
+
 #[cfg(windows)]
 fn create_link(target: &Path, link: &Path) -> Result<()> {
     junction::create(target, link).map_err(message)
@@ -692,7 +702,10 @@ mod tests {
             time
         );
         // Status is filesystem-backed, so reopening the app needs no scan.
-        assert_eq!(status(&f.root).unwrap().actual_path, display(&first));
+        assert_eq!(
+            equivalent_display(Path::new(&status(&f.root).unwrap().actual_path)),
+            equivalent_display(&first)
+        );
         f.run(&second, "relocate").unwrap();
         assert_eq!(
             fs::read(second.join("nested/locale.sii")).unwrap(),
