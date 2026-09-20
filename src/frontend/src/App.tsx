@@ -34,7 +34,7 @@ import ModDirectoryDialog, { directoryCopy } from "./ModDirectoryDialog";
 import CategorySidebar, { TriCheckbox, readDraggedMods } from "./CategorySidebar";
 import { ALL_CATEGORIES } from "./modBatch";
 import { categoryCopy, categoryError, localizationCategory } from "./categoryI18n";
-import type { SearchMode } from "./types";
+import type { Language, SearchMode } from "./types";
 
 type SaveDraftKey = "money_account" | "experience_points" | "level";
 
@@ -61,19 +61,38 @@ function objectField(object: SaveObject, aliases: string[]): string | null {
   return field?.value || null;
 }
 
-function knownVehicleFields(object: SaveObject): Array<[string, string]> {
-  const candidates: Array<[string, string[]]> = [
-    ["name", ["name", "vehicle_name", "truck_name", "trailer_name"]],
-    ["brand", ["brand", "brand_id", "make"]],
-    ["odometer", ["odometer", "mileage", "distance"]],
-    ["fuel", ["fuel", "fuel_amount", "fuel_ratio"]],
-    ["plate", ["license_plate", "licence_plate", "plate"]],
-    ["wear", ["wear", "damage", "condition", "truck_wear"]],
-  ];
+function vehicleFieldLabel(key: string, language: Language): string {
+  const labels: Record<Language, Record<string, string>> = {
+    zh_CN: { name: "名称", brand: "品牌", odometer: "里程", fuel: "燃油", plate: "车牌", wear: "磨损", cargo: "货物", load: "载重", trailerType: "拖车类型", status: "状态" },
+    en_US: { name: "Name", brand: "Brand", odometer: "Mileage", fuel: "Fuel", plate: "Plate", wear: "Wear", cargo: "Cargo", load: "Load", trailerType: "Trailer type", status: "Status" },
+    ru_RU: { name: "Название", brand: "Марка", odometer: "Пробег", fuel: "Топливо", plate: "Номер", wear: "Износ", cargo: "Груз", load: "Вес", trailerType: "Тип прицепа", status: "Статус" },
+  };
+  return labels[language][key] ?? key;
+}
+
+function knownVehicleFields(object: SaveObject, language: Language): Array<[string, string]> {
+  const candidates: Array<[string, string, string[]]> = object.kind === "trailer"
+    ? [
+        ["name", "name", ["name", "vehicle_name", "trailer_name"]],
+        ["trailerType", "trailerType", ["trailer_type", "body_type", "trailer_kind", "cargo_type"]],
+        ["cargo", "cargo", ["cargo", "cargo_id", "cargo_name", "current_cargo"]],
+        ["load", "load", ["cargo_mass", "cargo_weight", "mass", "weight", "load"]],
+        ["plate", "plate", ["license_plate", "licence_plate", "plate"]],
+        ["wear", "wear", ["wear", "damage", "condition", "trailer_wear"]],
+        ["status", "status", ["status", "is_owned", "is_active"]],
+      ]
+    : [
+        ["name", "name", ["name", "vehicle_name", "truck_name"]],
+        ["brand", "brand", ["brand", "brand_id", "make"]],
+        ["odometer", "odometer", ["odometer", "mileage", "distance"]],
+        ["fuel", "fuel", ["fuel", "fuel_amount", "fuel_ratio"]],
+        ["plate", "plate", ["license_plate", "licence_plate", "plate"]],
+        ["wear", "wear", ["wear", "damage", "condition", "truck_wear"]],
+      ];
   return candidates
-    .map(([label, aliases]) => {
+    .map(([key, _kind, aliases]) => {
       const value = objectField(object, aliases);
-      return value ? [label, value] as [string, string] : null;
+      return value ? [vehicleFieldLabel(key, language), value] as [string, string] : null;
     })
     .filter((entry): entry is [string, string] => entry !== null)
     .slice(0, 4);
@@ -728,9 +747,9 @@ function App() {
                               <div className="save-tool-card-copy">
                                 <strong>{objectField(object, ["name", "vehicle_name", "truck_name"]) || saveToolLabels.truckObject}</strong>
                                 <span>{object.structureName}</span>
-                                {knownVehicleFields(object).length > 0 && (
+                                {knownVehicleFields(object, language).length > 0 && (
                                   <div className="save-tool-field-list">
-                                    {knownVehicleFields(object).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
+                                    {knownVehicleFields(object, language).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
                                   </div>
                                 )}
                               </div>
@@ -751,9 +770,9 @@ function App() {
                               <div className="save-tool-card-copy">
                                 <strong>{objectField(object, ["name", "vehicle_name", "trailer_name"]) || saveToolLabels.trailerObject}</strong>
                                 <span>{object.structureName}</span>
-                                {knownVehicleFields(object).length > 0 && (
+                                {knownVehicleFields(object, language).length > 0 && (
                                   <div className="save-tool-field-list">
-                                    {knownVehicleFields(object).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
+                                    {knownVehicleFields(object, language).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
                                   </div>
                                 )}
                               </div>
