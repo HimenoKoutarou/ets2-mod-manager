@@ -143,9 +143,12 @@ button { color: inherit; }
 .save-tool-card { display: flex; align-items: center; gap: 9px; min-width: 0; min-height: 54px; padding: 9px 10px; border: 1px solid #e7edf5; background: #ffffff; }
 .save-tool-card-icon { display: grid; place-items: center; width: 29px; height: 29px; flex: 0 0 29px; border-radius: 4px; color: #2563eb; background: #dbeafe; }
 .save-tool-card > div:last-child { display: grid; min-width: 0; gap: 3px; }
+.save-tool-card-copy { align-content: start; }
 .save-tool-card strong, .save-tool-card span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .save-tool-card strong { color: #172033; font-size: 12px; }
 .save-tool-card span { color: #667085; font-size: 10px; }
+.save-tool-field-list { display: flex; flex-wrap: wrap; gap: 3px 7px; margin-top: 2px; }
+.save-tool-field-list small { max-width: 150px; overflow: hidden; color: #475467; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .save-tool-empty { padding: 14px 4px; color: #98a2b3; font-size: 11px; }
 .save-transaction-notice { display: grid; gap: 4px; margin-top: 12px; padding: 10px 12px; border: 1px solid #d9e2ef; background: #f8fafc; color: #475467; font-size: 11px; }
 .save-transaction-notice.is-success { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }

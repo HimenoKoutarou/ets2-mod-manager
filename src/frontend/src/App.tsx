@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { getCopy } from "./i18n";
 import { isTauriRuntime } from "./backend";
+import type { SaveObject } from "./backend";
 import InitializerWindow from "./InitializerWindow";
 import { useModStore } from "./store";
 import { ModImage, ModThumbnail } from "./ModImage";
@@ -50,6 +51,32 @@ function levelFromExperience(value: number): number {
     level += 1;
   }
   return level;
+}
+
+function objectField(object: SaveObject, aliases: string[]): string | null {
+  const field = object.fields.find((entry) => {
+    const name = entry.name.toLocaleLowerCase();
+    return aliases.some((alias) => name === alias || name.includes(alias));
+  });
+  return field?.value || null;
+}
+
+function knownVehicleFields(object: SaveObject): Array<[string, string]> {
+  const candidates: Array<[string, string[]]> = [
+    ["name", ["name", "vehicle_name", "truck_name", "trailer_name"]],
+    ["brand", ["brand", "brand_id", "make"]],
+    ["odometer", ["odometer", "mileage", "distance"]],
+    ["fuel", ["fuel", "fuel_amount", "fuel_ratio"]],
+    ["plate", ["license_plate", "licence_plate", "plate"]],
+    ["wear", ["wear", "damage", "condition", "truck_wear"]],
+  ];
+  return candidates
+    .map(([label, aliases]) => {
+      const value = objectField(object, aliases);
+      return value ? [label, value] as [string, string] : null;
+    })
+    .filter((entry): entry is [string, string] => entry !== null)
+    .slice(0, 4);
 }
 
 function App() {
@@ -698,7 +725,15 @@ function App() {
                           {(saveInventory?.objects.filter((object) => object.kind === "truck").slice(0, 6) ?? []).map((object, index) => (
                             <article className="save-tool-card" key={`${object.structureName}-${index}`}>
                               <div className="save-tool-card-icon"><Wrench size={16} /></div>
-                              <div><strong>{object.structureName}</strong><span>{object.fields.find((field) => field.name === "name")?.value || saveToolLabels.truckObject}</span></div>
+                              <div className="save-tool-card-copy">
+                                <strong>{objectField(object, ["name", "vehicle_name", "truck_name"]) || saveToolLabels.truckObject}</strong>
+                                <span>{object.structureName}</span>
+                                {knownVehicleFields(object).length > 0 && (
+                                  <div className="save-tool-field-list">
+                                    {knownVehicleFields(object).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
+                                  </div>
+                                )}
+                              </div>
                             </article>
                           ))}
                           {!saveInventory?.trucks && <div className="save-tool-empty">{text.noneFound}</div>}
@@ -713,7 +748,15 @@ function App() {
                           {(saveInventory?.objects.filter((object) => object.kind === "trailer").slice(0, 6) ?? []).map((object, index) => (
                             <article className="save-tool-card" key={`${object.structureName}-${index}`}>
                               <div className="save-tool-card-icon"><FolderOpen size={16} /></div>
-                              <div><strong>{object.structureName}</strong><span>{object.fields.find((field) => field.name === "name")?.value || saveToolLabels.trailerObject}</span></div>
+                              <div className="save-tool-card-copy">
+                                <strong>{objectField(object, ["name", "vehicle_name", "trailer_name"]) || saveToolLabels.trailerObject}</strong>
+                                <span>{object.structureName}</span>
+                                {knownVehicleFields(object).length > 0 && (
+                                  <div className="save-tool-field-list">
+                                    {knownVehicleFields(object).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
+                                  </div>
+                                )}
+                              </div>
                             </article>
                           ))}
                           {!saveInventory?.trailers && <div className="save-tool-empty">{text.noneFound}</div>}
