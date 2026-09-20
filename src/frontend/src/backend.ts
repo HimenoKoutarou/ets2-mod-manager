@@ -131,9 +131,12 @@ export interface SaveObjectField {
   name: string;
   typeId: number;
   value: string;
+  offset: number;
+  size: number;
 }
 
 export interface SaveObject {
+  objectIndex: number;
   structureName: string;
   kind: "truck" | "trailer" | "garage" | "city" | "dealer" | "skill" | "profile";
   fields: SaveObjectField[];

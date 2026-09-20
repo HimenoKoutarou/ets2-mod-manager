@@ -186,13 +186,13 @@ export const fixtureBackend: ModBackend = {
     dealers: 1,
     skills: 3,
     objects: [
-      { structureName: "truck", kind: "truck", fields: [
-        { name: "name", typeId: 0, value: "示例卡车" },
-        { name: "brand", typeId: 0, value: "示例品牌" },
-        { name: "engine_id", typeId: 0, value: "engine.v8" },
-        { name: "transmission_id", typeId: 0, value: "transmission.12" },
+      { objectIndex: 0, structureName: "truck", kind: "truck", fields: [
+        { name: "name", typeId: 0, value: "示例卡车", offset: 0, size: 0 },
+        { name: "brand", typeId: 0, value: "示例品牌", offset: 0, size: 0 },
+        { name: "engine_id", typeId: 0, value: "engine.v8", offset: 0, size: 0 },
+        { name: "transmission_id", typeId: 0, value: "transmission.12", offset: 0, size: 0 },
       ] },
-      { structureName: "trailer", kind: "trailer", fields: [{ name: "name", typeId: 0, value: "示例拖车" }] },
+      { objectIndex: 1, structureName: "trailer", kind: "trailer", fields: [{ name: "name", typeId: 0, value: "示例拖车", offset: 0, size: 0 }] },
     ],
   }),
   mutateSave: async (_path, operation, value) => {

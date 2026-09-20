@@ -15,6 +15,7 @@ pub struct BsiiSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumericField {
+    pub object_index: usize,
     pub structure_name: String,
     pub field_name: String,
     pub type_id: u32,
@@ -28,10 +29,13 @@ pub struct ObjectField {
     pub name: String,
     pub type_id: u32,
     pub value: String,
+    pub offset: usize,
+    pub size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectSummary {
+    pub object_index: usize,
     pub structure_name: String,
     pub fields: Vec<ObjectField>,
 }
@@ -194,19 +198,25 @@ pub fn inspect_objects(bytes: &[u8], max_objects: usize) -> Result<Vec<ObjectSum
             return Err("unknown_bsii_structure".into());
         };
         let _object_id = encoded_token(&mut reader)?;
+        let object_index = result.len();
         let mut captured = Vec::new();
         for (field_name, ty, ordinal_count) in fields {
+            let offset = reader.pos;
             if let Some(value) = captured_value(&mut reader, *ty)? {
+                let size = reader.pos.saturating_sub(offset);
                 captured.push(ObjectField {
                     name: field_name.clone(),
                     type_id: *ty,
                     value,
+                    offset,
+                    size,
                 });
             } else if *ty == 0x37 && *ordinal_count > 0 {
                 // enum fields are already consumed by skip_value.
             }
         }
         result.push(ObjectSummary {
+            object_index,
             structure_name: structure_name.clone(),
             fields: captured,
         });
@@ -419,6 +429,7 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
     let mut reader = Reader::new(bytes, header.version);
     let mut definitions: Vec<Option<(String, Vec<(String, u32, u32)>)>> = Vec::new();
     let mut result = Vec::new();
+    let mut object_index = 0usize;
     while reader.pos < reader.data.len() {
         let block = reader.u32()?;
         if block == 0 {
@@ -465,6 +476,7 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
                     let value = reader.u32()? as i64;
                     if wanted.contains(field_name.as_str()) {
                         result.push(NumericField {
+                            object_index,
                             structure_name: structure_name.clone(),
                             field_name: field_name.clone(),
                             type_id: *ty,
@@ -478,6 +490,7 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
                     let value = reader.i64()?;
                     if wanted.contains(field_name.as_str()) {
                         result.push(NumericField {
+                            object_index,
                             structure_name: structure_name.clone(),
                             field_name: field_name.clone(),
                             type_id: *ty,
@@ -490,6 +503,7 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
                 _ => skip_value(&mut reader, *ty, *ordinal_count)?,
             }
         }
+        object_index += 1;
     }
     Ok(result)
 }

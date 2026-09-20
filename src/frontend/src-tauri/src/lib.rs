@@ -304,11 +304,14 @@ struct SaveObjectFieldDto {
     name: String,
     type_id: u32,
     value: String,
+    offset: usize,
+    size: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveObjectDto {
+    object_index: usize,
     structure_name: String,
     kind: String,
     fields: Vec<SaveObjectFieldDto>,
@@ -4961,6 +4964,7 @@ fn save_read_inventory(request: BsiiInspectRequest) -> Result<SaveInventoryDto, 
                 return None;
             };
             Some(SaveObjectDto {
+                object_index: object.object_index,
                 structure_name: object.structure_name,
                 kind: kind.into(),
                 fields: object
@@ -4970,6 +4974,8 @@ fn save_read_inventory(request: BsiiInspectRequest) -> Result<SaveInventoryDto, 
                         name: field.name,
                         type_id: field.type_id,
                         value: field.value,
+                        offset: field.offset,
+                        size: field.size,
                     })
                     .collect(),
             })
