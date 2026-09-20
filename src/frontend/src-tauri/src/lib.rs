@@ -321,6 +321,10 @@ struct SaveInventoryDto {
     objects: Vec<SaveObjectDto>,
     trucks: usize,
     trailers: usize,
+    garages: usize,
+    cities: usize,
+    dealers: usize,
+    skills: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -4942,6 +4946,12 @@ fn save_read_inventory(request: BsiiInspectRequest) -> Result<SaveInventoryDto, 
                 "trailer"
             } else if structure.contains("garage") {
                 "garage"
+            } else if structure.contains("city") || structure.contains("country") {
+                "city"
+            } else if structure.contains("dealer") || structure.contains("company") {
+                "dealer"
+            } else if structure.contains("skill") || structure.contains("upgrade") {
+                "skill"
             } else if structure.contains("economy")
                 || structure.contains("player")
                 || structure.contains("profile")
@@ -4970,11 +4980,19 @@ fn save_read_inventory(request: BsiiInspectRequest) -> Result<SaveInventoryDto, 
         .iter()
         .filter(|object| object.kind == "trailer")
         .count();
+    let garages = objects.iter().filter(|object| object.kind == "garage").count();
+    let cities = objects.iter().filter(|object| object.kind == "city").count();
+    let dealers = objects.iter().filter(|object| object.kind == "dealer").count();
+    let skills = objects.iter().filter(|object| object.kind == "skill").count();
     Ok(SaveInventoryDto {
         version: header.version,
         objects,
         trucks,
         trailers,
+        garages,
+        cities,
+        dealers,
+        skills,
     })
 }
 

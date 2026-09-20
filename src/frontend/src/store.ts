@@ -181,6 +181,10 @@ export const fixtureBackend: ModBackend = {
     version: 3,
     trucks: 1,
     trailers: 1,
+    garages: 1,
+    cities: 2,
+    dealers: 1,
+    skills: 3,
     objects: [
       { structureName: "truck", kind: "truck", fields: [{ name: "name", typeId: 0, value: "示例卡车" }] },
       { structureName: "trailer", kind: "trailer", fields: [{ name: "name", typeId: 0, value: "示例拖车" }] },

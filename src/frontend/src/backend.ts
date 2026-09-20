@@ -135,7 +135,7 @@ export interface SaveObjectField {
 
 export interface SaveObject {
   structureName: string;
-  kind: "truck" | "trailer" | "garage" | "profile";
+  kind: "truck" | "trailer" | "garage" | "city" | "dealer" | "skill" | "profile";
   fields: SaveObjectField[];
 }
 
@@ -144,6 +144,10 @@ export interface SaveInventory {
   objects: SaveObject[];
   trucks: number;
   trailers: number;
+  garages: number;
+  cities: number;
+  dealers: number;
+  skills: number;
 }
 
 interface SaveSlotWire {

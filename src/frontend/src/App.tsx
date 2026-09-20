@@ -722,12 +722,24 @@ function App() {
                       <section className="save-tool-section">
                         <div className="save-tool-section-heading">
                           <div><strong>{saveToolLabels.profile}</strong><span>{text.profileDetails}</span></div>
-                          <span className="save-tool-count">{saveInventory?.objects.filter((object) => object.kind === "profile" || object.kind === "garage").length ?? 0}</span>
+                          <span className="save-tool-count">{(saveInventory?.garages ?? 0) + (saveInventory?.cities ?? 0) + (saveInventory?.dealers ?? 0) + (saveInventory?.skills ?? 0)}</span>
                         </div>
                         <div className="save-tool-card-grid">
                           <article className="save-tool-card">
                             <div className="save-tool-card-icon"><Wrench size={16} /></div>
                             <div><strong>{text.money} / {text.experience}</strong><span>{saveSnapshot ? "BSII snapshot" : text.scanning}</span></div>
+                          </article>
+                          <article className="save-tool-card">
+                            <div className="save-tool-card-icon"><LayoutGrid size={16} /></div>
+                            <div><strong>{language === "zh_CN" ? "车库" : language === "ru_RU" ? "Гаражи" : "Garages"}</strong><span>{saveInventory?.garages ?? 0}</span></div>
+                          </article>
+                          <article className="save-tool-card">
+                            <div className="save-tool-card-icon"><FolderOpen size={16} /></div>
+                            <div><strong>{language === "zh_CN" ? "城市 / 经销商" : language === "ru_RU" ? "Города / дилеры" : "Cities / Dealers"}</strong><span>{saveInventory?.cities ?? 0} / {saveInventory?.dealers ?? 0}</span></div>
+                          </article>
+                          <article className="save-tool-card">
+                            <div className="save-tool-card-icon"><Wrench size={16} /></div>
+                            <div><strong>{language === "zh_CN" ? "技能" : language === "ru_RU" ? "Навыки" : "Skills"}</strong><span>{saveInventory?.skills ?? 0}</span></div>
                           </article>
                           <article className="save-tool-card">
                             <div className="save-tool-card-icon"><FolderOpen size={16} /></div>
