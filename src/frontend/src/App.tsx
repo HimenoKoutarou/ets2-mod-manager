@@ -101,12 +101,18 @@ function knownVehicleFields(object: SaveObject, language: Language): Array<[stri
 }
 
 function editableVehicleFields(object: SaveObject, language: Language) {
-  if (object.kind !== "truck") return [];
-  const aliases: Record<string, string[]> = {
-    odometer: ["odometer", "mileage", "distance"],
-    fuel: ["fuel", "fuel_amount", "fuel_ratio"],
-    wear: ["wear", "damage", "condition", "truck_wear"],
-  };
+  if (object.kind !== "truck" && object.kind !== "trailer") return [];
+  const aliases: Record<string, string[]> = object.kind === "trailer"
+    ? {
+        load: ["cargo_mass", "cargo_weight", "mass", "weight", "load"],
+        wear: ["wear", "damage", "condition", "trailer_wear"],
+        status: ["status", "is_owned", "is_active"],
+      }
+    : {
+        odometer: ["odometer", "mileage", "distance"],
+        fuel: ["fuel", "fuel_amount", "fuel_ratio"],
+        wear: ["wear", "damage", "condition", "truck_wear"],
+      };
   return object.fields.filter((field) => {
     if (![0x27, 0x2f, 0x31, 0x35].includes(field.typeId)) return false;
     const name = field.name.toLocaleLowerCase();
@@ -822,6 +828,19 @@ function App() {
                                     {knownVehicleFields(object, language).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
                                   </div>
                                 )}
+                                {editableVehicleFields(object, language).map(({ field, label }) => {
+                                  const draftKey = `${object.objectIndex}:${field.name}`;
+                                  const draft = objectDrafts[draftKey] ?? field.value;
+                                  const parsed = Number(draft);
+                                  const valid = Number.isSafeInteger(parsed) && (field.typeId === 0x35 ? parsed >= 0 && parsed <= 255 : field.typeId === 0x31 || (parsed >= 0 && parsed <= 4294967295));
+                                  return (
+                                    <div className="save-object-edit" key={draftKey}>
+                                      <label>{label}</label>
+                                      <input type="number" value={draft} disabled={selectedSave.profileLocation !== "local" || loading} onChange={(event) => setObjectDrafts((state) => ({ ...state, [draftKey]: event.target.value }))} />
+                                      <button className="button button-small" disabled={selectedSave.profileLocation !== "local" || loading || !valid} onClick={() => void mutateSaveObject(object.objectIndex, object.structureName, field.name, parsed)}>{text.apply}</button>
+                                    </div>
+                                  );
+                                })}
                               </div>
                             </article>
                           ))}
