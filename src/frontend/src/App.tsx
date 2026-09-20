@@ -63,9 +63,9 @@ function objectField(object: SaveObject, aliases: string[]): string | null {
 
 function vehicleFieldLabel(key: string, language: Language): string {
   const labels: Record<Language, Record<string, string>> = {
-    zh_CN: { name: "名称", brand: "品牌", odometer: "里程", fuel: "燃油", plate: "车牌", wear: "磨损", cargo: "货物", load: "载重", trailerType: "拖车类型", status: "状态" },
-    en_US: { name: "Name", brand: "Brand", odometer: "Mileage", fuel: "Fuel", plate: "Plate", wear: "Wear", cargo: "Cargo", load: "Load", trailerType: "Trailer type", status: "Status" },
-    ru_RU: { name: "Название", brand: "Марка", odometer: "Пробег", fuel: "Топливо", plate: "Номер", wear: "Износ", cargo: "Груз", load: "Вес", trailerType: "Тип прицепа", status: "Статус" },
+    zh_CN: { name: "名称", brand: "品牌", engine: "发动机", transmission: "变速箱", odometer: "里程", fuel: "燃油", plate: "车牌", wear: "磨损", cargo: "货物", load: "载重", trailerType: "拖车类型", status: "状态" },
+    en_US: { name: "Name", brand: "Brand", engine: "Engine", transmission: "Transmission", odometer: "Mileage", fuel: "Fuel", plate: "Plate", wear: "Wear", cargo: "Cargo", load: "Load", trailerType: "Trailer type", status: "Status" },
+    ru_RU: { name: "Название", brand: "Марка", engine: "Двигатель", transmission: "Коробка передач", odometer: "Пробег", fuel: "Топливо", plate: "Номер", wear: "Износ", cargo: "Груз", load: "Вес", trailerType: "Тип прицепа", status: "Статус" },
   };
   return labels[language][key] ?? key;
 }
@@ -81,9 +81,11 @@ function knownVehicleFields(object: SaveObject, language: Language): Array<[stri
         ["wear", "wear", ["wear", "damage", "condition", "trailer_wear"]],
         ["status", "status", ["status", "is_owned", "is_active"]],
       ]
-    : [
+      : [
         ["name", "name", ["name", "vehicle_name", "truck_name"]],
         ["brand", "brand", ["brand", "brand_id", "make"]],
+        ["engine", "engine", ["engine", "engine_id", "engine_type", "current_engine"]],
+        ["transmission", "transmission", ["transmission", "transmission_id", "gearbox", "gear_box", "current_transmission"]],
         ["odometer", "odometer", ["odometer", "mileage", "distance"]],
         ["fuel", "fuel", ["fuel", "fuel_amount", "fuel_ratio"]],
         ["plate", "plate", ["license_plate", "licence_plate", "plate"]],
@@ -95,7 +97,7 @@ function knownVehicleFields(object: SaveObject, language: Language): Array<[stri
       return value ? [vehicleFieldLabel(key, language), value] as [string, string] : null;
     })
     .filter((entry): entry is [string, string] => entry !== null)
-    .slice(0, 4);
+    .slice(0, 6);
 }
 
 function App() {
