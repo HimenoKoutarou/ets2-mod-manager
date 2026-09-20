@@ -100,6 +100,24 @@ function knownVehicleFields(object: SaveObject, language: Language): Array<[stri
     .slice(0, 6);
 }
 
+function editableVehicleFields(object: SaveObject, language: Language) {
+  if (object.kind !== "truck") return [];
+  const aliases: Record<string, string[]> = {
+    odometer: ["odometer", "mileage", "distance"],
+    fuel: ["fuel", "fuel_amount", "fuel_ratio"],
+    wear: ["wear", "damage", "condition", "truck_wear"],
+  };
+  return object.fields.filter((field) => {
+    if (![0x27, 0x2f, 0x31, 0x35].includes(field.typeId)) return false;
+    const name = field.name.toLocaleLowerCase();
+    return Object.values(aliases).some((names) => names.some((alias) => name === alias || name.includes(alias)));
+  }).map((field) => {
+    const name = field.name.toLocaleLowerCase();
+    const key = Object.entries(aliases).find(([, names]) => names.some((alias) => name === alias || name.includes(alias)))?.[0] ?? field.name;
+    return { field, label: vehicleFieldLabel(key, language) };
+  });
+}
+
 function App() {
   const windowLabel = isTauriRuntime() ? getCurrentWindow().label : "main";
   const {
@@ -155,6 +173,7 @@ function App() {
     setSecondaryPanel,
     selectSave,
     mutateSave,
+    mutateSaveObject,
     scanLocalization,
     loadLocalizationBase,
     pickLocalizationBase,
@@ -192,6 +211,7 @@ function App() {
     experience_points: "",
     level: "",
   });
+  const [objectDrafts, setObjectDrafts] = useState<Record<string, string>>({});
   const [localizationDraft, setLocalizationDraft] = useState<Record<string, string>>({});
   const [localizationKeyDraft, setLocalizationKeyDraft] = useState<Record<string, string>>({});
   const [localizationProgress, setLocalizationProgress] = useState<{ packageName: string; path?: string; processed: number; total: number } | null>(null);
@@ -766,6 +786,19 @@ function App() {
                                     {knownVehicleFields(object, language).map(([label, value]) => <small key={label}>{label}: {value}</small>)}
                                   </div>
                                 )}
+                                {editableVehicleFields(object, language).map(({ field, label }) => {
+                                  const draftKey = `${object.objectIndex}:${field.name}`;
+                                  const draft = objectDrafts[draftKey] ?? field.value;
+                                  const parsed = Number(draft);
+                                  const valid = Number.isSafeInteger(parsed) && (field.typeId === 0x35 ? parsed >= 0 && parsed <= 255 : field.typeId === 0x31 || (parsed >= 0 && parsed <= 4294967295));
+                                  return (
+                                    <div className="save-object-edit" key={draftKey}>
+                                      <label>{label}</label>
+                                      <input type="number" value={draft} disabled={selectedSave.profileLocation !== "local" || loading} onChange={(event) => setObjectDrafts((state) => ({ ...state, [draftKey]: event.target.value }))} />
+                                      <button className="button button-small" disabled={selectedSave.profileLocation !== "local" || loading || !valid} onClick={() => void mutateSaveObject(object.objectIndex, object.structureName, field.name, parsed)}>{text.apply}</button>
+                                    </div>
+                                  );
+                                })}
                               </div>
                             </article>
                           ))}

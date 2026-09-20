@@ -206,6 +206,12 @@ export const fixtureBackend: ModBackend = {
       value,
     };
   },
+  mutateSaveObject: async (_path, _structureName, _objectIndex, _fieldName, value) => ({
+    success: true,
+    operation: "set_object_field",
+    message: "Updated.",
+    value,
+  }),
   scan: async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 350));
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
@@ -321,6 +327,7 @@ interface ModState {
   runDiagnostics: () => Promise<void>;
   selectSave: (slot: SaveSlot | null) => Promise<void>;
   mutateSave: (operation: "set_money" | "set_experience" | "set_level", value: number) => Promise<void>;
+  mutateSaveObject: (objectIndex: number, structureName: string, fieldName: string, value: number) => Promise<void>;
   initialize: () => Promise<void>;
   setLanguage: (language: Language) => void;
   selectProfile: (id: string) => Promise<void>;
@@ -581,6 +588,25 @@ export const useModStore = create<ModState>((set, get) => ({
       ]);
       if (get().selectedSave?.gameSii !== selectedSave.gameSii) return;
       set({ saveSnapshot, saveInventory, saveMutation: result });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ loading: false });
+    }
+  },
+  mutateSaveObject: async (objectIndex, structureName, fieldName, value) => {
+    const selectedSave = get().selectedSave;
+    if (!selectedSave?.gameSii) return;
+    set({ loading: true, error: "" });
+    try {
+      const result = await backend.mutateSaveObject(selectedSave.gameSii, structureName, objectIndex, fieldName, value);
+      if (!result.success) {
+        set({ error: result.message });
+        return;
+      }
+      const saveInventory = await backend.readSaveInventory(selectedSave.gameSii);
+      if (get().selectedSave?.gameSii !== selectedSave.gameSii) return;
+      set({ saveInventory, saveMutation: result });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : String(error) });
     } finally {

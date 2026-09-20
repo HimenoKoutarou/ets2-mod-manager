@@ -500,6 +500,20 @@ pub fn find_numeric_fields(bytes: &[u8], wanted: &[&str]) -> Result<Vec<NumericF
                         });
                     }
                 }
+                0x35 => {
+                    let value = reader.u8()? as i64;
+                    if wanted.contains(field_name.as_str()) {
+                        result.push(NumericField {
+                            object_index,
+                            structure_name: structure_name.clone(),
+                            field_name: field_name.clone(),
+                            type_id: *ty,
+                            value,
+                            offset,
+                            size: 1,
+                        });
+                    }
+                }
                 _ => skip_value(&mut reader, *ty, *ordinal_count)?,
             }
         }

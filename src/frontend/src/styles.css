@@ -149,6 +149,10 @@ button { color: inherit; }
 .save-tool-card span { color: #667085; font-size: 10px; }
 .save-tool-field-list { display: flex; flex-wrap: wrap; gap: 3px 7px; margin-top: 2px; }
 .save-tool-field-list small { max-width: 150px; overflow: hidden; color: #475467; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.save-object-edit { display: grid; grid-template-columns: minmax(0, 1fr) 82px auto; align-items: center; gap: 5px; margin-top: 5px; }
+.save-object-edit label { overflow: hidden; color: #475467; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.save-object-edit input { width: 82px; height: 25px; padding: 0 5px; border: 1px solid #cbd5e1; border-radius: 3px; background: #fff; color: #172033; font-size: 10px; }
+.save-object-edit input:focus { border-color: #2563eb; outline: 0; box-shadow: 0 0 0 2px #dbeafe; }
 .save-tool-empty { padding: 14px 4px; color: #98a2b3; font-size: 11px; }
 .save-transaction-notice { display: grid; gap: 4px; margin-top: 12px; padding: 10px 12px; border: 1px solid #d9e2ef; background: #f8fafc; color: #475467; font-size: 11px; }
 .save-transaction-notice.is-success { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }

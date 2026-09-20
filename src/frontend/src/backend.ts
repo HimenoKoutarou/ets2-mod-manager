@@ -244,6 +244,7 @@ export interface ModBackend {
   readSaveSnapshot(path: string): Promise<SaveSnapshot>;
   readSaveInventory(path: string): Promise<SaveInventory>;
   mutateSave(path: string, operation: "set_money" | "set_experience" | "set_level", value: number): Promise<SaveMutation>;
+  mutateSaveObject(path: string, structureName: string, objectIndex: number, fieldName: string, value: number): Promise<SaveMutation>;
   scan(): Promise<ScanSummary>;
   cancelScan(): Promise<void>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
@@ -331,6 +332,11 @@ const tauriBackend: ModBackend = {
   },
   mutateSave(path, operation, value) {
     return invoke<SaveMutation>("save_mutate", { request: { path, operation, value } });
+  },
+  mutateSaveObject(path, structureName, objectIndex, fieldName, value) {
+    return invoke<SaveMutation>("save_mutate_object", {
+      request: { path, structureName, objectIndex, fieldName, value },
+    });
   },
   scan() {
     return invoke<ScanSummary>("mod_scan");

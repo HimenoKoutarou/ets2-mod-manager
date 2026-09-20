@@ -338,6 +338,16 @@ struct SaveMutationRequest {
     value: i64,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveObjectMutationRequest {
+    path: String,
+    structure_name: String,
+    object_index: usize,
+    field_name: String,
+    value: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SaveMutationDto {
@@ -4923,6 +4933,88 @@ fn mutate_save(path: &Path, operation: &str, value: i64) -> Result<SaveMutationD
     })
 }
 
+fn mutate_object_numeric(request: SaveObjectMutationRequest) -> Result<SaveMutationDto, String> {
+    if is_game_running() {
+        return Err("Exit ETS2 or ATS before editing a save.".into());
+    }
+    let path = Path::new(&request.path);
+    let original = fs::read(path).map_err(|error| format!("read save failed: {error}"))?;
+    let plain = decode_scsc_or_plain(&original)?;
+    let fields = bsii_core::find_numeric_fields(&plain, &[request.field_name.as_str()])
+        .map_err(|error| format!("parse save failed: {error}"))?;
+    let matches: Vec<_> = fields
+        .into_iter()
+        .filter(|field| {
+            field.object_index == request.object_index
+                && field.structure_name == request.structure_name
+                && field.field_name == request.field_name
+        })
+        .collect();
+    if matches.len() != 1 {
+        return Err(format!(
+            "Field {} was not found uniquely in object {}.",
+            request.field_name, request.object_index
+        ));
+    }
+    let field = &matches[0];
+    let valid = match field.type_id {
+        0x27 | 0x2F => (0..=u32::MAX as i64).contains(&request.value),
+        0x31 => true,
+        0x35 => (0..=u8::MAX as i64).contains(&request.value),
+        _ => false,
+    };
+    if !valid {
+        return Err(format!("Unsupported or out-of-range numeric field {}.", request.field_name));
+    }
+    if field.value == request.value {
+        return Ok(SaveMutationDto {
+            success: false,
+            operation: "set_object_field".into(),
+            message: "The requested value is already stored.".into(),
+            backup_path: None,
+            value: Some(field.value),
+        });
+    }
+    let mut output_plain = plain.clone();
+    match field.type_id {
+        0x27 | 0x2F => output_plain[field.offset..field.offset + 4]
+            .copy_from_slice(&(request.value as u32).to_le_bytes()),
+        0x31 => output_plain[field.offset..field.offset + 8]
+            .copy_from_slice(&request.value.to_le_bytes()),
+        0x35 => output_plain[field.offset] = request.value as u8,
+        _ => return Err("Unsupported numeric field type.".into()),
+    }
+    let output = if original.starts_with(b"ScsC") {
+        encode_scsc(&output_plain)?
+    } else {
+        output_plain
+    };
+    let backup = transaction_backup(path, "save")?;
+    if let Err(error) = atomic_write(path, &output) {
+        return Err(transaction_failure(path, &backup, error));
+    }
+    let verify_bytes = decode_scsc_or_plain(&fs::read(path).map_err(|error| format!("verify save read failed: {error}"))?)?;
+    let verified = bsii_core::find_numeric_fields(&verify_bytes, &[request.field_name.as_str()])
+        .map_err(|error| format!("verify save parse failed: {error}"))?
+        .into_iter()
+        .find(|entry| {
+            entry.object_index == request.object_index
+                && entry.structure_name == request.structure_name
+                && entry.field_name == request.field_name
+        })
+        .map(|entry| entry.value);
+    if verified != Some(request.value) {
+        return Err(transaction_failure(path, &backup, "Save object write verification failed"));
+    }
+    Ok(SaveMutationDto {
+        success: true,
+        operation: "set_object_field".into(),
+        message: format!("Updated {}.", request.field_name),
+        backup_path: Some(normalize_path(&backup)),
+        value: Some(request.value),
+    })
+}
+
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_read_snapshot(request: BsiiInspectRequest) -> Result<SaveSnapshotDto, String> {
     save_snapshot(Path::new(&request.path))
@@ -5005,6 +5097,11 @@ fn save_read_inventory(request: BsiiInspectRequest) -> Result<SaveInventoryDto, 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn save_mutate(request: SaveMutationRequest) -> Result<SaveMutationDto, String> {
     mutate_save(Path::new(&request.path), &request.operation, request.value)
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn save_mutate_object(request: SaveObjectMutationRequest) -> Result<SaveMutationDto, String> {
+    mutate_object_numeric(request)
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
@@ -7655,6 +7752,7 @@ pub fn run() {
             save_read_snapshot,
             save_read_inventory,
             save_mutate,
+            save_mutate_object,
             check_update,
             download_update,
             install_update
