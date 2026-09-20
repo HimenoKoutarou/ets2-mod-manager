@@ -266,6 +266,10 @@ struct CrashPrecheckDto {
     red_count: usize,
     yellow_count: usize,
     issues: Vec<CrashIssueDto>,
+    log_path: Option<String>,
+    crash_path: Option<String>,
+    log_summary: String,
+    log_evidence: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4267,24 +4271,37 @@ fn crash_pair(paths: &Paths) -> CrashPairDto {
         ("ets2", documents.join("Euro Truck Simulator 2")),
         ("ats", documents.join("American Truck Simulator")),
     ];
-    let mut latest = None;
+    let mut latest_crash = None;
+    let mut latest_log = None;
     for (source, root) in candidates {
         let crash = root.join("game.crash.txt");
-        if !crash.is_file() {
-            continue;
+        if crash.is_file() {
+            let modified = fs::metadata(&crash)
+                .and_then(|value| value.modified())
+                .ok()
+                .unwrap_or(UNIX_EPOCH);
+            if latest_crash
+                .as_ref()
+                .is_none_or(|(_, current, _)| modified > *current)
+            {
+                latest_crash = Some((source, modified, crash));
+            }
         }
-        let modified = fs::metadata(&crash)
-            .and_then(|value| value.modified())
-            .ok()
-            .unwrap_or(UNIX_EPOCH);
-        if latest
-            .as_ref()
-            .is_none_or(|(_, current, _)| modified > *current)
-        {
-            latest = Some((source, modified, crash));
+        let log = root.join("game.log.txt");
+        if log.is_file() {
+            let modified = fs::metadata(&log)
+                .and_then(|value| value.modified())
+                .ok()
+                .unwrap_or(UNIX_EPOCH);
+            if latest_log
+                .as_ref()
+                .is_none_or(|(_, current, _)| modified > *current)
+            {
+                latest_log = Some((source, modified, log));
+            }
         }
     }
-    if let Some((source, _, crash)) = latest {
+    if let Some((source, _, crash)) = latest_crash {
         let log = crash
             .parent()
             .map(|root| root.join("game.log.txt"))
@@ -4295,11 +4312,149 @@ fn crash_pair(paths: &Paths) -> CrashPairDto {
             source: Some(source.into()),
         };
     }
+    if let Some((source, _, log)) = latest_log {
+        return CrashPairDto {
+            crash_path: None,
+            log_path: Some(normalize_path(&log)),
+            source: Some(source.into()),
+        };
+    }
     CrashPairDto {
         crash_path: None,
         log_path: None,
         source: None,
     }
+}
+
+const CRASH_FATAL_MARKERS: [&str; 13] = [
+    "fatal", "unhandled exception", "panic", "abort", "segmentation fault",
+    "access violation", "stack overflow", "assertion failed", "crash",
+    "exception code", "fatal error", "unexpected termination", "fault address",
+];
+const CRASH_ERROR_MARKERS: [&str; 10] = [
+    "error", "failed", "failure", "unable", "invalid", "corrupt", "cannot",
+    "could not", "missing", "not found",
+];
+const CRASH_WARNING_MARKERS: [&str; 8] = [
+    "warning", "warn", "deprecated", "ignored", "fallback", "skipping",
+    "optional", "unsupported",
+];
+
+fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read log failed: {error}"))?;
+    let start = bytes.len().saturating_sub(max_bytes);
+    Ok(String::from_utf8_lossy(&bytes[start..]).into_owned())
+}
+
+fn analyze_crash_logs(
+    pair: &CrashPairDto,
+    active: &[String],
+    mods: &[ModDto],
+) -> (String, Vec<String>, Vec<CrashIssueDto>) {
+    let mut evidence = Vec::new();
+    let mut issues = Vec::new();
+    let mut matched = HashSet::new();
+    let mut aliases = Vec::new();
+    for package in active {
+        let mut values = package_aliases(package);
+        if let Some(row) = mods.iter().find(|row| row_matches_active(row, package)) {
+            for value in [&row.id, &row.package_name, &row.display_name] {
+                values.extend(package_aliases(value));
+            }
+        }
+        values.retain(|value| value.len() >= 4);
+        values.sort();
+        values.dedup();
+        aliases.push((package.clone(), values));
+    }
+
+    let mut sources = Vec::new();
+    if let Some(path) = pair.crash_path.as_deref() {
+        sources.push(("crash", PathBuf::from(path)));
+    }
+    if let Some(path) = pair.log_path.as_deref() {
+        sources.push(("log", PathBuf::from(path)));
+    }
+    for (kind, path) in sources {
+        let Ok(text) = read_log_tail(&path, 4 * 1024 * 1024) else {
+            continue;
+        };
+        for (line_index, raw_line) in text.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let lower = line.to_ascii_lowercase();
+            let fatal = CRASH_FATAL_MARKERS.iter().any(|marker| lower.contains(marker));
+            let error = CRASH_ERROR_MARKERS.iter().any(|marker| lower.contains(marker));
+            let warning = CRASH_WARNING_MARKERS.iter().any(|marker| lower.contains(marker));
+            // A package name by itself is normal startup noise. Only retain
+            // lines that carry an actual diagnostic signal.
+            if !(fatal || error || warning) {
+                continue;
+            }
+            let short = if line.len() > 320 {
+                let mut end = 320;
+                while end > 0 && !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                &line[..end]
+            } else {
+                line
+            };
+            let item = format!("{kind} line {}: {short}", line_index + 1);
+            if evidence.len() < 40 {
+                evidence.push(item.clone());
+            }
+            for (index, (package, package_aliases)) in aliases.iter().enumerate() {
+                if !package_aliases.iter().any(|alias| lower.contains(alias)) {
+                    continue;
+                }
+                let key = format!("{package}:{kind}");
+                if !matched.insert(key) {
+                    continue;
+                }
+                let row = mods.iter().find(|row| row_matches_active(row, package));
+                let is_crash_evidence = fatal || (kind == "crash" && error && !warning);
+                let severity = if is_crash_evidence {
+                    "red"
+                } else {
+                    "yellow"
+                };
+                let code = if is_crash_evidence {
+                    if kind == "crash" {
+                        "CRASH_MOD_REFERENCE"
+                    } else {
+                        "FATAL_LOG_MOD_REFERENCE"
+                    }
+                } else if warning {
+                    "LOG_WARNING_REFERENCE"
+                } else {
+                    "LOG_ERROR_REFERENCE"
+                };
+                issues.push(CrashIssueDto {
+                    mod_id: package.clone(),
+                    display_name: row
+                        .map(|row| row.display_name.clone())
+                        .unwrap_or_else(|| package.clone()),
+                    severity: severity.into(),
+                    code: code.into(),
+                    evidence: item.clone(),
+                    priority_index: Some(index),
+                });
+            }
+        }
+    }
+    let summary = if pair.crash_path.is_some() || pair.log_path.is_some() {
+        if issues.is_empty() {
+            "日志已读取，但没有发现能直接关联到当前启用 Mod 的错误证据。".into()
+        } else {
+            format!("日志中发现 {} 个可能相关的启用 Mod。", issues.len())
+        }
+    } else {
+        "未找到 game.crash.txt 或 game.log.txt。".into()
+    };
+    (summary, evidence, issues)
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
@@ -4800,6 +4955,15 @@ fn crash_precheck(
             });
         }
     }
+    let pair = crash_pair(&backend.paths);
+    let (log_summary, log_evidence, log_issues) = analyze_crash_logs(&pair, &active, &mods);
+    for issue in log_issues {
+        if !issues.iter().any(|existing: &CrashIssueDto| {
+            existing.mod_id == issue.mod_id && existing.code == issue.code
+        }) {
+            issues.push(issue);
+        }
+    }
     Ok(CrashPrecheckDto {
         profile_id: profile.id,
         scanned_mods: active.len(),
@@ -4812,6 +4976,10 @@ fn crash_precheck(
             .filter(|issue| issue.severity == "yellow")
             .count(),
         issues,
+        log_path: pair.log_path,
+        crash_path: pair.crash_path,
+        log_summary,
+        log_evidence,
     })
 }
 
@@ -6070,6 +6238,99 @@ fn game_launch(state: State<'_, BackendState>) -> Result<SaveResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crash_log_analysis_matches_active_mod_and_keeps_evidence() {
+        let dir = std::env::temp_dir().join(format!("ets2mm-crash-{}", now_ms()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("game.log.txt");
+        fs::write(
+            &log,
+            "[error] Failed to load promods-eu-def-v282.scs: missing unit\n",
+        )
+        .expect("write log");
+        let row = ModDto {
+            id: "promods-eu-def-v282".into(),
+            package_name: "promods-eu-def-v282".into(),
+            path: "promods-eu-def-v282.scs".into(),
+            package_type: "scs".into(),
+            display_name: "ProMods Europe".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 1,
+            modified_ms: 1,
+            enabled: true,
+            category: String::new(),
+            fingerprint: 1,
+        };
+        let pair = CrashPairDto {
+            crash_path: None,
+            log_path: Some(normalize_path(&log)),
+            source: Some("ets2".into()),
+        };
+        let (summary, evidence, issues) =
+            analyze_crash_logs(&pair, &["promods-eu-def-v282".into()], &[row]);
+        assert!(summary.contains("1"));
+        assert!(!evidence.is_empty());
+        assert_eq!(issues[0].display_name, "ProMods Europe");
+        assert_eq!(issues[0].code, "LOG_ERROR_REFERENCE");
+        assert_eq!(issues[0].severity, "yellow");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn crash_log_analysis_downgrades_warning_to_yellow() {
+        let dir = std::env::temp_dir().join(format!("ets2mm-crash-warning-{}", now_ms()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("game.log.txt");
+        fs::write(
+            &log,
+            "[warning] promods-eu-def-v282.scs is deprecated; fallback will be used\n",
+        )
+        .expect("write log");
+        let row = ModDto {
+            id: "promods-eu-def-v282".into(),
+            package_name: "promods-eu-def-v282".into(),
+            path: "promods-eu-def-v282.scs".into(),
+            package_type: "scs".into(),
+            display_name: "ProMods Europe".into(),
+            author: String::new(),
+            version: String::new(),
+            size: 1,
+            modified_ms: 1,
+            enabled: true,
+            category: String::new(),
+            fingerprint: 1,
+        };
+        let pair = CrashPairDto {
+            crash_path: None,
+            log_path: Some(normalize_path(&log)),
+            source: Some("ets2".into()),
+        };
+        let (_, _, issues) =
+            analyze_crash_logs(&pair, &["promods-eu-def-v282".into()], &[row]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "LOG_WARNING_REFERENCE");
+        assert_eq!(issues[0].severity, "yellow");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn crash_log_analysis_does_not_report_unrelated_lines() {
+        let dir = std::env::temp_dir().join(format!("ets2mm-crash-empty-{}", now_ms()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let log = dir.join("game.log.txt");
+        fs::write(&log, "[sys] Process manager shutdown\n").expect("write log");
+        let pair = CrashPairDto {
+            crash_path: None,
+            log_path: Some(normalize_path(&log)),
+            source: Some("ets2".into()),
+        };
+        let (_, _, issues) =
+            analyze_crash_logs(&pair, &["some-mod".into()], &[]);
+        assert!(issues.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn scsc_roundtrip_preserves_profile_text() {

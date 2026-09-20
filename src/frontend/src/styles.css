@@ -287,6 +287,12 @@ img.mod-badge { object-fit: cover; }
 .support-row span { overflow: hidden; color: #667085; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .support-row.issue-red { border-left: 2px solid #dc2626; }
 .support-row.issue-yellow { border-left: 2px solid #f59e0b; }
+.support-row small { display: block; color: #2563eb; font-size: 9px; margin-top: 2px; }
+.diagnostic-log-summary { margin: 12px 0; padding: 10px; border: 1px solid #dbe5f2; background: #f8fbff; border-radius: 6px; }
+.diagnostic-log-summary p { margin: 5px 0 8px; color: #475467; font-size: 11px; }
+.diagnostic-paths, .diagnostic-evidence { display: grid; gap: 4px; }
+.diagnostic-paths code, .diagnostic-evidence code { overflow: hidden; color: #667085; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.diagnostic-evidence { margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5edf7; }
 .save-hint { margin-top: 10px; color: #667085; font-size: 10px; line-height: 1.5; }
 .save-editor { display: grid; gap: 9px; margin-top: 18px; padding-top: 14px; border-top: 1px solid #d9e2ef; }
 .save-editor-heading { display: flex; justify-content: space-between; gap: 8px; color: #172033; font-size: 12px; }

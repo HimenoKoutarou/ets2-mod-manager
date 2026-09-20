@@ -1100,11 +1100,28 @@ function App() {
                 <LayoutGrid size={18} />
               </div>
               <button className="button button-small panel-action" onClick={() => { void runDiagnostics(); }} disabled={loading || scanning}>{text.scan}</button>
+              {diagnostics && (
+                <div className="diagnostic-log-summary">
+                  <div className="detail-package">{text.logSummary}</div>
+                  <p>{diagnostics.logSummary || text.noneFound}</p>
+                  <div className="diagnostic-paths">
+                    {diagnostics.crashPath && <code>{text.crashReport}: {diagnostics.crashPath}</code>}
+                    {diagnostics.logPath && <code>{text.gameLog}: {diagnostics.logPath}</code>}
+                  </div>
+                  {diagnostics.logEvidence?.length ? (
+                    <div className="diagnostic-evidence">
+                      <div className="support-kind">{text.logEvidence}</div>
+                      {diagnostics.logEvidence.slice(0, 12).map((line) => <code key={line}>{line}</code>)}
+                    </div>
+                  ) : null}
+                </div>
+              )}
               {diagnostics?.issues.length ? (
                 <div className="support-list">
                   {diagnostics.issues.map((issue) => (
                     <div className={`support-row issue-${issue.severity}`} key={`${issue.code}:${issue.modId}:${issue.priorityIndex ?? 0}`}>
-                      <strong>{issue.displayName}</strong><span>{issue.code}</span>
+                      <div><strong>{issue.displayName}</strong><small>{issue.code}</small></div>
+                      <span>{issue.evidence}</span>
                     </div>
                   ))}
                 </div>

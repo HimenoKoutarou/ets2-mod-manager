@@ -144,5 +144,9 @@ export interface UiCopy {
   autosave: string;
   entriesSummary: (entries: number, cached: number, scanned: number) => string;
   issueSummary: (red: number, yellow: number) => string;
+  logSummary: string;
+  logEvidence: string;
+  crashReport: string;
+  gameLog: string;
   noneFound: string;
 }

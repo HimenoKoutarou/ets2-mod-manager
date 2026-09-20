@@ -102,6 +102,10 @@ const copy: Record<Language, UiCopy> = {
     autosave: "自动保存",
     entriesSummary: (entries, cached, scanned) => `${entries} 条词条 · ${cached} 个缓存 · ${scanned} 个扫描`,
     issueSummary: (red, yellow) => `${red} 个严重 · ${yellow} 个警告`,
+    logSummary: "日志分析",
+    logEvidence: "日志证据",
+    crashReport: "崩溃报告",
+    gameLog: "游戏日志",
     noneFound: "暂无结果",
   },
   en_US: {
@@ -205,6 +209,10 @@ const copy: Record<Language, UiCopy> = {
     autosave: "Autosave",
     entriesSummary: (entries, cached, scanned) => `${entries} entries · ${cached} cached · ${scanned} scanned`,
     issueSummary: (red, yellow) => `${red} critical · ${yellow} warnings`,
+    logSummary: "Log analysis",
+    logEvidence: "Log evidence",
+    crashReport: "Crash report",
+    gameLog: "Game log",
     noneFound: "No results",
   },
   ru_RU: {
@@ -308,6 +316,10 @@ const copy: Record<Language, UiCopy> = {
     autosave: "Автосохранение",
     entriesSummary: (entries, cached, scanned) => `Записей: ${entries} · кэш: ${cached} · сканировано: ${scanned}`,
     issueSummary: (red, yellow) => `Критических: ${red} · предупреждений: ${yellow}`,
+    logSummary: "Анализ журналов",
+    logEvidence: "Доказательства журнала",
+    crashReport: "Отчёт о сбое",
+    gameLog: "Игровой журнал",
     noneFound: "Результатов нет",
   },
 };

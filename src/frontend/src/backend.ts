@@ -93,6 +93,10 @@ export interface CrashPrecheck {
   redCount: number;
   yellowCount: number;
   issues: CrashIssue[];
+  logPath?: string;
+  crashPath?: string;
+  logSummary?: string;
+  logEvidence?: string[];
 }
 
 export interface BsiiSummary {
