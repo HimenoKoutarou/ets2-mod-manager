@@ -110,6 +110,33 @@ struct ModMediaDto {
     preview_url: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalModDeleteRequest {
+    profile_id: String,
+    package_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalModDeleteItem {
+    mod_id: String,
+    package_name: String,
+    display_name: String,
+    path: String,
+    status: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalModDeleteResult {
+    items: Vec<LocalModDeleteItem>,
+    deleted: usize,
+    skipped: usize,
+    failed: usize,
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct WorkshopCacheEntry {
     #[serde(default)]
@@ -6146,6 +6173,121 @@ fn mod_set_enabled(
 }
 
 #[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
+fn mod_delete_local(
+    request: LocalModDeleteRequest,
+    state: State<'_, BackendState>,
+) -> Result<LocalModDeleteResult, String> {
+    let backend = state
+        .inner
+        .lock()
+        .map_err(|_| "backend lock poisoned".to_string())?;
+    let profile = find_profile(&backend.paths, &request.profile_id).ok_or("Profile not found.")?;
+    if !profile.writable {
+        return Err("This profile is read-only.".into());
+    }
+
+    let active: HashSet<String> = active_for_profile(&profile)?
+        .into_iter()
+        .map(|value| canonical_package(&value))
+        .collect();
+    let db = open_db(&backend.database_path)?;
+    let mods = dedupe_mods(load_cached(&db)?);
+    let requested: HashSet<String> = request
+        .package_names
+        .iter()
+        .map(|value| canonical_package(value))
+        .collect();
+    let mod_root = normalize_path(&backend.paths.mod_root).to_lowercase();
+    let mut items = Vec::new();
+    let mut deleted = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+    let mut deleted_paths = Vec::new();
+
+    for row in mods {
+        if !requested.contains(&canonical_package(&row.package_name)) {
+            continue;
+        }
+        let path = PathBuf::from(&row.path);
+        let path_text = normalize_path(&path);
+        let parent = path.parent().map(normalize_path).unwrap_or_default();
+        let is_direct_child = parent.to_lowercase() == mod_root
+            && path.file_name().is_some()
+            && path_text.to_lowercase() != mod_root;
+        let base = LocalModDeleteItem {
+            mod_id: row.id.clone(),
+            package_name: row.package_name.clone(),
+            display_name: row.display_name.clone(),
+            path: path_text.clone(),
+            status: "skipped".into(),
+            message: String::new(),
+        };
+        if is_workshop(&row) || row.package_type.eq_ignore_ascii_case("workshop") {
+            skipped += 1;
+            items.push(LocalModDeleteItem { message: "Workshop Mod is protected.".into(), ..base });
+            continue;
+        }
+        if active.contains(&canonical_package(&row.package_name)) {
+            skipped += 1;
+            items.push(LocalModDeleteItem { message: "Enabled Mod is protected.".into(), ..base });
+            continue;
+        }
+        if !is_direct_child {
+            skipped += 1;
+            items.push(LocalModDeleteItem { message: "Path is outside the local Mod directory.".into(), ..base });
+            continue;
+        }
+        if !path.exists() {
+            failed += 1;
+            items.push(LocalModDeleteItem { status: "failed".into(), message: "Mod path does not exist.".into(), ..base });
+            continue;
+        }
+        let result = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => {
+                deleted += 1;
+                deleted_paths.push(path_text);
+                items.push(LocalModDeleteItem { status: "deleted".into(), message: "Deleted.".into(), ..base });
+            }
+            Err(error) => {
+                failed += 1;
+                items.push(LocalModDeleteItem { status: "failed".into(), message: format!("Delete failed: {error}"), ..base });
+            }
+        }
+    }
+
+    if !deleted_paths.is_empty() {
+        let _guard = DB_WRITE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "database write lock poisoned".to_string())?;
+        let mut connection = open_db(&backend.database_path)?;
+        let tx = connection
+            .transaction()
+            .map_err(|error| format!("start delete index transaction failed: {error}"))?;
+        for path in &deleted_paths {
+            tx.execute("DELETE FROM mod_package_v2 WHERE path = ?1", params![path])
+                .map_err(|error| format!("delete mod index failed: {error}"))?;
+            tx.execute("DELETE FROM mod_package_header_state WHERE path = ?1", params![path])
+                .ok();
+            tx.execute("DELETE FROM mod_metadata_state WHERE path = ?1", params![path])
+                .ok();
+            tx.execute("DELETE FROM mod_media_cache WHERE path = ?1", params![path])
+                .ok();
+            tx.execute("DELETE FROM mod_media_cache_meta WHERE path = ?1", params![path])
+                .ok();
+        }
+        tx.commit()
+            .map_err(|error| format!("commit delete mod index failed: {error}"))?;
+    }
+    Ok(LocalModDeleteResult { items, deleted, skipped, failed })
+}
+
+#[cfg_attr(feature = "desktop", tauri::command(rename_all = "camelCase"))]
 fn mod_move(request: MoveRequest, state: State<'_, BackendState>) -> Result<SaveResult, String> {
     let backend = state
         .inner
@@ -7748,6 +7890,7 @@ pub fn run() {
             category_list,
             category_mutate,
             mod_set_enabled,
+            mod_delete_local,
             mod_move,
             mod_open_location,
             profile_open_location,

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type ModBackend, type ModMedia, type PresetRecord, type SaveInventory, type SaveMutation, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
+import { createBackend, type CategoryMutation, type CategorySnapshot, type CrashPrecheck, type LocalizationEntry, type LocalizationScan, type LocalModDeleteResult, type ModBackend, type ModMedia, type PresetRecord, type SaveInventory, type SaveMutation, type SaveSnapshot, type ScanSummary, type UpdateDownload, type UpdateInfo } from "./backend";
 import { ALL_CATEGORIES, batchEnabled, moveBatch, type BatchAction, type MoveDirection } from "./modBatch";
 import { getCopy } from "./i18n";
 import { createMediaLoader, mediaKey } from "./modMedia";
@@ -217,6 +217,19 @@ export const fixtureBackend: ModBackend = {
     return { total: initialMods.length, added: 0, updated: 0, removed: 0, inspected: 0, elapsedMs: 350 };
   },
   cancelScan: async () => undefined,
+  deleteLocalMods: async (_profileId, packageNames): Promise<LocalModDeleteResult> => ({
+    items: packageNames.map((packageName) => ({
+      modId: packageName,
+      packageName,
+      displayName: packageName,
+      path: `fixture://${packageName}`,
+      status: "deleted",
+      message: "Deleted.",
+    })),
+    deleted: packageNames.length,
+    skipped: 0,
+    failed: 0,
+  }),
   cancelLocalization: async () => undefined,
   getLocalizationBase: async () => null,
   pickLocalizationBase: async () => null,
@@ -341,6 +354,7 @@ interface ModState {
   loadSelectedModMedia: () => Promise<void>;
   loadModMedia: (id: string) => Promise<void>;
   openModLocation: (id: string) => Promise<void>;
+  deleteMods: (ids: string[]) => Promise<void>;
   openProfileLocation: (id: string) => Promise<void>;
   moveMod: (id: string, targetIndex: number) => void;
   scan: () => Promise<void>;
@@ -793,6 +807,32 @@ export const useModStore = create<ModState>((set, get) => ({
   openModLocation: async (id) => {
     const mod = get().mods.find((candidate) => candidate.id === id);
     if (mod) await backend.openModLocation(mod);
+  },
+  deleteMods: async (ids) => {
+    const { selectedProfileId, mods, categoryState } = get();
+    if (!selectedProfileId || !ids.length || !canEditMods(get())) return;
+    const packageNames = ids
+      .map((id) => mods.find((mod) => mod.id === id))
+      .filter((mod): mod is ModRecord => Boolean(mod && mod.source === "local" && !mod.enabled))
+      .map((mod) => mod.packageName);
+    if (!packageNames.length) return;
+    set({ loading: true, error: "" });
+    try {
+      const result = await backend.deleteLocalMods(selectedProfileId, packageNames);
+      if (get().selectedProfileId !== selectedProfileId) return;
+      const refreshed = applyCategories(await backend.listMods(selectedProfileId), categoryState);
+      set({
+        mods: refreshed,
+        selectedModIds: [],
+        selectedModId: refreshed[0]?.id ?? null,
+        dirty: false,
+        error: getCopy(get().language).deleteLocalSummary(result.deleted, result.skipped, result.failed),
+      });
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      set({ loading: false });
+    }
   },
   openProfileLocation: async (id) => {
     const profile = get().profiles.find((candidate) => candidate.id === id);

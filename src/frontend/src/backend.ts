@@ -10,6 +10,22 @@ export interface ScanSummary {
   elapsedMs: number;
 }
 
+export interface LocalModDeleteItem {
+  modId: string;
+  packageName: string;
+  displayName: string;
+  path: string;
+  status: "deleted" | "skipped" | "failed";
+  message: string;
+}
+
+export interface LocalModDeleteResult {
+  items: LocalModDeleteItem[];
+  deleted: number;
+  skipped: number;
+  failed: number;
+}
+
 export interface ScanProgress {
   phase: "cache" | "local" | "workshop" | "metadata" | "cached" | "persist" | "media" | "complete";
   current: number;
@@ -247,6 +263,7 @@ export interface ModBackend {
   mutateSaveObject(path: string, structureName: string, objectIndex: number, fieldName: string, value: number): Promise<SaveMutation>;
   scan(): Promise<ScanSummary>;
   cancelScan(): Promise<void>;
+  deleteLocalMods(profileId: string, packageNames: string[]): Promise<LocalModDeleteResult>;
   saveProfile(profileId: string, mods: ModRecord[]): Promise<void>;
   launchGame(): Promise<void>;
   openModLocation(mod: ModRecord): Promise<void>;
@@ -343,6 +360,11 @@ const tauriBackend: ModBackend = {
   },
   cancelScan() {
     return invoke<void>("mod_cancel");
+  },
+  deleteLocalMods(profileId, packageNames) {
+    return invoke<LocalModDeleteResult>("mod_delete_local", {
+      request: { profileId, packageNames },
+    });
   },
   async saveProfile(profileId, mods) {
     const activeMods = mods.filter((mod) => mod.enabled).map((mod) => mod.packageName).reverse();

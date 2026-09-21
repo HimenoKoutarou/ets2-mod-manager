@@ -52,6 +52,8 @@ button { color: inherit; }
 .button-primary:hover:not(:disabled) { background: #1d4ed8; border-color: #1d4ed8; }
 .button-warning { background: #f59e0b; border-color: #d97706; color: #ffffff; font-weight: 600; }
 .button-warning:hover:not(:disabled) { background: #d97706; border-color: #b45309; }
+.button-danger { color: #b42318; border-color: #f0a4a4; background: #fff7f6; }
+.button-danger:hover:not(:disabled), .context-danger:hover:not(:disabled) { background: #fff1f1; border-color: #d92d20; color: #b42318; }
 .button-quiet { background: transparent; border-color: transparent; color: #475467; }
 .button-small { min-height: 29px; padding: 0 9px; font-size: 12px; }
 .language-picker { height: 32px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid #cbd5e1; border-radius: 5px; color: #667085; background: #ffffff; }
@@ -235,6 +237,7 @@ button { color: inherit; }
 .mod-context-menu button { width: 100%; display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: #172033; font-size: 12px; text-align: left; cursor: pointer; }
 .mod-context-menu button:hover:not(:disabled) { background: #eff6ff; color: #1d4ed8; }
 .mod-context-menu button:disabled { color: #a8b2c1; cursor: default; }
+.mod-context-menu .context-danger { color: #b42318; }
 .mod-context-menu button svg:last-child { margin-left: auto; }
 .context-menu-group { position: relative; }
 .localization-base-control { display: grid; gap: 6px; margin: 10px 0; padding: 8px; border: 1px solid #e1e8f2; border-radius: 5px; background: #f8fbff; }

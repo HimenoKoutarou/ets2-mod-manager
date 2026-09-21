@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  Trash2,
   FolderInput,
   ExternalLink,
   Sparkles,
@@ -168,6 +169,7 @@ function App() {
     loadSelectedModMedia,
     loadModMedia,
     openModLocation,
+    deleteMods,
     openProfileLocation,
     scan,
     cancelScan,
@@ -398,6 +400,11 @@ function App() {
   const batchIdSet = new Set(batchIds);
   const canBatch = selectedProfile.writable !== false && !!selectedProfileId && !loading && batchIds.length > 0;
   const canMove = canBatch && mods.some((mod) => mod.enabled && batchIdSet.has(mod.id));
+  const deletableIds = batchIds.filter((id) => {
+    const mod = mods.find((candidate) => candidate.id === id);
+    return mod?.source === "local" && !mod.enabled;
+  });
+  const canDelete = selectedProfile.writable !== false && !loading && deletableIds.length > 0;
   const formatSaveDate = (value: number) =>
     value > 0
       ? new Intl.DateTimeFormat(language.replace("_", "-"), {
@@ -1068,6 +1075,16 @@ function App() {
             <button className="button button-small" onClick={() => batchMods(batchIds, "enable")} disabled={!canBatch}><Check size={14} />{categoryText.enable}</button>
             <button className="button button-small" onClick={() => batchMods(batchIds, "disable")} disabled={!canBatch}><X size={14} />{categoryText.disable}</button>
             <button className="icon-button" title={categoryText.invert} aria-label={categoryText.invert} onClick={() => batchMods(batchIds, "invert")} disabled={!canBatch}><CheckSquare size={16} /></button>
+            <button
+              className="button button-small button-danger"
+              disabled={!canDelete}
+              title={text.deleteLocal}
+              onClick={() => {
+                if (window.confirm(text.deleteLocalConfirm(deletableIds.length))) void deleteMods(deletableIds);
+              }}
+            >
+              <Trash2 size={14} />{text.deleteLocal}
+            </button>
             <span className="toolbar-divider" />
             <label className="category-assign"><FolderInput size={16} /><select aria-label={categoryText.assign} value="" disabled={categoryBusy || loading || scanning || !batchIds.length} onChange={(event) => {
               if (event.target.value) void mutateCategory({ operation: "assign", name: event.target.value === "\0none" ? "" : event.target.value, modIds: batchIds });
@@ -1161,6 +1178,16 @@ function App() {
             <button onClick={() => { batchMods([contextMod.id], "enable"); setContextMenu(null); }} disabled={contextMod.enabled}><Check size={14} />{categoryText.enable}</button>
             <button onClick={() => { batchMods([contextMod.id], "disable"); setContextMenu(null); }} disabled={!contextMod.enabled}><X size={14} />{categoryText.disable}</button>
             <button onClick={() => { void openModLocation(contextMod.id); setContextMenu(null); }}><FolderOpen size={14} />{contextMod.source === "workshop" ? text.openWorkshop : text.openLocation}</button>
+            <button
+              className="context-danger"
+              disabled={contextMod.source !== "local" || contextMod.enabled || loading || selectedProfile.writable === false}
+              onClick={() => {
+                if (window.confirm(text.deleteLocalConfirm(1))) {
+                  void deleteMods([contextMod.id]);
+                  setContextMenu(null);
+                }
+              }}
+            ><Trash2 size={14} />{text.deleteLocal}</button>
             <div className="context-menu-group">
               <button onClick={() => { setContextCategoryOpen((value) => !value); setContextMoveOpen(false); }}><FolderInput size={14} />{categoryText.assign}<ChevronDown size={13} /></button>
               {contextCategoryOpen && <div className="context-submenu">

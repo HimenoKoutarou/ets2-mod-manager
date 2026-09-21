@@ -110,6 +110,9 @@ export interface UiCopy {
   sourceWorkshop: string;
   openLocation: string;
   openWorkshop: string;
+  deleteLocal: string;
+  deleteLocalConfirm: (count: number) => string;
+  deleteLocalSummary: (deleted: number, skipped: number, failed: number) => string;
   source: string;
   name: string;
   package: string;
