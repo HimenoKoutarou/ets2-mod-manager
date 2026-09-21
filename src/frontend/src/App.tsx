@@ -345,11 +345,19 @@ function App() {
   const selectedMod = mods.find((mod) => mod.id === selectedModId) ?? null;
   const contextMod = contextMenu ? mods.find((mod) => mod.id === contextMenu.modId) ?? null : null;
   const contextProfile = profileContextMenu ? profiles.find((profile) => profile.id === profileContextMenu.profileId) ?? null : null;
-  async function openProfilePanel(profileId: string, panel: "saves" | "localization" | "diagnostics") {
+  async function openProfilePanel(profileId: string, panel: "save" | "localization" | "diagnostics") {
     await selectProfile(profileId);
-    setActivePage(panel === "localization" ? "localization" : "mods");
-    setSecondaryPanel(panel);
-    if (panel === "diagnostics") await runDiagnostics();
+    if (panel === "localization") {
+      setActivePage("localization");
+      setSecondaryPanel("localization");
+    } else if (panel === "save") {
+      setActivePage("save");
+      setSecondaryPanel("none");
+    } else {
+      setActivePage("mods");
+      setSecondaryPanel("diagnostics");
+      await runDiagnostics();
+    }
   }
   useEffect(() => {
     if (selectedMod) void loadSelectedModMedia();
@@ -567,6 +575,9 @@ function App() {
           </button>
           <button className={activePage === "profiles" ? "is-active" : ""} onClick={() => setActivePage("profiles")}>
             <FolderOpen size={15} />{text.profilePage}
+          </button>
+          <button className={activePage === "save" ? "is-active" : ""} onClick={() => { setActivePage("save"); setSecondaryPanel("none"); }}>
+            <FolderOpen size={15} />{text.saves}
           </button>
           <button className={activePage === "localization" ? "is-active" : ""} onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); }}>
             <Sparkles size={15} />{text.localization}
@@ -944,7 +955,7 @@ function App() {
               <section className="profile-info-panel">
                 <div className="section-heading"><span>{text.profileActions}</span></div>
                 <div className="profile-action-list">
-                  <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("saves"); }}><FolderOpen size={15} />{text.saves}</button>
+                  <button className="button" onClick={() => { setActivePage("save"); setSecondaryPanel("none"); }}><FolderOpen size={15} />{text.saves}</button>
                   <button className="button" onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); }}><Sparkles size={15} />{text.localization}</button>
                   <button className="button" onClick={() => { setActivePage("mods"); setSecondaryPanel("diagnostics"); void runDiagnostics(); }}><LayoutGrid size={15} />{text.diagnostics}</button>
                 </div>
@@ -995,7 +1006,7 @@ function App() {
             <button className={`secondary-item ${secondaryPanel === "diagnostics" ? "is-selected" : ""}`} onClick={() => { setSecondaryPanel("diagnostics"); void runDiagnostics(); }}>
               <LayoutGrid size={15} />{text.diagnostics}<span className="secondary-count">{diagnostics?.redCount ?? 0}</span>
             </button>
-            <button className={`secondary-item ${secondaryPanel === "saves" ? "is-selected" : ""}`} onClick={() => setSecondaryPanel(secondaryPanel === "saves" ? "none" : "saves")}>
+            <button className="secondary-item" onClick={() => { setActivePage("save"); setSecondaryPanel("none"); }}>
               <FolderOpen size={15} />{text.saves}<span className="secondary-count">{saves.length}</span>
             </button>
             <button className="secondary-item" disabled><Wrench size={15} />{text.tools}</button>
@@ -1357,7 +1368,7 @@ function App() {
             <LayoutGrid size={14} />{text.profileOpenMods}
           </button>
           <div className="context-menu-group">
-            <button onClick={() => { void openProfilePanel(contextProfile.id, "saves"); setProfileContextMenu(null); }}>
+            <button onClick={() => { void openProfilePanel(contextProfile.id, "save"); setProfileContextMenu(null); }}>
               <FolderOpen size={14} />{text.profileOpenSaves}
             </button>
             <button onClick={() => { void openProfilePanel(contextProfile.id, "localization"); setProfileContextMenu(null); }}>
