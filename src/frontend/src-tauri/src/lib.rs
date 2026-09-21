@@ -2216,11 +2216,26 @@ fn directory_info_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u
                 .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
                 .map(|value| value.as_millis() as u64)
                 .unwrap_or_default();
-            files.push((relative, metadata.len(), modified));
+            // Metadata timestamps on Windows can have coarse granularity, so
+            // a same-size rewrite may otherwise look unchanged to the
+            // incremental scanner. Include the small metadata file contents
+            // in the fingerprint while keeping the scan limited to the
+            // manifest/info files we actually use.
+            let content_fingerprint = fs::read(&current)
+                .map(|content| {
+                    let mut value = 1469598103934665603u64;
+                    for byte in content {
+                        value ^= byte as u64;
+                        value = value.wrapping_mul(1099511628211);
+                    }
+                    value
+                })
+                .unwrap_or_default();
+            files.push((relative, metadata.len(), modified, content_fingerprint));
         }
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    for (relative, size, modified) in files {
+    for (relative, size, modified, content_fingerprint) in files {
         for byte in relative.bytes() {
             fingerprint ^= byte as u64;
             fingerprint = fingerprint.wrapping_mul(1099511628211);
@@ -2228,6 +2243,8 @@ fn directory_info_signature(path: &Path, cancelled: &AtomicBool) -> (u64, i64, u
         fingerprint ^= size;
         fingerprint = fingerprint.wrapping_mul(1099511628211);
         fingerprint ^= modified;
+        fingerprint = fingerprint.wrapping_mul(1099511628211);
+        fingerprint ^= content_fingerprint;
         fingerprint = fingerprint.wrapping_mul(1099511628211);
     }
     (total_size, latest_modified, fingerprint)
