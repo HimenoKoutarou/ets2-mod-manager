@@ -103,6 +103,17 @@ button { color: inherit; }
 .localization-empty { min-height: 220px; }
 .profile-page { flex: 1; min-height: 0; overflow: auto; background: #f5f8fc; padding: 28px; }
 .profile-page-main { max-width: 1180px; margin: 0 auto; }
+.profile-tools-shell { display: flex; align-items: stretch; gap: 18px; max-width: 1380px; min-height: 100%; margin: 0 auto; }
+.profile-tools-sidebar { flex: 0 0 214px; align-self: flex-start; display: flex; flex-direction: column; gap: 6px; padding: 14px; border: 1px solid #d9e2ef; border-radius: 8px; background: #ffffff; box-shadow: 0 2px 8px rgba(30, 64, 175, .05); }
+.profile-tools-title { padding: 2px 8px 10px; color: #172033; font-size: 13px; font-weight: 800; }
+.profile-tools-picker { display: grid; gap: 5px; margin: 0 0 8px; padding: 9px; border: 1px solid #e5ebf3; border-radius: 6px; background: #f8fafc; }
+.profile-tools-picker span { color: #667085; font-size: 10px; font-weight: 700; }
+.profile-tools-picker select { min-width: 0; border: 0; outline: 0; background: transparent; color: #172033; font-size: 12px; font-weight: 700; }
+.profile-tool-item { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: #667085; cursor: pointer; text-align: left; font-size: 12px; }
+.profile-tool-item:hover { background: #eff6ff; color: #1d4ed8; }
+.profile-tool-item.is-active { background: #2563eb; color: #ffffff; }
+.profile-tool-item span { margin-left: auto; font-size: 11px; opacity: .8; }
+.profile-tools-shell > .profile-page-main, .profile-tools-shell > .save-editor-main { flex: 1; min-width: 0; max-width: none; }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 22px; }
 .profile-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
 .profile-card { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 15px; border: 1px solid #d9e2ef; border-radius: 7px; background: #ffffff; color: #172033; text-align: left; cursor: pointer; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
@@ -437,5 +448,7 @@ img.mod-badge { object-fit: cover; }
   .page-nav { margin-right: 10px; }
   .profile-page { padding: 20px; }
   .save-editor-page { padding: 20px; }
+  .profile-tools-shell { flex-direction: column; }
+  .profile-tools-sidebar { flex-basis: auto; }
   .save-editor-layout { grid-template-columns: 240px minmax(0, 1fr); }
 }

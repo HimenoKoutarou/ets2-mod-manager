@@ -576,9 +576,6 @@ function App() {
           <button className={activePage === "profiles" ? "is-active" : ""} onClick={() => setActivePage("profiles")}>
             <FolderOpen size={15} />{text.profilePage}
           </button>
-          <button className={activePage === "save" ? "is-active" : ""} onClick={() => { setActivePage("save"); setSecondaryPanel("none"); }}>
-            <FolderOpen size={15} />{text.saves}
-          </button>
           <button className={activePage === "localization" ? "is-active" : ""} onClick={() => { setActivePage("localization"); setSecondaryPanel("localization"); }}>
             <Sparkles size={15} />{text.localization}
           </button>
@@ -716,13 +713,24 @@ function App() {
         </main>
       ) : activePage === "save" ? (
         <main className="save-editor-page">
-          <section className="save-editor-main">
+          <div className="profile-tools-shell">
+            <aside className="profile-tools-sidebar">
+              <div className="profile-tools-title">{text.profilePage}</div>
+              <label className="profile-tools-picker">
+                <span>{text.profiles}</span>
+                <select value={selectedProfileId} onChange={(event) => { if (event.target.value) void selectProfile(event.target.value); }}>
+                  {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+                </select>
+              </label>
+              <button className="profile-tool-item" onClick={() => setActivePage("profiles")}><FolderOpen size={16} />{text.profileOverview}</button>
+              <button className="profile-tool-item is-active"><Save size={16} />{text.saves}<span>{saves.length}</span></button>
+            </aside>
+            <section className="save-editor-main">
             <div className="page-heading">
               <div>
                 <div className="panel-title">{text.saves}</div>
                 <div className="panel-subtitle">{selectedProfile.name} · {text.saveCount(saves.length)}</div>
               </div>
-              <button className="button" onClick={() => setActivePage("profiles")}><ArrowLeft size={16} />{text.profilePage}</button>
             </div>
             <div className="save-editor-layout">
               <section className="save-browser-panel">
@@ -902,11 +910,24 @@ function App() {
                 )}
               </section>
             </div>
-          </section>
+            </section>
+          </div>
         </main>
       ) : activePage === "profiles" ? (
         <main className="profile-page">
-          <section className="profile-page-main">
+          <div className="profile-tools-shell">
+            <aside className="profile-tools-sidebar">
+              <div className="profile-tools-title">{text.profilePage}</div>
+              <label className="profile-tools-picker">
+                <span>{text.profiles}</span>
+                <select value={selectedProfileId} onChange={(event) => { if (event.target.value) void selectProfile(event.target.value); }}>
+                  {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+                </select>
+              </label>
+              <button className="profile-tool-item is-active"><FolderOpen size={16} />{text.profileOverview}</button>
+              <button className="profile-tool-item" onClick={() => { setActivePage("save"); setSecondaryPanel("none"); }}><Save size={16} />{text.saves}<span>{saves.length}</span></button>
+            </aside>
+            <section className="profile-page-main">
             <div className="page-heading">
               <div>
                 <div className="panel-title">{text.profileOverview}</div>
@@ -963,7 +984,8 @@ function App() {
                 <div className="profile-stat-line"><span>{text.presetPlaceholder}</span><strong>{text.profilePresetCount(Object.keys(presets).length)}</strong></div>
               </section>
             </div>
-          </section>
+            </section>
+          </div>
         </main>
       ) : (
       <main className="workspace">
